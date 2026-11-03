@@ -182,3 +182,96 @@ def diff_entries(old: Iterable[Entry], new: Iterable[Entry]) -> dict:
     return classify_changes({p: d for p, d in b.items() if p not in a},
                             {p: d for p, d in a.items() if p not in b},
                             [p for p, d in b.items() if p in a and a[p] != d])
+
+
+# --- batch transfer ------------------------------------------------------------------------------------
+# Many small objects in one HTTP body, so that a folder of 200k small files is not 200k requests:
+#
+#     fw-objects 1\n
+#     <sha256> <size>\n<size bytes>
+#     <sha256> <size>\n<size bytes>
+#     ...
+#
+# Every object is still checked against its own hash by whoever receives it. Objects larger than
+# BATCH_OBJECT_MAX travel one per request instead.
+OBJECTS_MAGIC = b'fw-objects 1\n'
+OBJECTS_TYPE = 'application/x-fw-objects'
+BATCH_OBJECT_MAX = 16 << 20
+_FRAME = re.compile(rb'([0-9a-f]{64}) (0|[1-9][0-9]{0,17})\n')
+_FRAME_MAX = 64 + 1 + 18 + 1
+
+
+def frame_header(digest: str, size: int) -> bytes:
+    return f'{digest} {size}\n'.encode('ascii')
+
+
+class FrameParser:
+    """Incremental reader of an fw-objects body: feed() it the bytes as they arrive, get back the objects
+    completed so far as (sha256, data); finish() raises if the body stopped in the middle of an object."""
+
+    def __init__(self, max_object: int = BATCH_OBJECT_MAX):
+        self.max_object = max_object
+        self.buf = bytearray()
+        self.pos = 0
+        self.magic = False
+        self.digest = None
+        self.need = 0
+        self.count = 0
+
+    def feed(self, data: bytes) -> List[Tuple[str, bytes]]:
+        if self.pos:
+            del self.buf[:self.pos]  # compact once per call, so parsing stays linear in the body size
+            self.pos = 0
+        self.buf += data
+        out: List[Tuple[str, bytes]] = []
+        buf = self.buf
+        while True:
+            if not self.magic:
+                if len(buf) - self.pos < len(OBJECTS_MAGIC):
+                    break
+                if bytes(buf[self.pos:self.pos + len(OBJECTS_MAGIC)]) != OBJECTS_MAGIC:
+                    raise ContractError('传输内容不是 fw-objects 1 格式')
+                self.pos += len(OBJECTS_MAGIC)
+                self.magic = True
+            elif self.digest is None:
+                end = buf.find(b'\n', self.pos, self.pos + _FRAME_MAX)
+                if end < 0:
+                    if len(buf) - self.pos >= _FRAME_MAX:
+                        raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不对')
+                    break
+                m = _FRAME.fullmatch(bytes(buf[self.pos:end + 1]))
+                if m is None:
+                    raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不对')
+                self.need = int(m.group(2))
+                if self.need > self.max_object:
+                    raise ContractError(f'传输内容里的文件超过 {self.max_object >> 20} MB，要单独传')
+                self.digest = m.group(1).decode('ascii')
+                self.pos = end + 1
+            else:
+                if len(buf) - self.pos < self.need:
+                    break
+                out.append((self.digest, bytes(buf[self.pos:self.pos + self.need])))
+                self.pos += self.need
+                self.digest = None
+                self.count += 1
+        return out
+
+    def finish(self) -> None:
+        if not self.magic or self.digest is not None or len(self.buf) > self.pos:
+            raise ContractError('传输内容不完整')
+
+
+def batches(objects: Iterable[Tuple[str, int]], max_count: int, max_bytes: int) -> List[List[Tuple[str, int]]]:
+    """Split (sha256, size) pairs into lists of at most max_count objects and about max_bytes."""
+    out: List[List[Tuple[str, int]]] = []
+    current: List[Tuple[str, int]] = []
+    total = 0
+    for digest, size in objects:
+        if current and (len(current) >= max_count or total + size > max_bytes):
+            out.append(current)
+            current, total = [], 0
+        current.append((digest, size))
+        total += size
+    if current:
+        out.append(current)
+    return out

@@ -4,11 +4,12 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import BinaryIO, List, Optional, Tuple
+from pathlib import Path
+from typing import BinaryIO, Callable, List, Optional, Tuple
 
 import httpx
 
-from .contract import CHUNK
+from .contract import BATCH_OBJECT_MAX, CHUNK, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, frame_header
 
 SMALL_BODY = 32 * 1024 * 1024
 
@@ -87,6 +88,63 @@ class Api:
                 return self.http.put(f'/objects/{digest}', headers=dict(headers, **{'Content-Length': str(size)}),
                                      content=iter(lambda: f.read(CHUNK), b''))
         return self._json(_retry(send))['size']
+
+    def put_objects(self, items: List[Tuple[str, Path, int]]) -> int:
+        """Upload several small objects (sha256, path, size) in one request; the server checks each one
+        against its own hash. Returns the bytes sent."""
+        parts = [OBJECTS_MAGIC]
+        total = 0
+        for digest, path, size in items:
+            if size > BATCH_OBJECT_MAX:
+                raise ValueError('large objects go through put_file')
+            with open(path, 'rb') as f:
+                data = f.read(size + 1)
+            if len(data) != size:
+                raise ApiError(0, f'{path} 在算完哈希以后被改过（大小变了），等它不再变化后重新导入')
+            parts += [frame_header(digest, size), data]
+            total += size
+        body = b''.join(parts)
+        self._json(_retry(lambda: self.http.post('/objects/batch', content=body,
+                                                 headers={'Content-Type': OBJECTS_TYPE})))
+        return total
+
+    def fetch_objects(self, objects: List[Tuple[str, int]], on_object: Callable[[str, bytes], None]) -> None:
+        """Download several small objects (sha256, size) in one streamed response. on_object(sha256, data)
+        is called once per object, only after its size and hash were checked; after a network error the
+        objects not yet received are asked for again."""
+        expected = dict(objects)
+        remaining = [d for d, _ in objects]
+        delay = 1.0
+        for attempt in range(4):
+            parser = FrameParser(BATCH_OBJECT_MAX)
+            done = 0
+            try:
+                with self.http.stream('POST', '/objects/fetch', json={'objects': remaining}) as r:
+                    if r.status_code >= 400:
+                        r.read()
+                        self._json(r)
+                    for chunk in r.iter_bytes(CHUNK):
+                        for digest, data in parser.feed(chunk):
+                            if done >= len(remaining) or digest != remaining[done] \
+                                    or len(data) != expected[digest] or hashlib.sha256(data).hexdigest() != digest:
+                                raise ApiError(0, f'下载的文件 {digest[:12]} 和它的哈希对不上')
+                            on_object(digest, data)
+                            done += 1
+                parser.finish()
+            except httpx.TransportError:
+                remaining = remaining[done:]
+                if not remaining:
+                    return
+                if attempt == 3:
+                    raise
+                time.sleep(delay)
+                delay *= 2
+                continue
+            except ContractError as e:
+                raise ApiError(0, f'下载内容格式不对：{e}') from None
+            if done != len(remaining):
+                raise ApiError(0, f'下载不完整：还差 {len(remaining) - done} 个文件')
+            return
 
     def put_bytes(self, data: bytes) -> str:
         digest = hashlib.sha256(data).hexdigest()

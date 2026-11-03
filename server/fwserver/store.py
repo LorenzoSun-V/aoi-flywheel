@@ -101,6 +101,22 @@ class Store:
         w.write(data)
         return digest, w.commit()
 
+    def put_verified(self, digest: str, data: bytes) -> bool:
+        """Store one object received whole (batch uploads). The hash is checked before anything is written;
+        returns True if the object is new or repaired. The caller checks check_writable() once per batch."""
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise BadContent(f'上传的内容和哈希 {digest[:12]} 对不上（文件在传输中损坏，或上传期间被改过）')
+        fd, tmp = tempfile.mkstemp(dir=self.tmp, prefix=digest[:16] + '.')
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+            return self.install(digest, Path(tmp))
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+
     def install(self, digest: str, tmp: Path) -> bool:
         """Give the verified temporary file `tmp` its final name. Returns False if an intact object with
         that hash was already there; a damaged one (wrong size or content) is replaced."""

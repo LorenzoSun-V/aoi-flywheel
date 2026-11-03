@@ -8,9 +8,11 @@ from contextlib import asynccontextmanager
 from typing import List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+
+from fw.contract import BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, frame_header
 
 from . import __version__, auth, datasets, db
 from .datasets import DatasetError, check_digest
@@ -21,10 +23,18 @@ log = logging.getLogger('fwserver')
 DATA_ROLES = ('admin', 'algo')  # step 1: only these roles see or change datasets (design doc, roles table)
 MISSING_LIMIT = 20000
 BUFFER = 1 << 20
+BATCH_BODY_MAX = 512 << 20   # one batch upload request
+FETCH_LIMIT = 5000           # objects per batch download request
+FETCH_BYTES_MAX = 512 << 20
+STORE_GROUP = 4 << 20        # batch uploads are written to the store in groups of about this many bytes
 
 
 class MissingBody(BaseModel):
     objects: List[Tuple[str, int]] = Field(max_length=MISSING_LIMIT)  # (sha256, size)
+
+
+class FetchBody(BaseModel):
+    objects: List[str] = Field(max_length=FETCH_LIMIT)
 
 
 class DatasetBody(BaseModel):
@@ -149,6 +159,77 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         finally:
             await run_in_threadpool(writer.abort)
         return {'sha256': digest, 'size': writer.size, 'created': created}
+
+    @app.post('/api/v1/objects/batch')
+    async def put_objects(request: Request, user: dict = Depends(data_user)):
+        """Many small objects in one fw-objects body (fw.contract); each one is checked against its own hash.
+        Objects before a bad one stay stored (they are content-addressed, so that is harmless)."""
+        length = request.headers.get('content-length')
+        if length is None or not length.isdigit():
+            raise HTTPException(411, '上传需要 Content-Length')
+        if int(length) > BATCH_BODY_MAX:
+            raise HTTPException(413, f'一次批量上传不能超过 {BATCH_BODY_MAX >> 20} MB')
+        store.check_writable()
+        parser = FrameParser(BATCH_OBJECT_MAX)
+        group, group_bytes = [], 0
+        stored = created = received = 0
+
+        def put_group(objects):
+            return sum(store.put_verified(d, data) for d, data in objects)
+
+        try:
+            async for chunk in request.stream():
+                received += len(chunk)
+                for digest, data in parser.feed(chunk):
+                    group.append((digest, data))
+                    group_bytes += len(data)
+                    if group_bytes >= STORE_GROUP or len(group) >= 512:
+                        created += await run_in_threadpool(put_group, group)
+                        stored += len(group)
+                        group, group_bytes = [], 0
+            if received != int(length):
+                raise HTTPException(400, '上传不完整')
+            parser.finish()
+            if group:
+                created += await run_in_threadpool(put_group, group)
+                stored += len(group)
+        except ContractError as e:
+            raise HTTPException(400, str(e)) from None
+        except BadContent as e:
+            raise HTTPException(400, str(e)) from None
+        return {'stored': stored, 'created': created}
+
+    @app.post('/api/v1/objects/fetch')
+    def fetch_objects(body: FetchBody, user: dict = Depends(data_user)):
+        """Many small objects in one streamed fw-objects body, in the order asked for."""
+        digests = [check_digest(d) for d in body.objects]
+        sizes = [store.size(d) for d in digests]
+        missing = [d for d, s in zip(digests, sizes) if s is None]
+        if missing:
+            raise HTTPException(404, f'服务器上没有 {len(missing)} 个文件，例如 {missing[0][:12]}')
+        if any(s > BATCH_OBJECT_MAX for s in sizes):
+            raise HTTPException(400, f'超过 {BATCH_OBJECT_MAX >> 20} MB 的文件要单独下载')
+        total = sum(sizes)
+        if total > FETCH_BYTES_MAX:
+            raise HTTPException(413, f'一次批量下载不能超过 {FETCH_BYTES_MAX >> 20} MB')
+        headers = [frame_header(d, s) for d, s in zip(digests, sizes)]
+        length = len(OBJECTS_MAGIC) + sum(len(h) for h in headers) + total
+
+        def stream():
+            out = bytearray(OBJECTS_MAGIC)
+            for digest, size, head in zip(digests, sizes, headers):
+                data = store.read(digest)
+                if data is None or len(data) != size:  # quarantined or repaired meanwhile: cut the response short
+                    raise RuntimeError(f'object {digest} changed while it was being sent')
+                out += head
+                out += data
+                if len(out) >= BUFFER:
+                    yield bytes(out)
+                    out = bytearray()
+            if out:
+                yield bytes(out)
+
+        return StreamingResponse(stream(), media_type=OBJECTS_TYPE, headers={'Content-Length': str(length)})
 
     @app.get('/api/v1/objects/{digest}')
     def get_object(digest: str, user: dict = Depends(data_user)):

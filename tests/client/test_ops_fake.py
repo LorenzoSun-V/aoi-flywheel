@@ -7,6 +7,7 @@ import pytest
 
 from helpers import read_tree, write
 from fakeapi import FakeApi
+from fw import cache as fw_cache
 from fw import ops
 from fw.cache import Cache
 from fw.layout import Layout, hash_file
@@ -186,3 +187,47 @@ def test_someone_else_added_a_version_meanwhile(tmp_path, api):
 
     with pytest.raises(Exception, match='变化'):
         ops.import_folder(api, 'SES-TX', src, confirm=sneak, echo=quiet)
+
+
+def test_small_files_travel_in_batches_and_large_ones_alone(tmp_path, api, cache, monkeypatch):
+    monkeypatch.setattr(ops, 'UPLOAD_COUNT', 3)
+    monkeypatch.setattr(fw_cache, 'FETCH_COUNT', 3)
+    monkeypatch.setattr(ops, 'BATCH_OBJECT_MAX', 500)
+    monkeypatch.setattr(fw_cache, 'BATCH_OBJECT_MAX', 500)
+    files = {f'{i}.bmp': bytes([i]) * 10 for i in range(5)}
+    files.update({f'{i}.json': b'{"i": %d}' % i for i in range(5)})
+    files.update({'big.bmp': b'B' * 1000, 'big.json': b'{}'})
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', files), echo=quiet)
+    assert (api.batch_uploads, api.uploads) == (4, 12)  # 11 small files in batches of 3, the big one alone
+    ops.get(api, cache, 'SES-TX@1', tmp_path / 'out', echo=quiet)
+    assert read_tree(tmp_path / 'out') == files
+    assert (api.batch_downloads, api.downloads) == (4, 12)
+
+
+def test_bad_object_in_a_batch_download(tmp_path, api, cache):
+    files = {f'{i}.bmp': bytes([i]) * 50 for i in range(6)}
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', files), echo=quiet)
+    digests = sorted(hash_file(tmp_path / 'v1' / rel) for rel in files)
+    bad = digests[3]
+    api.corrupt_next_download.add(bad)
+    with pytest.raises(Exception, match='哈希对不上'):
+        ops.get(api, cache, 'SES-TX@1', tmp_path / 'out1', workers=1, echo=quiet)
+    assert cache.cached(bad) is None and not cache.object_path(bad).exists()
+    assert all(cache.cached(d) for d in digests[:3])  # objects that arrived intact before it are kept
+    before = api.downloads
+    ops.get(api, cache, 'SES-TX@1', tmp_path / 'out2', echo=quiet)
+    assert read_tree(tmp_path / 'out2') == files
+    assert api.downloads - before == 3
+
+
+@pytest.mark.parametrize('new_content, message', [(b'abcd', '改过'), (b'xyz', '哈希')])
+def test_file_changed_after_hashing_is_not_uploaded(tmp_path, api, new_content, message):
+    src = make_folder(tmp_path / 'v1', {'a.bmp': b'abc', 'a.json': b'{}'})
+
+    def change_then_confirm(prompt):
+        (src / 'a.bmp').write_bytes(new_content)
+        return True
+
+    with pytest.raises(Exception, match=message):
+        ops.import_folder(api, 'SES-TX', src, confirm=change_then_confirm, echo=quiet)
+    assert api.datasets['SES-TX'] == []

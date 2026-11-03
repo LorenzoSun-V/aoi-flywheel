@@ -15,6 +15,8 @@ class FakeApi:
         self.by_id = {}
         self.uploads = 0
         self.downloads = 0
+        self.batch_uploads = 0
+        self.batch_downloads = 0
         self.corrupt_next_download = set()
 
     # objects
@@ -29,6 +31,35 @@ class FakeApi:
         self.objects[digest] = data
         self.uploads += 1
         return len(data)
+
+    def put_objects(self, items):
+        self.batch_uploads += 1
+        total = 0
+        for digest, path, size in items:
+            with open(path, 'rb') as f:
+                data = f.read()
+            if len(data) != size:
+                raise ApiError(0, f'{path} 在算完哈希以后被改过（大小变了）')
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise ApiError(400, '上传的内容和哈希对不上')
+            self.objects[digest] = data
+            self.uploads += 1
+            total += size
+        return total
+
+    def fetch_objects(self, objects, on_object):
+        self.batch_downloads += 1
+        for digest, size in objects:
+            if digest not in self.objects:
+                raise ApiError(404, f'服务器上没有文件 {digest[:12]}')
+            data = self.objects[digest]
+            self.downloads += 1
+            if digest in self.corrupt_next_download:
+                self.corrupt_next_download.discard(digest)
+                data = b'X' + data[1:]
+            if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
+                raise ApiError(0, f'下载的文件 {digest[:12]} 和它的哈希对不上')
+            on_object(digest, data)
 
     def put_bytes(self, data):
         digest = hashlib.sha256(data).hexdigest()
