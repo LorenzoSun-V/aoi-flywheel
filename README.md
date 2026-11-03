@@ -1,6 +1,6 @@
 # aoi-flywheel
 
-数据飞轮平台的底座：数据集版本、模型版本、预标注（推理）。设计见[架构文档](https://claude.ai/artifact/A8f2NKVHhLEF295TwomviL)。
+数据飞轮平台的底座：数据集版本、模型版本、预标注（推理）。设计见[架构文档](docs/architecture.md)（[在线版](https://claude.ai/artifact/A8f2NKVHhLEF295TwomviL)）。
 
 分四步做，每步一个 PR：
 
@@ -21,7 +21,7 @@ server/      fw-server：接口、数据库表（numbered SQL 迁移）、文件
 deploy/      Dockerfile、docker-compose.yml、setup.sh、backup.sh、restore.sh
 tests/       client/（不需要服务，Windows 和 Python 3.8 也跑）、server/（真实服务 + PostgreSQL）
 tools/       bench.py（规模测速）、deploy-drill.sh（部署、在线备份、异地恢复演练）
-docs/        清单格式
+docs/        架构文档、清单格式
 ```
 
 ## 这一步保证什么
