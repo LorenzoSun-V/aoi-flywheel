@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__, auth, datasets, db
 from .settings import Settings, SettingsError
-from .store import Store
+from .store import Store, StoreError
 
 
 def _print_rows(headers, rows):
@@ -73,13 +73,14 @@ def cmd_verify(args, settings):
             print(f'  ……共 {len(problems)} 个')
         if problems:
             return 1
-        if store.flag_text() is not None:
-            if args.rehash:
-                store.clear_flag()
-                print('全部核对通过，已解除文件库的写盘出错标记')
-            else:
-                print('文件库有写盘出错标记；要解除需要加 --rehash 全部重算一遍')
-                return 1
+        blocked = store.problem()
+        if args.rehash:
+            store.mark_verified()  # durable first, then writes are allowed again in every server process
+            if blocked is not None:
+                print(f'全部核对通过，已解除：{blocked}')
+        elif blocked is not None:
+            print(f'{blocked}；要解除需要加 --rehash 全部重算一遍')
+            return 1
     finally:
         store.close()
 
@@ -140,7 +141,7 @@ def main(argv=None) -> int:
     try:
         settings = Settings.from_env()
         return args.func(args, settings) or 0
-    except (SettingsError, auth.AuthError, datasets.DatasetError, db.SchemaError) as e:
+    except (SettingsError, auth.AuthError, datasets.DatasetError, db.SchemaError, StoreError) as e:
         print(f'错误：{e}', file=sys.stderr)
         return 1
 

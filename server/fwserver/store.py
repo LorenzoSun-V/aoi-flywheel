@@ -7,8 +7,18 @@ syncfs(2) on the store's file system, which makes the data AND the directory ent
 written so far durable; if syncfs reports an error the commit does not happen. One syncfs instead of a
 file fsync plus a directory fsync per object is what keeps imports of 200k small files fast on an HDD.
 
-A write error reported by syncfs leaves WRITE-ERROR in the store root. While it is there no upload and no
-new version is accepted; `fw-server verify --rehash` removes it once every referenced object checks out.
+Writes are allowed only while the store root holds WRITE-OK and no WRITE-ERROR. When syncfs reports an
+error, the store stops accepting writes in three ways, so that the block holds even on a full disk:
+1. in memory, for the rest of this process;
+2. WRITE-OK is deleted (deleting needs no free space), which blocks every server process, also after a
+   restart;
+3. WRITE-ERROR records what happened, for people (needs a little space; written if it can be).
+Only `fw-server verify --rehash` lifts the block: once every referenced object checks out, read back from
+the disk, it makes everything durable and writes a new WRITE-OK; every process sees the new one. A new,
+empty store gets WRITE-OK when it is first opened; a store with objects but no WRITE-OK (copied from
+elsewhere, or the marker was lost) has to be verified first.
+If the disk cannot even delete WRITE-OK (read-only or failing), only the in-memory block is left: after
+repairing the disk, run verify --rehash before relying on the store again.
 """
 from __future__ import annotations
 
@@ -16,10 +26,13 @@ import ctypes
 import datetime
 import errno
 import hashlib
+import logging
 import os
 import re
+import secrets
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
@@ -27,7 +40,10 @@ from typing import Iterator, Optional, Tuple
 from fw.contract import CHUNK
 
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
-FLAG = 'WRITE-ERROR'
+FLAG = 'WRITE-ERROR'  # present: writes refused; says what went wrong and when
+MARKER = 'WRITE-OK'  # absent: writes refused; a new random content each time verify --rehash passes
+_UNREADABLE = object()
+log = logging.getLogger('fwserver.store')
 
 
 class StoreError(RuntimeError):
@@ -47,10 +63,18 @@ def _libc_syncfs():
     return fn
 
 
-def hash_path(path: Path) -> Tuple[str, int]:
+def _now() -> str:
+    return datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def hash_path(path: Path, from_disk: bool = False) -> Tuple[str, int]:
+    """sha256 and size of a file. from_disk: drop its pages from the page cache first, so that the bytes
+    really come from the disk; after a write-back error the cache can still hold data the disk never got."""
     h = hashlib.sha256()
     size = 0
     with open(path, 'rb') as f:
+        if from_disk and hasattr(os, 'posix_fadvise'):
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
         while True:
             block = f.read(CHUNK)
             if not block:
@@ -71,6 +95,10 @@ class Store:
         # Kept open for the life of the process: syncfs reports write-back errors that happened since this
         # descriptor was opened, so a descriptor opened just before the call could miss an earlier error.
         self._fd = os.open(self.root, os.O_RDONLY)
+        self._lock = threading.Lock()
+        self._failed: Optional[Tuple[str, object]] = None  # (what happened, WRITE-OK as it was then)
+        if self._marker() is None and not (self.root / FLAG).exists() and not any(self.objects.iterdir()):
+            self._write_marker()  # a new, empty store: nothing has been written that could be lost
 
     def close(self):
         os.close(self._fd)
@@ -119,39 +147,134 @@ class Store:
         return True
 
     # --- durability ----------------------------------------------------------------------------
-    def check_writable(self) -> None:
-        flag = self.root / FLAG
-        if flag.exists():
-            raise StoreError(f'文件库写盘出过错（{flag.read_text(encoding="utf-8").strip()}）；先检查磁盘，'
-                             f'再在服务器上运行 fw-server verify --rehash，通过后才能继续写入')
+    def _marker(self) -> Optional[str]:
+        try:
+            return (self.root / MARKER).read_text(encoding='utf-8').strip() or None
+        except (OSError, UnicodeDecodeError):
+            return None  # missing or unreadable: writes are refused
 
-    def flush(self) -> None:
-        """Make every object written so far durable (data and directory entries), or raise."""
-        self.check_writable()
+    def _write_marker(self) -> None:
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=f'.{MARKER}.')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(f'{_now()} {secrets.token_hex(16)}\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.root / MARKER)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+        os.fsync(self._fd)
+
+    def _write_flag(self, text: str) -> None:
+        with open(self.root / FLAG, 'w', encoding='utf-8') as f:
+            f.write(text + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.fsync(self._fd)
+
+    def _mark_failed(self, message: str) -> None:
+        """Refuse writes from now on: in this process for sure, and for good as far as the disk still lets us."""
+        message = f'{_now()} {message}'
+        try:
+            seen = (self.root / MARKER).read_text(encoding='utf-8').strip() or None
+        except FileNotFoundError:
+            seen = None
+        except (OSError, UnicodeDecodeError):
+            seen = _UNREADABLE  # a new marker could not be told from this one
+        with self._lock:
+            self._failed = (message, seen)
+        log.critical('store write error, writes refused until fw-server verify --rehash passes: %s', message)
+        try:
+            os.unlink(self.root / MARKER)  # needs no free space: works on a full disk too
+            removed = True
+        except FileNotFoundError:
+            removed = True
+        except OSError as e:
+            removed = False
+            log.critical('could not delete %s (%s): the block holds only while this process runs', MARKER, e)
+        if removed:
+            with self._lock:
+                if self._failed is not None and self._failed[0] == message:
+                    self._failed = (message, None)  # any WRITE-OK from now on is a new one
+            try:
+                os.fsync(self._fd)
+            except OSError as e:
+                log.critical('could not make the removal of %s durable (%s)', MARKER, e)
+        try:
+            self._write_flag(message)
+        except OSError as e:
+            log.critical('could not write %s (%s)', FLAG, e)
+
+    def problem(self) -> Optional[str]:
+        """Why writes are refused right now, or None."""
+        marker = self._marker()
+        with self._lock:
+            if self._failed is not None:
+                message, seen = self._failed
+                if seen is _UNREADABLE:
+                    return f'文件库写盘出过错（{message}），连 {MARKER} 都读不了也删不掉；verify --rehash 通过后还要重启服务'
+                if marker is None or marker == seen:
+                    return f'文件库写盘出过错（{message}）'
+                self._failed = None  # verify --rehash passed after the error: it wrote a new WRITE-OK
+        flag = self.flag_text()
+        if flag is not None:
+            return f'文件库写盘出过错（{flag or "原因没能写下来"}）'
+        if marker is None:
+            return f'文件库缺少 {MARKER} 标记（写盘出过错，或者文件库是从别处拷来的，还没核对过）'
+        return None
+
+    def check_writable(self) -> None:
+        problem = self.problem()
+        if problem is not None:
+            raise StoreError(f'{problem}；先检查磁盘，再在服务器上运行 fw-server verify --rehash，通过后才能继续写入')
+
+    def sync(self) -> None:
+        """Make every object written so far durable (data and directory entries), or refuse writes from now
+        on and raise."""
         if self._syncfs is not None:
             if self._syncfs(self._fd) == 0:
                 return
-            err = ctypes.get_errno()
-            message = f'syncfs: {os.strerror(err)}'
+            message = f'syncfs: {os.strerror(ctypes.get_errno())}'
         elif hasattr(os, 'sync'):
             os.sync()  # not Linux: development only
             return
         else:
             raise StoreError('文件库只支持 Linux')
-        stamp = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
-        (self.root / FLAG).write_text(f'{stamp} {message}\n', encoding='utf-8')
+        self._mark_failed(message)
         raise StoreError(f'文件库写盘出错（{message}），没有提交；已标记为异常')
 
-    def clear_flag(self) -> bool:
-        flag = self.root / FLAG
-        if flag.exists():
-            flag.unlink()
-            return True
-        return False
+    def flush(self) -> None:
+        """The barrier before anything that relies on the objects written so far (a version commit)."""
+        self.check_writable()
+        self.sync()
+
+    def mark_verified(self) -> None:
+        """Every referenced object checked out (fw-server verify --rehash): make everything durable, then let
+        every server process write again."""
+        self.sync()
+        try:
+            self._write_marker()
+            try:
+                os.unlink(self.root / FLAG)
+            except FileNotFoundError:
+                pass
+            os.fsync(self._fd)
+        except OSError as e:
+            raise StoreError(f'核对通过了，但没能解除写入阻断（{e}）；检查文件库所在的盘') from None
+        with self._lock:
+            self._failed = None
 
     def flag_text(self) -> Optional[str]:
-        flag = self.root / FLAG
-        return flag.read_text(encoding='utf-8').strip() if flag.exists() else None
+        try:
+            return (self.root / FLAG).read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError) as e:
+            return f'{FLAG} 读不了：{e}'
 
     # --- maintenance ---------------------------------------------------------------------------
     def clean_tmp(self, older_than: float = 86400) -> int:

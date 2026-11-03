@@ -187,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     g = s.add_mutually_exclusive_group()
     g.add_argument('--copy', action='store_true', help='总是复制（默认先试 reflink，不支持再复制）')
     g.add_argument('--hardlink', action='store_true',
-                   help='硬链接：不多占盘，但文件只读、和缓存共用同一份数据，取出后不能改')
+                   help='硬链接（只限 Linux）：不多占盘，但文件只读、和缓存共用同一份数据，取出后不能改')
     s.add_argument('--subpath', help='只取这个子目录')
     s.add_argument('--workers', type=int, default=8)
     s.set_defaults(func=cmd_get)

@@ -133,7 +133,9 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
     echo(f'扫描 {report.root}：{len(report.files)} 个文件，图片 {len(report.images)}，标注 {len(report.labels)}，'
          f'说明文件 {len(report.meta)}，其他 {len(report.others)}')
     _show(echo, '已忽略的系统文件', report.junk)
-    _show(echo, '不能入库的文件', report.bad_paths)
+    _show(echo, '读不了的目录', report.unreadable)
+    _show(echo, '链接和特殊文件', report.links)
+    _show(echo, '文件名用不了', report.bad_paths)
     _show(echo, '路径冲突', report.collisions)
     _show(echo, '同名不同扩展名的图片', [_group(g) for g in report.same_stem_images])
     _show(echo, '没有标注的图片', report.unlabeled_images)
@@ -180,9 +182,13 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
         if not dry_run:  # objects the server lost or put in quarantine come back from this folder
             if missing:
                 _parallel(lambda d: api.put_file(d, sources[d]), missing, workers, '补传')
-                echo(f'补传了 {len(missing)} 个服务器上缺少或损坏的文件')
-            if api.missing([(digest, len(data))]):
+            manifest_missing = bool(api.missing([(digest, len(data))]))
+            if manifest_missing:
                 api.put_bytes(data)
+            api.flush()  # also covers files an interrupted earlier run brought back: on disk before we say so
+            if missing:
+                echo(f'补传了 {len(missing)} 个服务器上缺少或损坏的文件')
+            if manifest_missing:
                 echo('补传了这个版本的清单文件')
         echo(f'和 {base["ref"]} 完全一样，不用建新版本')
         return base
@@ -227,6 +233,9 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     shared with the cache; only when asked for). Every placed file is hashed and must match the manifest;
     on a mismatch the cache object is downloaded again, and a second mismatch is an error.
     """
+    if link == 'hardlink' and os.name == 'nt':
+        raise FwError('Windows 上不能用 --hardlink：Windows 的只读属性由一个文件的所有硬链接共用，'
+                      '清缓存时取出的文件会一起变成可写；用默认方式或 --copy')
     name, number = parse_ref(ref)
     version = api.version(name, number)
     entries = parse_manifest(api.read_object(version['manifest_sha256']))

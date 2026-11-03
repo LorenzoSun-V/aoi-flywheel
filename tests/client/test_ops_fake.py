@@ -2,6 +2,7 @@
 import os
 import stat
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,17 @@ def test_blocking_checks_stop_before_upload(tmp_path, api):
     assert api.uploads == 0 and not api.datasets['SES-TX']
 
 
+def test_reimport_that_brings_back_lost_files_flushes_before_reporting(tmp_path, api):
+    src = make_folder(tmp_path / 'v1', {'a.bmp': b'1', 'a.json': b'{}'})
+    v = ops.import_folder(api, 'SES-TX', src, echo=quiet)
+    del api.objects[hash_file(src / 'a.bmp')]  # the server lost it, or verify moved it to quarantine
+    api.events.clear()
+    lines = []
+    assert ops.import_folder(api, 'SES-TX', src, echo=lines.append)['id'] == v['id']
+    assert api.events == ['put', 'flush']
+    assert any('补传了 1 个' in line for line in lines)
+
+
 def test_confirmation_and_dry_run(tmp_path, api):
     src = make_folder(tmp_path / 'v1', {'a.bmp': b'1', 'a.json': b'{}'})
     assert ops.import_folder(api, 'SES-TX', src, dry_run=True, echo=quiet) is None
@@ -151,6 +163,56 @@ def test_hardlink_mode_is_read_only_and_checked(tmp_path, api, cache):
         f.write(b'Z')
     ops.get(api, cache, 'SES-TX@1', tmp_path / 'again', echo=quiet)
     assert read_tree(tmp_path / 'again') == files
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='hardlinks are a Linux option')
+def test_clearing_the_cache_leaves_hardlinked_files_read_only(tmp_path, api, cache):
+    files = {'a.bmp': b'A' * 10, 'a.json': b'{}'}
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', files), echo=quiet)
+    for n in (1, 2):
+        ops.get(api, cache, 'SES-TX@1', tmp_path / f'out{n}', link='hardlink', echo=quiet)
+    cache.drop(hash_file(tmp_path / 'v1' / 'a.json'))
+    cache.clear()
+    for n in (1, 2):
+        for rel in files:
+            st = (tmp_path / f'out{n}' / rel).stat()
+            assert stat.S_IMODE(st.st_mode) & 0o222 == 0, f'out{n}/{rel} became writable'
+        assert read_tree(tmp_path / f'out{n}') == files
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows only')
+def test_hardlink_is_refused_on_windows(tmp_path, api, cache):
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'a.bmp': b'1', 'a.json': b'{}'}), echo=quiet)
+    with pytest.raises(ops.FwError, match='hardlink'):
+        ops.get(api, cache, 'SES-TX@1', tmp_path / 'out', link='hardlink', echo=quiet)
+    assert not (tmp_path / 'out').exists()
+
+
+def test_a_second_client_installing_the_same_object_never_hides_it(tmp_path, api, monkeypatch):
+    """Two fw processes share one cache. While B installs an object A already has (their downloads raced),
+    A must still find the file."""
+    data = b'A' * 100
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'a.bmp': data, 'a.json': b'{}'}), echo=quiet)
+    digest = hash_file(tmp_path / 'v1' / 'a.bmp')
+    a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
+    try:
+        path = a.fetch(api, digest)
+        monkeypatch.setattr(b, 'cached', lambda d: None)  # B looked before A's copy was there
+        real_replace = os.replace
+        seen = []
+
+        def replace(src, dst):
+            seen.append(Path(dst).read_bytes())  # what A reads at this moment
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, 'replace', replace)
+        assert b.fetch(api, digest) == path
+        assert seen and all(s == data for s in seen)
+        assert path.read_bytes() == data and a.cached(digest) == path
+        assert stat.S_IMODE(path.stat().st_mode) & 0o222 == 0
+    finally:
+        a.close()
+        b.close()
 
 
 def test_copy_layout_is_independent(tmp_path):

@@ -1,12 +1,20 @@
 """Acceptance: a failure while uploading, while committing, or while flushing to disk never leaves a frozen
 version that lacks files; the next run of the same import completes it."""
+import ctypes
+import errno
+import os
+from pathlib import Path
+
 import pytest
 
 from helpers import read_tree, write
 from fw import ops
 from fw.api import ApiError
 from fw.cache import Cache
+from fw.contract import sha256_file
+from fwserver import cli
 from fwserver import datasets as ds
+from fwserver.store import FLAG, MARKER, Store
 
 
 def quiet(_):
@@ -85,15 +93,23 @@ def test_failure_between_rows_and_freeze(api, dataset, tmp_path, service, databa
     assert all_frozen_versions_complete(service, database)
 
 
+def failing_syncfs(fd):
+    ctypes.set_errno(errno.EIO)
+    return -1
+
+
+def disk_full(*args, **kwargs):
+    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+def verify_rehash(monkeypatch, database, store) -> int:
+    monkeypatch.setenv('FW_DSN', database)
+    monkeypatch.setenv('FW_STORE', str(store.root))
+    return cli.main(['verify', '--rehash'])
+
+
 def test_disk_flush_error_blocks_writes_until_verified(api, dataset, tmp_path, service, database, monkeypatch):
-    import ctypes
-    import errno
     store = service.app.state.store
-
-    def failing_syncfs(fd):
-        ctypes.set_errno(errno.EIO)
-        return -1
-
     src, _ = folder(tmp_path)
     monkeypatch.setattr(store, '_syncfs', failing_syncfs)
     with pytest.raises(ApiError) as e:
@@ -105,7 +121,6 @@ def test_disk_flush_error_blocks_writes_until_verified(api, dataset, tmp_path, s
     with pytest.raises(ApiError) as e:
         ops.import_folder(api, dataset, tmp_path / 'other', echo=quiet)
     assert e.value.status == 503
-    from fwserver import cli
     monkeypatch.setenv('FW_DSN', database)
     monkeypatch.setenv('FW_STORE', str(store.root))
     assert cli.main(['verify']) == 1  # without --rehash the flag stays
@@ -127,3 +142,77 @@ def test_concurrent_import_into_same_dataset_is_refused(api, dataset, tmp_path):
         ops.import_folder(api, dataset, src, confirm=other_import_meanwhile, echo=quiet)
     assert e.value.status == 409
     assert api.dataset(dataset)['latest']['number'] == 1
+
+
+def test_block_holds_when_the_disk_is_too_full_for_the_flag(api, dataset, tmp_path, service, database, monkeypatch):
+    """syncfs fails and WRITE-ERROR cannot be created (disk full): writes stay refused, in this process and in
+    any other or restarted one, until verify --rehash passes."""
+    store = service.app.state.store
+    src, _ = folder(tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(store, '_syncfs', failing_syncfs)
+        m.setattr(store, '_write_flag', disk_full)
+        with pytest.raises(ApiError) as e:
+            ops.import_folder(api, dataset, src, echo=quiet)
+        assert e.value.status == 503
+    try:
+        assert not (store.root / FLAG).exists() and not (store.root / MARKER).exists()
+        with pytest.raises(ApiError) as e:  # the disk works again, but nothing has been checked
+            ops.import_folder(api, dataset, src, echo=quiet)
+        assert e.value.status == 503 and no_versions(api, dataset)
+        restarted = Store(store.root)
+        try:
+            assert restarted.problem() is not None
+        finally:
+            restarted.close()
+    finally:
+        assert verify_rehash(monkeypatch, database, store) == 0
+    assert ops.import_folder(api, dataset, src, echo=quiet)['number'] == 1
+    assert all_frozen_versions_complete(service, database)
+
+
+def test_block_holds_in_memory_when_the_disk_refuses_everything(api, dataset, tmp_path, service, database,
+                                                                monkeypatch):
+    """Not even WRITE-OK can be deleted (read-only file system): the running service still refuses writes,
+    and lets them through again as soon as verify --rehash has passed."""
+    store = service.app.state.store
+    src, _ = folder(tmp_path)
+    real_unlink = os.unlink
+
+    def read_only_marker(path, *args, **kwargs):
+        if Path(path).name == MARKER:
+            raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(store, '_syncfs', failing_syncfs)
+        m.setattr(store, '_write_flag', disk_full)
+        m.setattr(os, 'unlink', read_only_marker)
+        with pytest.raises(ApiError) as e:
+            ops.import_folder(api, dataset, src, echo=quiet)
+        assert e.value.status == 503
+    try:
+        assert (store.root / MARKER).exists() and not (store.root / FLAG).exists()
+        with pytest.raises(ApiError) as e:
+            ops.import_folder(api, dataset, src, echo=quiet)
+        assert e.value.status == 503 and no_versions(api, dataset)
+    finally:
+        assert verify_rehash(monkeypatch, database, store) == 0
+    assert ops.import_folder(api, dataset, src, echo=quiet)['number'] == 1
+
+
+def test_bringing_back_lost_files_of_an_unchanged_version_is_flushed(api, dataset, tmp_path, service,
+                                                                     monkeypatch):
+    """Re-importing an unchanged folder brings back files the server lost; they must be on disk before the
+    command says the old version is complete again."""
+    src, _ = folder(tmp_path, 3)
+    v = ops.import_folder(api, dataset, src, echo=quiet)
+    store = service.app.state.store
+    lost, _ = sha256_file(src / 'img_001.bmp')
+    store.path(lost).unlink()
+    events = []
+    real_install, real_sync = store.install, store.sync
+    monkeypatch.setattr(store, 'install', lambda digest, tmp: events.append('install') or real_install(digest, tmp))
+    monkeypatch.setattr(store, 'sync', lambda: events.append('sync') or real_sync())
+    assert ops.import_folder(api, dataset, src, echo=quiet)['id'] == v['id']
+    assert events == ['install', 'sync'] and store.path(lost).is_file()

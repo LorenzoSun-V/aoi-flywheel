@@ -108,8 +108,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def health():
         with conn() as c:
             c.execute('SELECT 1')
-        flag = store.flag_text()
-        return {'ok': flag is None, 'version': __version__, 'store_error': flag}
+        problem = store.problem()
+        return {'ok': problem is None, 'version': __version__, 'store_error': problem}
 
     @app.get('/api/v1/me')
     def me(user: dict = Depends(current_user)):
@@ -121,6 +121,13 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def missing(body: MissingBody, user: dict = Depends(data_user)):
         """Which of these (sha256, size) the store lacks; an object with another size counts as missing."""
         return {'missing': [check_digest(d) for d, size in body.objects if store.size(check_digest(d)) != size]}
+
+    @app.post('/api/v1/objects/flush')
+    def flush(user: dict = Depends(data_user)):
+        """Make every object uploaded so far durable. Creating a version does this itself; a client that only
+        brought back files an existing version lacked calls it before saying the repair is done."""
+        store.flush()
+        return {'ok': True}
 
     @app.put('/api/v1/objects/{digest}')
     async def put_object(digest: str, request: Request, user: dict = Depends(data_user)):

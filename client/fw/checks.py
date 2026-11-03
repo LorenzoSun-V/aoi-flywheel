@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import stat
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -13,6 +15,7 @@ IMAGE_EXTS = {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp'}
 LABEL_EXTS = {'.json', '.txt'}  # LiteAnno / X-AnyLabeling JSON, YOLO txt
 META_NAMES = {'classes.txt', 'classes.names', 'obj.names', 'data.yaml', 'dataset.yaml', 'mask_colors.json'}
 JUNK_NAMES = {'thumbs.db', 'desktop.ini', '.ds_store'}
+_NAME_SURROGATE = 0x20000000  # Windows reparse tags with this bit lead somewhere else: symlinks, junctions
 
 
 @dataclass
@@ -24,7 +27,9 @@ class FolderReport:
     labels: List[str] = field(default_factory=list)
     meta: List[str] = field(default_factory=list)
     others: List[str] = field(default_factory=list)
-    bad_paths: List[str] = field(default_factory=list)
+    unreadable: List[str] = field(default_factory=list)  # folders (or entries) the scan could not read
+    links: List[str] = field(default_factory=list)  # symlinks, junctions and special files, never followed
+    bad_paths: List[str] = field(default_factory=list)  # names that do not work on Windows or Linux
     collisions: List[str] = field(default_factory=list)
     same_stem_images: List[List[str]] = field(default_factory=list)
     unlabeled_images: List[str] = field(default_factory=list)
@@ -34,6 +39,10 @@ class FolderReport:
     def blocking(self, allow_other_files: bool, force: bool) -> List[str]:
         """Reasons the folder must not become a version as it stands."""
         reasons = []
+        if self.unreadable:
+            reasons.append('有目录读不了，里面的文件会漏掉，新版本里就成了删除；先修好权限或磁盘')
+        if self.links:
+            reasons.append('有链接或特殊文件，只收普通文件和目录；先换成普通文件和目录')
         if self.bad_paths:
             reasons.append('有文件名在 Windows 或 Linux 上用不了，先改名')
         if self.collisions:
@@ -50,23 +59,60 @@ def _stem(rel: str) -> str:
     return rel[: len(rel) - len(suffix)] if suffix else rel
 
 
+def _is_link(entry: os.DirEntry) -> bool:
+    """A symlink, or on Windows any reparse point that leads to another path (junctions as well)."""
+    if entry.is_symlink():
+        return True
+    if sys.platform == 'win32':
+        st = entry.stat(follow_symlinks=False)
+        return bool(getattr(st, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                    and getattr(st, 'st_reparse_tag', 0) & _NAME_SURROGATE)
+    return False
+
+
+def _reason(e: OSError) -> str:
+    return e.strerror or str(e)
+
+
+def _walk(root: Path, report: FolderReport) -> None:
+    """Collect every regular file under root. Nothing is skipped quietly: a folder that cannot be read, a
+    link (to a folder or a file) and a special file each go into the report, because a file the scan
+    missed would look deleted in the new version."""
+    pending = ['']
+    while pending:
+        folder = pending.pop()
+        try:
+            with os.scandir(root / folder if folder else root) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError as e:
+            report.unreadable.append(f'{folder or "."}/：读不了（{_reason(e)}）')
+            continue
+        subfolders = []
+        for entry in entries:
+            rel = f'{folder}/{entry.name}' if folder else entry.name
+            try:
+                if _is_link(entry):
+                    kind = '目录' if entry.is_dir() else '文件'
+                    report.links.append(f'{rel}：是链接（指向{kind}），先换成普通的{kind}')
+                elif entry.is_dir(follow_symlinks=False):
+                    subfolders.append(rel)
+                elif not entry.is_file(follow_symlinks=False):
+                    report.links.append(f'{rel}：是特殊文件，先换成普通文件')
+                elif entry.name.lower() in JUNK_NAMES:
+                    report.junk.append(rel)
+                else:
+                    report.files.append((rel, Path(entry.path)))
+            except OSError as e:
+                report.unreadable.append(f'{rel}：读不了（{_reason(e)}）')
+        pending.extend(reversed(subfolders))  # depth first, in name order
+
+
 def scan_folder(folder) -> FolderReport:
     root = Path(folder)
     if not root.is_dir():
         raise FileNotFoundError(f'目录不存在：{root}')
     report = FolderReport(root=root)
-    for dirpath, dirnames, names in os.walk(root):
-        dirnames.sort()
-        for name in sorted(names):
-            path = Path(dirpath) / name
-            rel = path.relative_to(root).as_posix()
-            if name.lower() in JUNK_NAMES:
-                report.junk.append(rel)
-                continue
-            if path.is_symlink() or not path.is_file():
-                report.bad_paths.append(f'{rel}：是链接或特殊文件，先换成普通文件')
-                continue
-            report.files.append((rel, path))
+    _walk(root, report)
     image_stems: Dict[str, List[str]] = defaultdict(list)
     label_stems = set()
     for rel, _ in report.files:

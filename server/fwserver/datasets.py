@@ -224,7 +224,12 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
     - every referenced object is in the store with the right size, and with rehash, the right content.
     Damaged objects are replaced from `repair_from` (another store, e.g. the backup) when it has an intact
     copy; otherwise they are moved to quarantine/ so that the next upload of that file restores them.
+    With rehash every object is read back from the disk (not from the page cache, which can still hold data
+    a failed write-back never got onto the disk). Repairs are made durable before this returns; if that
+    fails the store refuses writes and StoreError is raised.
     """
+    if rehash:
+        store.sync()  # write back what is pending first, so that the rehash reads what the disk holds
     problems = []
     versions = conn.execute(
         "SELECT v.id, d.name || '@' || v.number AS ref, encode(v.manifest_sha256, 'hex') AS m, "
@@ -246,7 +251,7 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
         got = store.size(digest)
         ok = got is not None and (size is None or got == size)
         if ok and rehash:
-            ok = hash_path(store.path(digest))[0] == digest
+            ok = hash_path(store.path(digest), from_disk=True)[0] == digest
         if ok:
             continue
         if repair_from is not None and store.repair_from(digest, repair_from):
@@ -257,6 +262,8 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
             store.move_to_quarantine(digest)
             state += '，已移到 quarantine/，重新导入含它的目录即可补回'
         problems.append(f'文件 {digest[:12]}（{ref} 等用到）{state}')
+    if repaired:
+        store.sync()  # a repair counts only once the file is on the disk
     echo(f'核对了 {len(versions)} 个版本、{checked} 个文件{"（重算了哈希）" if rehash else ""}；'
          f'从备份修复 {repaired} 个；问题 {len(problems)} 个')
     return problems
