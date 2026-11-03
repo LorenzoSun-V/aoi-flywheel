@@ -45,18 +45,25 @@ def all_frozen_versions_complete(service, database):
         return ds.verify(c, service.app.state.store, rehash=True, echo=quiet) == []
 
 
-def test_interrupted_upload(api, dataset, tmp_path, service, database):
+@pytest.mark.parametrize('route', ['batch', 'single'])
+def test_interrupted_upload(api, dataset, tmp_path, service, database, monkeypatch, route):
     src, files = folder(tmp_path)
-    real = api.put_file
-    calls = []
+    if route == 'batch':  # small files, many per request
+        monkeypatch.setattr(ops, 'UPLOAD_COUNT', 5)
+        method, digests_of = 'put_objects', lambda items: [d for d, _, _ in items]
+    else:  # the way large files go: one per request
+        monkeypatch.setattr(ops, 'BATCH_OBJECT_MAX', 0)
+        method, digests_of = 'put_file', lambda digest, path: [digest]
+    real = getattr(api, method)
+    sent = []
 
-    def flaky(digest, path):
-        if len(calls) >= 7:
+    def flaky(*args):
+        if len(sent) >= 15:
             raise ApiError(0, 'network gone')
-        calls.append(digest)
-        return real(digest, path)
+        sent.extend(digests_of(*args))
+        return real(*args)
 
-    api.put_file = flaky
+    setattr(api, method, flaky)
     with pytest.raises(ApiError):
         ops.import_folder(api, dataset, src, workers=1, echo=quiet)
     assert no_versions(api, dataset)
@@ -68,9 +75,17 @@ def test_interrupted_upload(api, dataset, tmp_path, service, database):
     with pytest.raises(ApiError) as e:
         api.create_version(dataset, manifest_hash(data), None, None, 'test', '')
     assert e.value.status == 400 and no_versions(api, dataset)
-    api.put_file = real
+    resent = []
+
+    def counting(*args):
+        resent.extend(digests_of(*args))
+        return real(*args)
+
+    setattr(api, method, counting)
     v = ops.import_folder(api, dataset, src, echo=quiet)
     assert v['ref'].endswith('@1')
+    assert len(set(sent)) == 15 and not set(sent) & set(resent)  # the rerun sends only what was missing
+    assert len(set(sent) | set(resent)) == len(files)
     assert all_frozen_versions_complete(service, database)
 
 

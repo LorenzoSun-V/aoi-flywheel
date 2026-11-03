@@ -6,7 +6,9 @@ replaces it under the same name. Nothing in the cache is deleted because of what
 processes may share one cache, and the row one of them has just read may already be out of date (another
 process may have installed a fresh copy since). The size and mtime check is only a shortcut: every file
 `fw get` lays out is hashed again against the manifest, so a cache object that was changed some other way is
-still caught (see layout.py).
+still caught (see layout.py). For the same reason the index is not synced to disk on every write
+(synchronous=NORMAL): after a power cut it may be missing the last few objects (they are downloaded again)
+or describe an object whose data was lost (the hash check when it is laid out catches that).
 """
 from __future__ import annotations
 
@@ -16,10 +18,15 @@ import stat
 import tempfile
 import threading
 from pathlib import Path
-from typing import Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import cache_dir
+from .contract import BATCH_OBJECT_MAX, batches
 from .layout import hash_file
+
+FETCH_COUNT = 2000          # objects per batch download
+FETCH_BYTES = 32 << 20      # bytes per batch download
 
 
 def remove_file(path: Path) -> None:
@@ -77,6 +84,7 @@ class Cache:
         self._lock = threading.Lock()
         with self._lock:
             self._db.execute('PRAGMA journal_mode=WAL')
+            self._db.execute('PRAGMA synchronous=NORMAL')
             self._db.execute('CREATE TABLE IF NOT EXISTS objects '
                              '(sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL)')
         self.downloaded_files = 0
@@ -125,6 +133,88 @@ class Cache:
         if (st.st_size, st.st_mtime_ns) == (row[0], row[1]):
             return path
         return None
+
+    def cached_many(self, digests: Iterable[str]) -> Dict[str, Path]:
+        """cached() for many objects at once: one index query per 500 objects instead of one per object."""
+        digests = list(digests)
+        rows = {}
+        with self._lock:
+            for i in range(0, len(digests), 500):
+                part = digests[i:i + 500]
+                rows.update((r[0], (r[1], r[2])) for r in self._db.execute(
+                    f'SELECT sha256, size, mtime_ns FROM objects WHERE sha256 IN ({",".join("?" * len(part))})', part))
+        out = {}
+        for digest in digests:
+            row = rows.get(digest)
+            if row is None:
+                continue
+            path = self.object_path(digest)
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            if (st.st_size, st.st_mtime_ns) == row:
+                out[digest] = path  # otherwise downloaded again, never deleted (see cached())
+        return out
+
+    def _install(self, digest: str, data: bytes) -> Tuple[str, int, int]:
+        """Put verified bytes in the cache under their hash; returns the index row."""
+        path = self.object_path(digest)
+        fd, tmp = tempfile.mkstemp(dir=str(self.root / 'tmp'))
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+            install_file(tmp, path, digest)
+        except BaseException:
+            remove_file(Path(tmp))
+            raise
+        st = path.stat()
+        return digest, st.st_size, st.st_mtime_ns
+
+    def fetch_many(self, api, objects: List[Tuple[str, int]], workers: int = 4, progress=None) -> Dict[str, Path]:
+        """Make sure every (sha256, size) is in the cache and return sha256 -> cached path. Small objects come
+        in batches of up to FETCH_COUNT per request, large ones one by one; every object is checked against
+        its hash before it enters the cache."""
+        sizes = dict(objects)
+        paths = self.cached_many(sizes)
+        if progress:
+            progress.add(len(paths))
+        todo = sorted(d for d in sizes if d not in paths)
+        small = [(d, sizes[d]) for d in todo if sizes[d] <= BATCH_OBJECT_MAX]
+        large = [d for d in todo if sizes[d] > BATCH_OBJECT_MAX]
+
+        def run_batch(batch):
+            rows = []
+
+            def on_object(digest, data):
+                rows.append(self._install(digest, data))
+                if progress:
+                    progress.add()
+
+            try:
+                api.fetch_objects(batch, on_object)
+            finally:  # objects already received stay in the cache even if the batch failed later
+                with self._lock:
+                    self._db.executemany('INSERT OR REPLACE INTO objects VALUES (?, ?, ?)', rows)
+                    self.downloaded_files += len(rows)
+                    self.downloaded_bytes += sum(r[1] for r in rows)
+                    for digest, _, _ in rows:
+                        paths[digest] = self.object_path(digest)
+
+        def run_large(digest):
+            paths[digest] = self.fetch(api, digest)
+            if progress:
+                progress.add()
+
+        jobs = [(run_batch, b) for b in batches(small, FETCH_COUNT, FETCH_BYTES)] + [(run_large, d) for d in large]
+        if workers <= 1 or len(jobs) <= 1:
+            for fn, arg in jobs:
+                fn(arg)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for _ in pool.map(lambda job: job[0](job[1]), jobs):
+                    pass
+        return paths
 
     def fetch(self, api, digest: str, force: bool = False) -> Path:
         """Return the cached object, downloading it (hash checked before it enters the cache) if needed.

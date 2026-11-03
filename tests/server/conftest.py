@@ -45,8 +45,8 @@ def database():
 
 
 class Service:
-    def __init__(self, dsn: str, store: Path):
-        self.settings = Settings(dsn=dsn, store=store, pool_size=8)
+    def __init__(self, dsn: str, store: Path, **settings):
+        self.settings = Settings(dsn=dsn, store=store, pool_size=8, **settings)
         self.hooks = {}
         self.app = create_app(self.settings, hooks=self.hooks)
         with socket.socket() as s:
@@ -76,6 +76,22 @@ def service(database, tmp_path_factory):
     svc.start()
     yield svc
     svc.stop()
+
+
+@pytest.fixture
+def make_service(database, tmp_path):
+    """Another instance of the service with its own store and other settings, for one test."""
+    made = []
+
+    def make(**settings):
+        svc = Service(database, tmp_path / f'store{len(made)}', **settings)
+        svc.start()
+        made.append(svc)
+        return svc
+
+    yield make
+    for svc in made:
+        svc.stop()
 
 
 @pytest.fixture(scope='session')

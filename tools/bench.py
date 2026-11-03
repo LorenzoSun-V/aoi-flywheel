@@ -69,11 +69,19 @@ def main():
     api = ops.connect()
     name = f'bench-{time.strftime("%Y%m%d-%H%M%S")}'
     out = {'pairs': a.pairs, 'files_v1': 2 * a.pairs, 'img_kb': a.img_kb, 'dataset': name, 'server': api.server}
-    quiet = lambda s: None  # noqa: E731
+    phases = {}  # the timing line each step prints, e.g. how an import splits into hashing, upload, commit
+
+    def keep(step):
+        def echo(line):
+            if '用时' in line:
+                phases[step] = line[line.index('用时'):].strip()
+        return echo
+
     try:
         api.create_dataset(name, 'bench', '', 'other', 'tools/bench.py')
         _, out['generate_s'] = timed(lambda: [make_pair(src, rng, i, a.img_kb * 1024) for i in range(a.pairs)])
-        v1, out['v1_import_s'] = timed(lambda: ops.import_folder(api, name, src, workers=a.workers, echo=quiet))
+        v1, out['v1_import_s'] = timed(lambda: ops.import_folder(api, name, src, workers=a.workers,
+                                                                 echo=keep('v1_import')))
 
         k = max(1, a.pairs // 100)
         ids = rng.sample(range(a.pairs), 3 * k + 200)
@@ -94,7 +102,8 @@ def main():
             for ext in ('bmp', 'json'):
                 shutil.copy(src / f'line{i % 100:02d}' / f'img{i:07d}.{ext}',
                             src / f'line{(i + 2) % 100:02d}' / f'copy{i:07d}.{ext}')
-        v2, out['v2_import_s'] = timed(lambda: ops.import_folder(api, name, src, workers=a.workers, echo=quiet))
+        v2, out['v2_import_s'] = timed(lambda: ops.import_folder(api, name, src, workers=a.workers,
+                                                                 echo=keep('v2_import')))
         out['v2_files'] = v2['file_count']
         out['v2_changes'] = v2.get('changes')
         _, out['diff_s'] = timed(lambda: api.diff(v1['id'], v2['id']))
@@ -102,15 +111,16 @@ def main():
         cache = Cache(work / 'cache')
         try:
             _, out['cold_get_s'] = timed(lambda: ops.get(api, cache, v2['ref'], work / 'cold', workers=a.workers,
-                                                         echo=quiet))
+                                                         echo=keep('cold_get')))
             out['cold_downloaded_files'] = cache.downloaded_files
             _, out['warm_get_s'] = timed(lambda: ops.get(api, cache, v2['ref'], work / 'warm', workers=a.workers,
-                                                         echo=quiet))
+                                                         echo=keep('warm_get')))
             out['warm_downloaded_files'] = cache.downloaded_files - out['cold_downloaded_files']
         finally:
             cache.close()
         out['cold_identical'] = same_tree(src, work / 'cold')
         out['warm_identical'] = same_tree(src, work / 'warm')
+        out['phases'] = phases
     finally:
         api.close()
         if not a.keep:

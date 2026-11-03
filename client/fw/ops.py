@@ -16,11 +16,16 @@ from . import config
 from .api import Api
 from .cache import Cache, remove_file
 from .checks import IMAGE_EXTS, scan_folder
-from .contract import Entry, diff_entries, manifest_bytes, manifest_hash, parse_manifest, sha256_file
+from .contract import (BATCH_OBJECT_MAX, Entry, batches, diff_entries, manifest_bytes, manifest_hash, parse_manifest,
+                       sha256_file)
 from .layout import Layout
 
 Echo = Callable[[str], None]
 Confirm = Callable[[str], bool]
+
+UPLOAD_COUNT = 2000       # objects per batch upload
+UPLOAD_BYTES = 32 << 20   # bytes per batch upload
+BIG_FILE = 256 << 10      # threads pay off only when the average file is at least this big
 
 
 class FwError(Exception):
@@ -94,10 +99,49 @@ def _parallel(fn, items, workers: int, label: str) -> list:
         progress.add()
         return result
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        out = list(pool.map(run, items))
+    if workers <= 1:
+        out = [run(item) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            out = list(pool.map(run, items))
     progress.done()
     return out
+
+
+def _file_workers(sizes: List[int], workers: int) -> int:
+    """Threads for hashing or copying local files. Large files are hashed with the GIL released, so threads
+    help; for small files the switching between threads costs more than it saves (measured: 8 KB files take
+    about 50 us each in one thread and over 300 us each in 8 threads), so they are done in one thread."""
+    if not sizes or sum(sizes) < BIG_FILE * len(sizes):
+        return 1
+    return max(1, min(workers, os.cpu_count() or 1))
+
+
+def _upload(api: Api, digests: List[str], sources: Dict[str, Path], sizes: Dict[str, int], workers: int,
+            label: str) -> int:
+    """Upload these objects: small ones many per request, large ones one per request. Returns bytes sent."""
+    progress = Progress(label, len(digests))
+    small = [(d, sizes[d]) for d in digests if sizes[d] <= BATCH_OBJECT_MAX]
+    large = [d for d in digests if sizes[d] > BATCH_OBJECT_MAX]
+
+    def run(job):
+        kind, arg = job
+        if kind == 'batch':
+            n = api.put_objects([(d, sources[d], size) for d, size in arg])
+            progress.add(len(arg))
+        else:
+            n = api.put_file(arg, sources[arg])
+            progress.add()
+        return n
+
+    jobs = [('batch', b) for b in batches(small, UPLOAD_COUNT, UPLOAD_BYTES)] + [('file', d) for d in large]
+    if workers <= 1 or len(jobs) <= 1:
+        total = sum(run(job) for job in jobs)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            total = sum(pool.map(run, jobs))
+    progress.done()
+    return total
 
 
 def show_changes(echo: Echo, title: str, changes: dict, limit: int = 5):
@@ -161,7 +205,8 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
         raise FwError('--parent 写 latest、none 或版本序号')
 
     t0 = time.perf_counter()
-    entries: List[Entry] = _parallel(_hash_local, report.files, workers, '算哈希')
+    sample = [os.stat(path).st_size for _, path in report.files[:200]]
+    entries: List[Entry] = _parallel(_hash_local, report.files, _file_workers(sample, workers), '算哈希')
     data = manifest_bytes(entries)
     digest = manifest_hash(data)
     total = sum(size for _, _, size in entries)
@@ -181,7 +226,7 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
     if base is not None and base['manifest_sha256'] == digest:
         if not dry_run:  # objects the server lost or put in quarantine come back from this folder
             if missing:
-                _parallel(lambda d: api.put_file(d, sources[d]), missing, workers, '补传')
+                _upload(api, missing, sources, sizes, workers, '补传')
             manifest_missing = bool(api.missing([(digest, len(data))]))
             if manifest_missing:
                 api.put_bytes(data)
@@ -207,7 +252,7 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
         echo('没有建版本')
         return None
 
-    uploaded = sum(_parallel(lambda d: api.put_file(d, sources[d]), missing, workers, '上传'))
+    uploaded = _upload(api, missing, sources, sizes, workers, '上传')
     api.put_bytes(data)
     t2 = time.perf_counter()
     source = f'fw dataset import {socket.gethostname()}:{report.root.resolve()}'
@@ -249,9 +294,11 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     dest.mkdir(parents=True, exist_ok=True)
 
     t0 = time.perf_counter()
-    digests = sorted({d for _, d, _ in entries})
+    objects = {d: size for _, d, size in entries}
     before = cache.downloaded_files
-    paths = dict(zip(digests, _parallel(lambda d: cache.fetch(api, d), digests, workers, '下载')))
+    progress = Progress('下载', len(objects))
+    paths = cache.fetch_many(api, list(objects.items()), workers=workers, progress=progress)
+    progress.done()
     t1 = time.perf_counter()
     for parent in sorted({_local(dest, rel).parent for rel, _, _ in entries}):
         parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +325,7 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
             source = cache.fetch(api, digest, force=True)
         raise FwError(f'{rel}：重新下载后仍然和清单的哈希对不上，请检查这台机器的磁盘')
 
-    _parallel(place, entries, workers, '摆放并核对')
+    _parallel(place, entries, _file_workers([size for _, _, size in entries], workers), '摆放并核对')
     t2 = time.perf_counter()
     echo(f'{version["ref"]} 已放到 {dest}：{len(entries)} 个文件，每个都按清单核对过；'
          f'下载 {cache.downloaded_files - before} 个，方式：{layout.describe()}；'
