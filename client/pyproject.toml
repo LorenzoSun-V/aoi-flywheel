@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aoi-flywheel-client"
+description = "fw: command line and Python client of the aoi-flywheel data platform"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["httpx>=0.24,<1"]
+dynamic = ["version"]
+
+[project.scripts]
+fw = "fw.cli:main"
+
+[tool.setuptools]
+packages = ["fw"]
+
+[tool.setuptools.dynamic]
+version = {attr = "fw.__version__"}

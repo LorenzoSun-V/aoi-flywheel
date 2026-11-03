@@ -1,0 +1,43 @@
+# aoi-flywheel：PostgreSQL + 平台服务，两个容器。
+# 首次部署：sudo bash deploy/setup.sh <管理员账号>；备份：sudo bash deploy/backup.sh <备份目录>。
+# 目录、端口和数据库密码都在 deploy/.env 里（setup.sh 生成）。
+name: flywheel
+
+services:
+  db:
+    image: postgres:16.15-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fw
+      POSTGRES_DB: fw
+      POSTGRES_PASSWORD: ${FW_DB_PASSWORD:?先运行 deploy/setup.sh 生成 deploy/.env}
+    volumes:
+      - ${FW_DB_DIR:-/opt/flywheel/pg}:/var/lib/postgresql/data
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fw -d fw"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # 数据库端口不对外开放：只有平台服务连它，备份用 docker compose exec
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: aoi-flywheel-server:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FW_DSN: postgresql://fw:${FW_DB_PASSWORD}@db:5432/fw
+      FW_STORE: /store
+      FW_WORKERS: ${FW_WORKERS:-4}
+    volumes:
+      - ${FW_STORE_DIR:-/data/flywheel/store}:/store
+    ports:
+      - "${FW_PORT:-8000}:8000"
+    stop_grace_period: 60s

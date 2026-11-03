@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: 服务端和全部测试（Linux + PostgreSQL 16）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.15-bookworm
+        env:
+          POSTGRES_USER: fw
+          POSTGRES_PASSWORD: fw
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U fw" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      FW_TEST_ADMIN_DSN: postgresql://fw:fw@127.0.0.1:5432/postgres
+      FW_RANDOM_VERSIONS: '30'
+      FW_RANDOM_SEEDS: '1,2,3'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -c deploy/constraints.txt ./client ./server pytest import-linter
+      - name: 模块分层
+        run: lint-imports
+      - name: 测试
+        run: pytest -q -ra tests
+
+  client:
+    name: fw 客户端（${{ matrix.os }}，Python ${{ matrix.python }}）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, python: '3.8'}
+          - {os: windows-2022, python: '3.12'}
+          - {os: ubuntu-22.04, python: '3.8'}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ./client pytest
+      - run: fw --version
+      - name: 测试
+        run: pytest -q -ra tests/client
+
+  deploy:
+    name: 部署演练（docker compose：部署、导入中在线备份、另一套部署上恢复后取回）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install ./client
+      - name: 演练
+        run: sudo FW_BIN="$(command -v fw)" bash tools/deploy-drill.sh "$RUNNER_TEMP/drill"
