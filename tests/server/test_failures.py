@@ -250,3 +250,46 @@ def test_rehash_after_a_write_error_checks_files_no_version_uses_yet(api, datase
     finally:
         cache.close()
     assert read_tree(tmp_path / 'out') == files
+
+
+def test_rehash_fails_when_a_folder_of_the_store_cannot_be_listed(api, dataset, tmp_path, service, database,
+                                                                   monkeypatch):
+    """Same as above, but the folder holding the damaged file cannot be listed while verify runs (EIO). A
+    check that skipped it would pass without having seen the file: verify must fail and keep the block."""
+    store = service.app.state.store
+    src, files = folder(tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(store, '_syncfs', failing_syncfs)
+        with pytest.raises(ApiError) as e:
+            ops.import_folder(api, dataset, src, echo=quiet)
+        assert e.value.status == 503 and no_versions(api, dataset)
+    damaged, _ = sha256_file(src / 'img_005.bmp')
+    path = store.path(damaged)
+    data = bytearray(path.read_bytes())
+    data[-1] ^= 0xFF
+    path.chmod(0o644)
+    path.write_bytes(bytes(data))
+    real_scandir = os.scandir
+
+    def scandir(p='.'):
+        if os.fspath(p) == str(path.parent):
+            raise OSError(errno.EIO, os.strerror(errno.EIO), os.fspath(p))
+        return real_scandir(p)
+
+    with monkeypatch.context() as m:
+        m.setattr(os, 'scandir', scandir)
+        assert verify_rehash(monkeypatch, database, store) == 1
+    assert path.exists() and store.problem() is not None  # nothing moved, still refusing writes
+    with pytest.raises(ApiError) as e:
+        ops.import_folder(api, dataset, src, echo=quiet)
+    assert e.value.status == 503
+    assert verify_rehash(monkeypatch, database, store) == 0  # the folder reads again: now it is caught
+    assert not path.exists()
+    v = ops.import_folder(api, dataset, src, echo=quiet)
+    assert all_frozen_versions_complete(service, database)
+    cache = Cache(tmp_path / 'cache')
+    try:
+        ops.get(api, cache, v['ref'], tmp_path / 'out', echo=quiet)
+    finally:
+        cache.close()
+    assert read_tree(tmp_path / 'out') == files
