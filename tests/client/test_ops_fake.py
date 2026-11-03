@@ -171,7 +171,6 @@ def test_clearing_the_cache_leaves_hardlinked_files_read_only(tmp_path, api, cac
     ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', files), echo=quiet)
     for n in (1, 2):
         ops.get(api, cache, 'SES-TX@1', tmp_path / f'out{n}', link='hardlink', echo=quiet)
-    cache.drop(hash_file(tmp_path / 'v1' / 'a.json'))
     cache.clear()
     for n in (1, 2):
         for rel in files:
@@ -210,6 +209,54 @@ def test_a_second_client_installing_the_same_object_never_hides_it(tmp_path, api
         assert seen and all(s == data for s in seen)
         assert path.read_bytes() == data and a.cached(digest) == path
         assert stat.S_IMODE(path.stat().st_mode) & 0o222 == 0
+    finally:
+        a.close()
+        b.close()
+
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+def test_a_stale_index_row_never_deletes_a_fresh_copy(tmp_path, api, monkeypatch):
+    """Two fw processes share one cache. B reads an object's index row; before B looks at the file, A finds
+    the object changed and installs a fresh copy. B's row is out of date now, and B must not delete A's copy
+    because of it."""
+    data = b'A' * 100
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'a.bmp': data, 'a.json': b'{}'}), echo=quiet)
+    digest = hash_file(tmp_path / 'v1' / 'a.bmp')
+    a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
+    try:
+        path = a.fetch(api, digest)
+        past = path.stat().st_mtime_ns - 3600 * 10 ** 9
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        os.utime(path, ns=(past, past))  # some other program touched it: the next fetch downloads it again
+        os.chmod(path, stat.S_IREAD)
+        fresh = []
+        real_db = b._db
+
+        class StaleRead:
+            """B's index connection: just after B has read the row, A runs."""
+
+            def execute(self, sql, *args):
+                if not sql.startswith('SELECT size') or fresh:
+                    return real_db.execute(sql, *args)
+                rows = real_db.execute(sql, *args).fetchall()
+                fresh.append(a.fetch(api, digest))
+                return _Rows(rows)
+
+            def __getattr__(self, name):
+                return getattr(real_db, name)
+
+        monkeypatch.setattr(b, '_db', StaleRead())
+        assert b.cached(digest) is None  # B's row says the file was changed: B would download it again
+        assert fresh == [path] and path.stat().st_mtime_ns != past
+        assert path.read_bytes() == data and a.cached(digest) == path
+        assert b.fetch(api, digest) == path and path.read_bytes() == data
     finally:
         a.close()
         b.close()
