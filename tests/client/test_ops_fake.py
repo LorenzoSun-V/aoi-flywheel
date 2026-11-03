@@ -269,30 +269,29 @@ class _StaleRead:
         return getattr(self._db, name)
 
 
-def _touched(path):
-    """Some other program touched a cached file: the next fetch downloads it again."""
-    past = path.stat().st_mtime_ns - 3600 * 10 ** 9
-    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-    os.utime(path, ns=(past, past))
-    os.chmod(path, stat.S_IREAD)
-    return past
+def _out_of_date(cache, digest):
+    """The cached file no longer matches its index row (some other program touched it), so the next fetch
+    downloads it again. The row is moved an hour back: no copy installed from now on can match it, even where
+    two installs land in the same tick of the file system's clock."""
+    with cache._lock:
+        cache._db.execute('UPDATE objects SET mtime_ns = mtime_ns - ? WHERE sha256 = ?', (3600 * 10 ** 9, digest))
 
 
 def test_a_stale_index_row_never_deletes_a_fresh_copy(tmp_path, api, monkeypatch):
     """Two fw processes share one cache. B reads an object's index row; before B looks at the file, A finds
-    the object changed and installs a fresh copy. B's row is out of date now, and B must not delete A's copy
-    because of it."""
+    the object out of date and installs a fresh copy (on Windows: keeps the intact one and records it). B's
+    row no longer describes the file, and B must not delete A's copy because of it."""
     data = b'A' * 100
     ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'a.bmp': data, 'a.json': b'{}'}), echo=quiet)
     digest = hash_file(tmp_path / 'v1' / 'a.bmp')
     a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
     try:
         path = a.fetch(api, digest)
-        past = _touched(path)
+        _out_of_date(a, digest)
         fresh = []
         monkeypatch.setattr(b, '_db', _StaleRead(b._db, 'SELECT size', lambda: fresh.append(a.fetch(api, digest))))
-        assert b.cached(digest) is None  # B's row says the file was changed: B would download it again
-        assert fresh == [path] and path.stat().st_mtime_ns != past
+        assert b.cached(digest) is None  # the row B read is out of date by now: B would download it again
+        assert fresh == [path]
         assert path.read_bytes() == data and a.cached(digest) == path
         assert b.fetch(api, digest) == path and path.read_bytes() == data
     finally:
@@ -309,12 +308,12 @@ def test_a_stale_index_row_never_deletes_a_fresh_copy_in_a_batch(tmp_path, api, 
     a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
     try:
         path = a.fetch_many(api, objects)[digest]
-        past = _touched(path)
+        _out_of_date(a, digest)
         fresh = []
         monkeypatch.setattr(b, '_db', _StaleRead(b._db, 'SELECT sha256, size, mtime_ns',
                                                  lambda: fresh.append(a.fetch_many(api, objects)[digest])))
         assert b.cached_many([digest]) == {}
-        assert fresh == [path] and path.stat().st_mtime_ns != past
+        assert fresh == [path]
         assert path.read_bytes() == data and a.cached_many([digest]) == {digest: path}
         assert b.fetch_many(api, objects)[digest] == path and path.read_bytes() == data
     finally:
