@@ -12,7 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from fw.contract import BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, frame_header
+from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
+                         frame_header)
 
 from . import __version__, auth, datasets, db
 from .datasets import DatasetError, check_digest
@@ -31,6 +32,13 @@ STORE_GROUP = 4 << 20        # batch uploads are written to the store in groups 
 
 class MissingBody(BaseModel):
     objects: List[Tuple[str, int]] = Field(max_length=MISSING_LIMIT)  # (sha256, size)
+
+
+def size_text(n: int) -> str:
+    for unit, scale in (('GB', 1 << 30), ('MB', 1 << 20), ('KB', 1 << 10)):
+        if n >= scale:
+            return f'{n / scale:g} {unit}'
+    return f'{n} 字节'
 
 
 class FetchBody(BaseModel):
@@ -58,6 +66,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     settings = settings or Settings.from_env()
     hooks = hooks if hooks is not None else {}
     store = Store(settings.store)
+    too_large = f'单个文件不能超过 {size_text(settings.max_object_bytes)}（FW_MAX_OBJECT_GB）'
     state = {}
     touched = {}
     touched_lock = threading.Lock()
@@ -118,8 +127,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def health():
         with conn() as c:
             c.execute('SELECT 1')
-        flag = store.flag_text()
-        return {'ok': flag is None, 'version': __version__, 'store_error': flag}
+        problem = store.problem()
+        return {'ok': problem is None, 'version': __version__, 'store_error': problem}
 
     @app.get('/api/v1/me')
     def me(user: dict = Depends(current_user)):
@@ -132,6 +141,13 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         """Which of these (sha256, size) the store lacks; an object with another size counts as missing."""
         return {'missing': [check_digest(d) for d, size in body.objects if store.size(check_digest(d)) != size]}
 
+    @app.post('/api/v1/objects/flush')
+    def flush(user: dict = Depends(data_user)):
+        """Make every object uploaded so far durable. Creating a version does this itself; a client that only
+        brought back files an existing version lacked calls it before saying the repair is done."""
+        store.flush()
+        return {'ok': True}
+
     @app.put('/api/v1/objects/{digest}')
     async def put_object(digest: str, request: Request, user: dict = Depends(data_user)):
         check_digest(digest)
@@ -139,7 +155,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         if length is None or not length.isdigit():
             raise HTTPException(411, '上传需要 Content-Length')
         if int(length) > settings.max_object_bytes:
-            raise HTTPException(413, f'单个文件不能超过 {settings.max_object_bytes // 1024 ** 3} GB')
+            raise HTTPException(413, too_large)
         writer = await run_in_threadpool(store.writer, digest)
         try:
             pending, n = [], 0
@@ -170,7 +186,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         if int(length) > BATCH_BODY_MAX:
             raise HTTPException(413, f'一次批量上传不能超过 {BATCH_BODY_MAX >> 20} MB')
         store.check_writable()
-        parser = FrameParser(BATCH_OBJECT_MAX)
+        parser = FrameParser(min(BATCH_OBJECT_MAX, settings.max_object_bytes))  # the same limit as one by one
         group, group_bytes = [], 0
         stored = created = received = 0
 
@@ -193,6 +209,10 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             if group:
                 created += await run_in_threadpool(put_group, group)
                 stored += len(group)
+        except ObjectTooLarge as e:
+            if e.size > settings.max_object_bytes:
+                raise HTTPException(413, too_large) from None
+            raise HTTPException(400, str(e)) from None
         except ContractError as e:
             raise HTTPException(400, str(e)) from None
         except BadContent as e:

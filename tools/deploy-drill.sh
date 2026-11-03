@@ -113,8 +113,37 @@ time bash setup.sh > "$W/setup-b.log" 2>&1 || { cat "$W/setup-b.log"; exit 1; }
 time bash restore.sh "$W/backup" "$(cat "$W/backup/MID")"
 FW_SERVER=http://127.0.0.1:18001 "$FW" dataset versions DRILL
 
+step 'B：备份里也没有的文件让核对失败：恢复要换回原来的数据库，服务照常'
+before=$(FW_SERVER=http://127.0.0.1:18001 "$FW" dataset versions DRILL)
+lost=$(sha256sum "$W/v2/chip00/img_03000.bmp" | cut -c1-64)   # v2 新加的文件
+lost_path="objects/${lost:0:2}/${lost:2:2}/$lost"
+mv "$W/backup/store/$lost_path" "$W/lost-object"
+rm -f "$W/b-data/store/$lost_path"
+if bash restore.sh "$W/backup" > "$W/restore-fail.log" 2>&1; then
+  cat "$W/restore-fail.log"; echo '缺文件的恢复应该失败'; exit 1
+fi
+grep -E '缺失|换回|继续运行' "$W/restore-fail.log"
+grep -q '平台服务在原来的数据上继续运行' "$W/restore-fail.log" || { cat "$W/restore-fail.log"; exit 1; }
+after=$(FW_SERVER=http://127.0.0.1:18001 "$FW" dataset versions DRILL)
+[ "$after" = "$before" ] || { echo '换回原来的数据库后，版本列表变了'; echo "$before"; echo "$after"; exit 1; }
+mv "$W/lost-object" "$W/backup/store/$lost_path"
+
+step 'B：文件库里一个文件坏了但大小没变；恢复最新的备份时要从备份把它换回来'
+bad=$(sha256sum "$W/v1/chip00/img_00000.bmp" | cut -c1-64)
+python3 - "$W/b-data/store/objects/${bad:0:2}/${bad:2:2}/$bad" <<'PY'
+import os, sys
+p = sys.argv[1]
+data = bytearray(open(p, 'rb').read())
+data[0] ^= 0xff
+os.chmod(p, 0o644)
+with open(p, 'wb') as f:
+    f.write(data)
+os.chmod(p, 0o444)
+PY
+
 step 'B：恢复最新的备份，清空本机缓存后从 B 取回两个版本，和源目录逐个文件比对'
-time bash restore.sh "$W/backup"
+time bash restore.sh "$W/backup" | tee "$W/restore-latest.log"
+grep -q '从备份修复' "$W/restore-latest.log"
 FW_SERVER=http://127.0.0.1:18001 "$FW" dataset versions DRILL
 "$FW" cache clear
 for n in 1 2; do

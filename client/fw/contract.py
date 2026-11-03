@@ -205,6 +205,15 @@ def frame_header(digest: str, size: int) -> bytes:
     return f'{digest} {size}\n'.encode('ascii')
 
 
+class ObjectTooLarge(ContractError):
+    """A frame announced an object bigger than the reader accepts."""
+
+    def __init__(self, size: int, limit: int):
+        super().__init__(f'传输内容里的文件超过 {limit >> 20} MB，要单独传')
+        self.size = size
+        self.limit = limit
+
+
 class FrameParser:
     """Incremental reader of an fw-objects body: feed() it the bytes as they arrive, get back the objects
     completed so far as (sha256, data); finish() raises if the body stopped in the middle of an object."""
@@ -244,7 +253,7 @@ class FrameParser:
                     raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不对')
                 self.need = int(m.group(2))
                 if self.need > self.max_object:
-                    raise ContractError(f'传输内容里的文件超过 {self.max_object >> 20} MB，要单独传')
+                    raise ObjectTooLarge(self.need, self.max_object)
                 self.digest = m.group(1).decode('ascii')
                 self.pos = end + 1
             else:

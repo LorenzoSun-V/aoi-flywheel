@@ -22,9 +22,9 @@ def token_hash(token: str) -> bytes:
     return hashlib.sha256(token.encode('utf-8')).digest()
 
 
-def _user(conn, name: str) -> dict:
-    row = conn.execute('SELECT id, name, role, disabled_at FROM users WHERE lower(name) = lower(%s)',
-                       (name,)).fetchone()
+def _user(conn, name: str, lock: bool = False) -> dict:
+    row = conn.execute('SELECT id, name, role, disabled_at FROM users WHERE lower(name) = lower(%s)'
+                       + (' FOR SHARE' if lock else ''), (name,)).fetchone()
     if row is None:
         raise AuthError(f'没有账号 {name}')
     return row
@@ -64,7 +64,10 @@ def set_disabled(conn, name: str, disabled: bool) -> int:
 
 def create_token(conn, name: str, label: str = '') -> Tuple[str, int]:
     with conn.transaction():
-        user = _user(conn, name)
+        # FOR SHARE holds the account row until the new token is committed. A disable (UPDATE users) that
+        # starts meanwhile waits for it and then revokes it with the others; a disable that came first makes
+        # this wait, and then the row read here already says disabled.
+        user = _user(conn, name, lock=True)
         if user['disabled_at'] is not None:
             raise AuthError(f'账号 {name} 已停用')
         token = new_token()

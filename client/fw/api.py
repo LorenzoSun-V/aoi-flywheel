@@ -152,6 +152,10 @@ class Api:
                                                 headers={'Content-Type': 'application/octet-stream'})))
         return digest
 
+    def flush(self) -> None:
+        """Ask the server to make every object uploaded so far durable (creating a version does it anyway)."""
+        self._json(_retry(lambda: self.http.post('/objects/flush')))
+
     def download(self, digest: str, out: BinaryIO) -> int:
         """Stream one object into `out` and check its hash; returns its size."""
         def run():

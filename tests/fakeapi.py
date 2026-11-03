@@ -17,6 +17,7 @@ class FakeApi:
         self.downloads = 0
         self.batch_uploads = 0
         self.batch_downloads = 0
+        self.events = []  # 'put' and 'flush', in order
         self.corrupt_next_download = set()
 
     # objects
@@ -30,6 +31,7 @@ class FakeApi:
             raise ApiError(400, '上传的内容和哈希对不上')
         self.objects[digest] = data
         self.uploads += 1
+        self.events.append('put')
         return len(data)
 
     def put_objects(self, items):
@@ -44,6 +46,7 @@ class FakeApi:
                 raise ApiError(400, '上传的内容和哈希对不上')
             self.objects[digest] = data
             self.uploads += 1
+            self.events.append('put')
             total += size
         return total
 
@@ -64,7 +67,11 @@ class FakeApi:
     def put_bytes(self, data):
         digest = hashlib.sha256(data).hexdigest()
         self.objects[digest] = data
+        self.events.append('put')
         return digest
+
+    def flush(self):
+        self.events.append('flush')
 
     def read_object(self, digest):
         return self.objects[digest]

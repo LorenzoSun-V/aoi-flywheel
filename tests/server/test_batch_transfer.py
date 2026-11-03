@@ -8,7 +8,7 @@ import pytest
 from helpers import read_tree, write
 from fw import cache as fw_cache
 from fw import ops
-from fw.api import ApiError
+from fw.api import Api, ApiError
 from fw.contract import OBJECTS_MAGIC, OBJECTS_TYPE, frame_header
 from fwserver import app as fw_app
 from fwserver.store import FLAG
@@ -78,7 +78,7 @@ def test_upload_refused_while_the_store_is_flagged(api, tmp_path, service):
             api.put_objects(make_objects(tmp_path, [10]))
         assert e.value.status == 503
     finally:
-        store.clear_flag()
+        (store.root / FLAG).unlink()
 
 
 def test_only_data_roles_can_transfer(make_api, tmp_path):
@@ -142,3 +142,21 @@ def test_import_and_get_mixing_batched_and_single_files(api, dataset, cache, tmp
     v = ops.import_folder(api, dataset, tmp_path / 'src', echo=quiet)
     ops.get(api, cache, v['ref'], tmp_path / 'out', echo=quiet)
     assert read_tree(tmp_path / 'out') == files
+
+
+def test_batch_upload_keeps_the_configured_size_limit(make_service, tokens, tmp_path):
+    """FW_MAX_OBJECT_GB below the batch frame limit: a file refused one by one is refused in a batch too,
+    and is not stored."""
+    svc = make_service(max_object_bytes=64 << 10)
+    api = Api(svc.url, tokens['algo'])
+    try:
+        (big,) = make_objects(tmp_path / 'big', [128 << 10])
+        (fits,) = make_objects(tmp_path / 'fits', [64 << 10])
+        for send in (lambda: api.put_file(big[0], big[1]), lambda: api.put_objects([fits, big])):
+            with pytest.raises(ApiError) as e:
+                send()
+            assert e.value.status == 413 and '64 KB' in e.value.message
+        assert api.missing([(big[0], big[2])]) == [big[0]]
+        assert api.put_objects([fits]) == fits[2]
+    finally:
+        api.close()

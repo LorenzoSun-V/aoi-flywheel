@@ -21,17 +21,56 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import cache_dir
 from .contract import BATCH_OBJECT_MAX, batches
+from .layout import hash_file
 
 FETCH_COUNT = 2000          # objects per batch download
 FETCH_BYTES = 32 << 20      # bytes per batch download
 
 
 def remove_file(path: Path) -> None:
+    """Delete a cache object (or a file just laid out). The file's mode is left alone except on Windows,
+    which cannot delete a read-only file: elsewhere a hardlinked copy in a fetched folder shares the mode,
+    and must stay read-only (fw get --hardlink is refused on Windows for this reason)."""
     try:
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)  # Windows cannot delete a read-only file
+        if os.name == 'nt':
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
         os.unlink(path)
     except FileNotFoundError:
         pass
+
+
+def install_file(tmp: str, path: Path, digest: str) -> None:
+    """Give a verified download its name in the cache. Another fw process sharing the cache may be reading
+    or installing the same object at this moment, so the name never goes missing on the way: no delete
+    before the rename."""
+    os.chmod(tmp, stat.S_IREAD)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(tmp, path)  # atomic; outside Windows it replaces a read-only file as well
+        return
+    except PermissionError:
+        if os.name != 'nt':
+            raise
+    # Windows does not replace a read-only (or open) file. An intact copy that is already there will do.
+    try:
+        intact = hash_file(path) == digest
+    except FileNotFoundError:
+        intact = False
+    if intact:
+        remove_file(Path(tmp))
+        return
+    try:
+        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    except FileNotFoundError:
+        pass
+    try:
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.chmod(path, stat.S_IREAD)
+        except OSError:
+            pass
+        raise
 
 
 class Cache:
@@ -130,10 +169,7 @@ class Cache:
         try:
             with os.fdopen(fd, 'wb') as f:
                 f.write(data)
-            os.chmod(tmp, stat.S_IREAD)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            remove_file(path)
-            os.replace(tmp, path)
+            install_file(tmp, path, digest)
         except BaseException:
             remove_file(Path(tmp))
             raise
@@ -195,10 +231,7 @@ class Cache:
         try:
             with os.fdopen(fd, 'w+b') as f:
                 size = api.download(digest, f)
-            os.chmod(tmp, stat.S_IREAD)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            remove_file(path)
-            os.replace(tmp, path)
+            install_file(tmp, path, digest)
         except BaseException:
             remove_file(Path(tmp))
             raise
