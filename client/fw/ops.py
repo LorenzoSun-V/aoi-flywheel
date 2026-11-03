@@ -318,12 +318,11 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
             except FileNotFoundError:
                 if target.exists():
                     raise
-            # the cache object is damaged, or another fw process dropped it meanwhile: download it again
+            # the cache object is damaged, or it was cleared meanwhile: download it again. The new copy
+            # replaces the old one atomically, so another fw process reading it never finds it missing.
             with lock:
-                if digest not in refetched:
-                    refetched.add(digest)
-                    cache.drop(digest)
-            source = cache.fetch(api, digest)
+                refetched.add(digest)
+            source = cache.fetch(api, digest, force=True)
         raise FwError(f'{rel}：重新下载后仍然和清单的哈希对不上，请检查这台机器的磁盘')
 
     _parallel(place, entries, _file_workers([size for _, _, size in entries], workers), '摆放并核对')

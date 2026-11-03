@@ -235,3 +235,33 @@ def test_bringing_back_lost_files_of_an_unchanged_version_is_flushed(api, datase
     monkeypatch.setattr(store, 'sync', lambda: events.append('sync') or real_sync())
     assert ops.import_folder(api, dataset, src, echo=quiet)['id'] == v['id']
     assert events == ['install', 'sync'] and store.path(lost).is_file()
+
+
+def test_rehash_after_a_write_error_checks_files_no_version_uses_yet(api, dataset, tmp_path, service, database,
+                                                                    monkeypatch):
+    """The failed import leaves its uploaded files behind, and after the write error one of them is damaged
+    (same size). verify --rehash must catch it before it lifts the block: the retry would otherwise reuse it
+    and freeze a version that cannot be fetched."""
+    store = service.app.state.store
+    src, files = folder(tmp_path)
+    with monkeypatch.context() as m:
+        m.setattr(store, '_syncfs', failing_syncfs)
+        with pytest.raises(ApiError) as e:
+            ops.import_folder(api, dataset, src, echo=quiet)
+        assert e.value.status == 503 and no_versions(api, dataset)
+    damaged, _ = sha256_file(src / 'img_003.bmp')
+    path = store.path(damaged)
+    data = bytearray(path.read_bytes())
+    data[-1] ^= 0xFF
+    path.chmod(0o644)
+    path.write_bytes(bytes(data))
+    assert verify_rehash(monkeypatch, database, store) == 0
+    assert not path.exists()  # moved to quarantine/: the server no longer claims to have it
+    v = ops.import_folder(api, dataset, src, echo=quiet)  # so the retry sends it again
+    assert v['number'] == 1 and all_frozen_versions_complete(service, database)
+    cache = Cache(tmp_path / 'cache')
+    try:
+        ops.get(api, cache, v['ref'], tmp_path / 'out', echo=quiet)
+    finally:
+        cache.close()
+    assert read_tree(tmp_path / 'out') == files

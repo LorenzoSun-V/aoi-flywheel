@@ -221,12 +221,15 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
     """Check that every version can be laid out exactly as frozen. Returns the problems left.
 
     - each version's rows rebuild its manifest hash, and the manifest object is in the store and intact;
-    - every referenced object is in the store with the right size, and with rehash, the right content.
-    Damaged objects are replaced from `repair_from` (another store, e.g. the backup) when it has an intact
-    copy; otherwise they are moved to quarantine/ so that the next upload of that file restores them.
-    With rehash every object is read back from the disk (not from the page cache, which can still hold data
-    a failed write-back never got onto the disk). Repairs are made durable before this returns; if that
-    fails the store refuses writes and StoreError is raised.
+    - every referenced object is in the store with the right size, and with rehash, the right content;
+    - with rehash, also every object no version uses yet (left by an import that failed or is still
+      running): the next import of the same files reuses whatever the store holds, so a damaged one is
+      moved to quarantine/ and that import sends it again. These are not problems of any version.
+    Damaged referenced objects are replaced from `repair_from` (another store, e.g. the backup) when it has
+    an intact copy; otherwise they are moved to quarantine/ so that the next upload of that file restores
+    them. With rehash every object is read back from the disk (not from the page cache, which can still hold
+    data a failed write-back never got onto the disk). Repairs and moves are made durable before this
+    returns; if that fails the store refuses writes and StoreError is raised.
     """
     if rehash:
         store.sync()  # write back what is pending first, so that the rehash reads what the disk holds
@@ -262,8 +265,24 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
             store.move_to_quarantine(digest)
             state += '，已移到 quarantine/，重新导入含它的目录即可补回'
         problems.append(f'文件 {digest[:12]}（{ref} 等用到）{state}')
-    if repaired:
-        store.sync()  # a repair counts only once the file is on the disk
+    loose = loose_damaged = 0
+    if rehash:
+        for digest in store.iter_objects():
+            if digest in wanted:
+                continue
+            loose += 1
+            try:
+                ok = hash_path(store.path(digest), from_disk=True)[0] == digest
+            except FileNotFoundError:
+                continue  # replaced or moved meanwhile
+            if not ok:
+                store.move_to_quarantine(digest)
+                loose_damaged += 1
+    if repaired or loose_damaged:
+        store.sync()  # a repair (or a damaged file moved aside) counts only once it is on the disk
     echo(f'核对了 {len(versions)} 个版本、{checked} 个文件{"（重算了哈希）" if rehash else ""}；'
          f'从备份修复 {repaired} 个；问题 {len(problems)} 个')
+    if rehash:
+        echo(f'另外核对了还没有版本用到的文件 {loose} 个（中断的导入留下的）；'
+             f'其中损坏的 {loose_damaged} 个已移到 quarantine/，再导入时会重新上传')
     return problems

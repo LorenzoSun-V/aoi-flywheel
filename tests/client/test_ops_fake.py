@@ -172,7 +172,6 @@ def test_clearing_the_cache_leaves_hardlinked_files_read_only(tmp_path, api, cac
     ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', files), echo=quiet)
     for n in (1, 2):
         ops.get(api, cache, 'SES-TX@1', tmp_path / f'out{n}', link='hardlink', echo=quiet)
-    cache.drop(hash_file(tmp_path / 'v1' / 'a.json'))
     cache.clear()
     for n in (1, 2):
         for rel in files:
@@ -235,6 +234,89 @@ def test_a_second_client_installing_a_batch_never_hides_an_object(tmp_path, api,
         monkeypatch.setattr(os, 'replace', replace)
         assert b.fetch_many(api, [(digest, len(data))])[digest] == path
         assert seen and all(s == data for s in seen) and path.read_bytes() == data
+    finally:
+        a.close()
+        b.close()
+
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _StaleRead:
+    """A cache's index connection that lets another fw process run just after this one has read its rows."""
+
+    def __init__(self, db, query, then):
+        self._db, self._query, self._then = db, query, then
+        self.fired = False
+
+    def execute(self, sql, *args):
+        if self.fired or not sql.startswith(self._query):
+            return self._db.execute(sql, *args)
+        rows = self._db.execute(sql, *args).fetchall()
+        self.fired = True
+        self._then()
+        return _Rows(rows)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def _touched(path):
+    """Some other program touched a cached file: the next fetch downloads it again."""
+    past = path.stat().st_mtime_ns - 3600 * 10 ** 9
+    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    os.utime(path, ns=(past, past))
+    os.chmod(path, stat.S_IREAD)
+    return past
+
+
+def test_a_stale_index_row_never_deletes_a_fresh_copy(tmp_path, api, monkeypatch):
+    """Two fw processes share one cache. B reads an object's index row; before B looks at the file, A finds
+    the object changed and installs a fresh copy. B's row is out of date now, and B must not delete A's copy
+    because of it."""
+    data = b'A' * 100
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'a.bmp': data, 'a.json': b'{}'}), echo=quiet)
+    digest = hash_file(tmp_path / 'v1' / 'a.bmp')
+    a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
+    try:
+        path = a.fetch(api, digest)
+        past = _touched(path)
+        fresh = []
+        monkeypatch.setattr(b, '_db', _StaleRead(b._db, 'SELECT size', lambda: fresh.append(a.fetch(api, digest))))
+        assert b.cached(digest) is None  # B's row says the file was changed: B would download it again
+        assert fresh == [path] and path.stat().st_mtime_ns != past
+        assert path.read_bytes() == data and a.cached(digest) == path
+        assert b.fetch(api, digest) == path and path.read_bytes() == data
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_stale_index_row_never_deletes_a_fresh_copy_in_a_batch(tmp_path, api, monkeypatch):
+    """The same for the lookup batch downloads use."""
+    data = b'B' * 100
+    ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'b.bmp': data, 'b.json': b'{}'}), echo=quiet)
+    digest = hash_file(tmp_path / 'v1' / 'b.bmp')
+    objects = [(digest, len(data))]
+    a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
+    try:
+        path = a.fetch_many(api, objects)[digest]
+        past = _touched(path)
+        fresh = []
+        monkeypatch.setattr(b, '_db', _StaleRead(b._db, 'SELECT sha256, size, mtime_ns',
+                                                 lambda: fresh.append(a.fetch_many(api, objects)[digest])))
+        assert b.cached_many([digest]) == {}
+        assert fresh == [path] and path.stat().st_mtime_ns != past
+        assert path.read_bytes() == data and a.cached_many([digest]) == {digest: path}
+        assert b.fetch_many(api, objects)[digest] == path and path.read_bytes() == data
     finally:
         a.close()
         b.close()

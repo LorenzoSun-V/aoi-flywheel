@@ -1,12 +1,14 @@
 """Local cache of one machine: downloaded objects, stored by sha256 under objects/ab/cd/<sha256>.
 
 An object enters the cache only after its download matched its hash. The index keeps each object's size and
-mtime from that moment; an object whose size or mtime has changed since is dropped and downloaded again.
-That check is only a shortcut: every file `fw get` lays out is hashed again against the manifest, so a
-cache object that was changed some other way is still caught (see layout.py). For the same reason the
-index is not synced to disk on every write (synchronous=NORMAL): after a power cut it may be missing the
-last few objects (they are downloaded again) or describe an object whose data was lost (the hash check
-when it is laid out catches that).
+mtime from that moment; an object whose size or mtime has changed since is downloaded again, and the new copy
+replaces it under the same name. Nothing in the cache is deleted because of what the index says: several fw
+processes may share one cache, and the row one of them has just read may already be out of date (another
+process may have installed a fresh copy since). The size and mtime check is only a shortcut: every file
+`fw get` lays out is hashed again against the manifest, so a cache object that was changed some other way is
+still caught (see layout.py). For the same reason the index is not synced to disk on every write
+(synchronous=NORMAL): after a power cut it may be missing the last few objects (they are downloaded again)
+or describe an object whose data was lost (the hash check when it is laid out catches that).
 """
 from __future__ import annotations
 
@@ -87,7 +89,6 @@ class Cache:
                              '(sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL)')
         self.downloaded_files = 0
         self.downloaded_bytes = 0
-        self.dropped = 0
 
     def close(self):
         with self._lock:
@@ -100,12 +101,6 @@ class Cache:
         with self._lock:
             count, total = self._db.execute('SELECT count(*), coalesce(sum(size), 0) FROM objects').fetchone()
         return count, total
-
-    def drop(self, digest: str) -> None:
-        remove_file(self.object_path(digest))
-        with self._lock:
-            self.dropped += 1
-            self._db.execute('DELETE FROM objects WHERE sha256 = ?', (digest,))
 
     def clear(self) -> int:
         """Drop every cached object; folders already laid out keep their files."""
@@ -122,7 +117,10 @@ class Cache:
         return removed
 
     def cached(self, digest: str) -> Optional[Path]:
-        """The cached object, if present and its size and mtime are as downloaded."""
+        """The cached object, if present and its size and mtime are as downloaded. Otherwise None, and the
+        file is left where it is: by the time it is looked at, another fw process may have replaced it with a
+        fresh copy (and the row read here is out of date), so a mismatch is a reason to download again, never
+        to delete."""
         path = self.object_path(digest)
         with self._lock:
             row = self._db.execute('SELECT size, mtime_ns FROM objects WHERE sha256 = ?', (digest,)).fetchone()
@@ -134,7 +132,6 @@ class Cache:
             return None
         if (st.st_size, st.st_mtime_ns) == (row[0], row[1]):
             return path
-        self.drop(digest)
         return None
 
     def cached_many(self, digests: Iterable[str]) -> Dict[str, Path]:
@@ -157,9 +154,7 @@ class Cache:
             except FileNotFoundError:
                 continue
             if (st.st_size, st.st_mtime_ns) == row:
-                out[digest] = path
-            else:
-                self.drop(digest)
+                out[digest] = path  # otherwise downloaded again, never deleted (see cached())
         return out
 
     def _install(self, digest: str, data: bytes) -> Tuple[str, int, int]:
@@ -221,11 +216,15 @@ class Cache:
                     pass
         return paths
 
-    def fetch(self, api, digest: str) -> Path:
-        """Return the cached object, downloading it (hash checked before it enters the cache) if needed."""
-        path = self.cached(digest)
-        if path is not None:
-            return path
+    def fetch(self, api, digest: str, force: bool = False) -> Path:
+        """Return the cached object, downloading it (hash checked before it enters the cache) if needed.
+        force: download it even if the cache seems to have it (the cached copy did not match the manifest).
+        Either way the new copy replaces the old one atomically, so the name is never missing for a process
+        that is reading it."""
+        if not force:
+            path = self.cached(digest)
+            if path is not None:
+                return path
         path = self.object_path(digest)
         fd, tmp = tempfile.mkstemp(dir=str(self.root / 'tmp'))
         try:
