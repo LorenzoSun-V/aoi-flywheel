@@ -1,0 +1,12 @@
+# 部署生成的配置，里面有数据库密码
+deploy/.env
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.import_linter_cache/
