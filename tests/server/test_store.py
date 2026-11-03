@@ -70,3 +70,26 @@ def test_rehash_reads_from_the_disk(tmp_path, monkeypatch):
     assert advice == []
     store_module.hash_path(path, from_disk=True)
     assert advice == [os.POSIX_FADV_DONTNEED]
+
+
+@pytest.mark.parametrize('level', [0, 1, 2])
+def test_listing_objects_fails_on_a_folder_it_cannot_read(tmp_path, monkeypatch, level):
+    s = Store(tmp_path / 's')
+    try:
+        digests = {s.put_bytes(bytes([i]) * 10)[0] for i in range(3)}
+        (s.objects / 'README').write_text('not an object')  # entries outside objects/ab/cd/<sha256> are no objects
+        assert set(s.iter_objects()) == digests
+        d = min(digests)
+        target = [s.objects, s.objects / d[:2], s.objects / d[:2] / d[2:4]][level]
+        real_scandir = os.scandir
+
+        def scandir(p='.'):
+            if os.fspath(p) == str(target):
+                raise OSError(errno.EIO, os.strerror(errno.EIO), os.fspath(p))
+            return real_scandir(p)
+
+        monkeypatch.setattr(os, 'scandir', scandir)
+        with pytest.raises(StoreError, match='核对没有完成'):
+            list(s.iter_objects())
+    finally:
+        s.close()

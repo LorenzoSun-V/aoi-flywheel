@@ -35,11 +35,12 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 from fw.contract import CHUNK
 
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
+HEX2 = re.compile(r'[0-9a-f]{2}\Z')
 FLAG = 'WRITE-ERROR'  # present: writes refused; says what went wrong and when
 MARKER = 'WRITE-OK'  # absent: writes refused; a new random content each time verify --rehash passes
 _UNREADABLE = object()
@@ -335,10 +336,34 @@ class Store:
                 pass
 
     def iter_objects(self) -> Iterator[str]:
-        for dirpath, _, names in os.walk(self.objects):
-            for n in names:
-                if HEX64.match(n):
-                    yield n
+        """Every object in the store, walking objects/ab/cd/<sha256>. A folder that cannot be listed (or an
+        entry whose type cannot be read) raises StoreError: a check that skipped it would pass without having
+        seen the objects in it."""
+        for a in self._subdirs(self.objects):
+            for b in self._subdirs(a.path):
+                for e in self._list(b.path):
+                    if HEX64.match(e.name) and e.name[:2] == a.name and e.name[2:4] == b.name:
+                        yield e.name
+
+    @staticmethod
+    def _list(path: str) -> List[os.DirEntry]:
+        try:
+            with os.scandir(path) as it:
+                return list(it)
+        except OSError as e:
+            raise StoreError(f'读不了文件库目录 {path}（{e.strerror or e}），核对没有完成') from None
+
+    def _subdirs(self, path) -> List[os.DirEntry]:
+        out = []
+        for e in self._list(path):
+            if not HEX2.match(e.name):
+                continue  # objects are only ever looked up under objects/ab/cd/
+            try:
+                if e.is_dir():  # follows a link: whatever is behind it is served, so it is checked too
+                    out.append(e)
+            except OSError as err:
+                raise StoreError(f'读不了文件库目录 {e.path}（{err.strerror or err}），核对没有完成') from None
+        return out
 
 
 class ObjectWriter:

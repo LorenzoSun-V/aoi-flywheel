@@ -228,7 +228,8 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
     Damaged referenced objects are replaced from `repair_from` (another store, e.g. the backup) when it has
     an intact copy; otherwise they are moved to quarantine/ so that the next upload of that file restores
     them. With rehash every object is read back from the disk (not from the page cache, which can still hold
-    data a failed write-back never got onto the disk). Repairs and moves are made durable before this
+    data a failed write-back never got onto the disk). A file or folder that cannot be read is a problem
+    too: a check that skipped it has not seen what it holds. Repairs and moves are made durable before this
     returns; if that fails the store refuses writes and StoreError is raised.
     """
     if rehash:
@@ -251,10 +252,14 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
     checked = repaired = 0
     for digest, (size, ref) in sorted(wanted.items()):
         checked += 1
-        got = store.size(digest)
-        ok = got is not None and (size is None or got == size)
-        if ok and rehash:
-            ok = hash_path(store.path(digest), from_disk=True)[0] == digest
+        try:
+            got = store.size(digest)
+            ok = got is not None and (size is None or got == size)
+            if ok and rehash:
+                ok = hash_path(store.path(digest), from_disk=True)[0] == digest
+        except OSError as e:
+            problems.append(f'文件 {digest[:12]}（{ref} 等用到）读不出来（{e.strerror or e}），先检查磁盘')
+            continue
         if ok:
             continue
         if repair_from is not None and store.repair_from(digest, repair_from):
@@ -267,17 +272,23 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
         problems.append(f'文件 {digest[:12]}（{ref} 等用到）{state}')
     loose = loose_damaged = 0
     if rehash:
-        for digest in store.iter_objects():
-            if digest in wanted:
-                continue
-            loose += 1
-            try:
-                ok = hash_path(store.path(digest), from_disk=True)[0] == digest
-            except FileNotFoundError:
-                continue  # replaced or moved meanwhile
-            if not ok:
-                store.move_to_quarantine(digest)
-                loose_damaged += 1
+        try:
+            for digest in store.iter_objects():
+                if digest in wanted:
+                    continue
+                loose += 1
+                try:
+                    ok = hash_path(store.path(digest), from_disk=True)[0] == digest
+                except FileNotFoundError:
+                    continue  # replaced or moved meanwhile
+                except OSError as e:
+                    problems.append(f'文件 {digest[:12]}（还没有版本用到）读不出来（{e.strerror or e}），先检查磁盘')
+                    continue
+                if not ok:
+                    store.move_to_quarantine(digest)
+                    loose_damaged += 1
+        except StoreError as e:  # a folder could not be listed: the check is incomplete and must not pass
+            problems.append(str(e))
     if repaired or loose_damaged:
         store.sync()  # a repair (or a damaged file moved aside) counts only once it is on the disk
     echo(f'核对了 {len(versions)} 个版本、{checked} 个文件{"（重算了哈希）" if rehash else ""}；'
