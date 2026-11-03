@@ -11,3 +11,4 @@
 - `fw-server verify [--rehash] [--repair-from 备份]` 核对文件库，能从备份修复。
 - `deploy/backup.sh` 在线备份（不停服务），`deploy/restore.sh` 恢复（失败时换回原数据库）。
 - `tools/bench.py` 规模测速，`tools/deploy-drill.sh` 部署和恢复演练。
+- 小文件批量传输：导入和取回时小文件一次请求传几千个（16 MB 以上的文件仍然一个一次），每个文件照样按哈希核对；网络断了只重传还没收到的。同一台机器上 20 万个小文件入库从 470 秒降到 53 秒，冷取回从 648 秒降到 136 秒。
