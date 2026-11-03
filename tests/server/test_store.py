@@ -111,7 +111,7 @@ def test_a_write_is_on_record_before_the_object_appears(tmp_path, monkeypatch):
     seen = []
 
     def link(src, dst, *args, **kwargs):
-        seen.append((tmp_path / 's' / UNSYNCED).read_text().strip())
+        seen.append((tmp_path / 's' / UNSYNCED).read_text().split()[0])
         return real_link(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(os, 'link', link)
@@ -132,7 +132,7 @@ def test_a_restart_with_writes_not_yet_on_disk_blocks_until_verified(tmp_path, m
         with pytest.raises(StoreError, match='verify --rehash'):
             s.writer(digest)
         s.move_to_quarantine(digest)  # what verify does with a damaged file: allowed, the record stays
-        assert (tmp_path / 's' / UNSYNCED).read_text().strip() == 'boot-1'
+        assert (tmp_path / 's' / UNSYNCED).read_text().split()[0] == 'boot-1'
         s.mark_verified()
         assert s.problem() is None and not (tmp_path / 's' / UNSYNCED).exists()
         s.put_bytes(b'abc')
@@ -178,3 +178,120 @@ def test_the_record_is_not_removed_while_another_process_writes(tmp_path, monkey
     assert done.is_set() and not (tmp_path / 's' / UNSYNCED).exists()
     a.close()
     b.close()
+
+
+class _Disk:
+    """Follows what has reached the disk in the store's root folder: renaming UNSYNCED into place only becomes
+    durable with a later fsync of that folder (by any process). At every object link it notes whether
+    UNSYNCED was on the disk by then. fsync of the folder can be held up or made to fail."""
+
+    def __init__(self, monkeypatch, root):
+        import threading
+        self.root = root
+        self.ino = os.stat(root).st_ino
+        self.pending = False  # UNSYNCED renamed into place, no fsync of the folder since
+        self.links = []  # per object link: was UNSYNCED durable at that moment?
+        self.hold = None  # (fd, reached, release): this fsync waits for release
+        self.fail = 0  # fail this many fsyncs of the folder with EIO
+        self.lock = threading.Lock()
+        real_replace, real_fsync, real_link = os.replace, os.fsync, os.link
+
+        def replace(src, dst, *args, **kwargs):
+            out = real_replace(src, dst, *args, **kwargs)
+            if os.fspath(dst) == os.fspath(root / UNSYNCED):
+                self.pending = True
+            return out
+
+        def fsync(fd):
+            if os.fstat(fd).st_ino != self.ino:
+                return real_fsync(fd)
+            if self.hold is not None and self.hold[0] == fd:
+                self.hold[1].set()
+                assert self.hold[2].wait(10)
+            with self.lock:
+                if self.fail:
+                    self.fail -= 1
+                    raise OSError(errno.EIO, os.strerror(errno.EIO))
+            real_fsync(fd)
+            self.pending = False
+
+        def link(src, dst, *args, **kwargs):
+            self.links.append((root / UNSYNCED).exists() and not self.pending)
+            return real_link(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, 'replace', replace)
+        monkeypatch.setattr(os, 'fsync', fsync)
+        monkeypatch.setattr(os, 'link', link)
+
+
+def test_a_record_another_writer_has_not_made_durable_yet_is_not_relied_on(tmp_path, monkeypatch):
+    """Writer a has renamed UNSYNCED into place but its fsync of the folder has not happened yet. Writer b (another
+    process) sees the record: it must not take it as being on the disk, or a power cut now loses the record
+    while b's file stays without one."""
+    import threading
+    a = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    b = Store(tmp_path / 's')
+    disk = _Disk(monkeypatch, tmp_path / 's')
+    reached, release = threading.Event(), threading.Event()
+    disk.hold = (a._fd, reached, release)
+    t = threading.Thread(target=a.put_bytes, args=(b'from a',))
+    t.start()
+    try:
+        assert reached.wait(10)  # UNSYNCED is visible, a's fsync of the folder is held up
+        assert not disk.links
+        b.put_bytes(b'from b')
+    finally:
+        release.set()
+        t.join(10)
+    assert disk.links == [True, True]
+    a.close()
+    b.close()
+
+
+def test_a_record_whose_folder_fsync_failed_is_not_relied_on(tmp_path, monkeypatch):
+    """The first write of a cycle cannot make UNSYNCED durable (fsync of the folder fails). The record is visible
+    all the same: no later write, in this process or another, may count on it; writes wait for verify."""
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    disk = _Disk(monkeypatch, tmp_path / 's')
+    disk.fail = 1
+    with pytest.raises(StoreError):
+        s.put_bytes(b'first')
+    assert (tmp_path / 's' / UNSYNCED).exists()
+    other = Store(tmp_path / 's')
+    try:
+        for store in (s, other):
+            with pytest.raises(StoreError, match='verify --rehash'):
+                store.put_bytes(b'second')
+        assert not any(disk.links)
+        s.mark_verified()
+        other.put_bytes(b'second')
+        assert disk.links[-1] is True
+    finally:
+        other.close()
+        s.close()
+
+
+def test_verify_fails_when_the_old_record_cannot_be_removed(tmp_path, monkeypatch):
+    """After a restart verify checks everything, but removing the other boot's UNSYNCED fails: writes stay
+    refused, so verify must not report the block as lifted."""
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    s.put_bytes(b'abc')
+    _lose_power(s)
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-2')
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(tmp_path / 's' / UNSYNCED):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_unlink(path, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(os, 'unlink', unlink)
+            with pytest.raises(StoreError, match='没能解除写入阻断'):
+                s.mark_verified()
+        assert UNSYNCED in s.problem()
+        s.mark_verified()
+        assert s.problem() is None
+    finally:
+        s.close()

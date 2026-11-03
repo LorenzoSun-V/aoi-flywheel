@@ -310,12 +310,10 @@ def test_rehash_fails_when_a_folder_of_the_store_cannot_be_listed(api, dataset, 
     assert read_tree(tmp_path / 'out') == files
 
 
-def test_power_loss_during_an_import_blocks_writes_until_verified(api, dataset, tmp_path, service, database,
-                                                                  monkeypatch):
-    """The machine loses power while an import is uploading: the files sent so far were never made durable,
-    and one comes back damaged (same size). Nothing reported an error, but after the restart the store must
-    refuse writes until verify --rehash has checked it; otherwise the retry reuses the damaged file and
-    freezes a version that cannot be fetched."""
+def _power_cut_during_an_import(api, dataset, tmp_path, service, monkeypatch):
+    """An import uploads part of its files, then the machine loses power: the files sent so far were never
+    made durable, and one comes back damaged (same size). Then the machine and the server start again.
+    Returns (folder, files, path of the damaged object)."""
     from fwserver import store as store_module
     store = service.app.state.store
     src, files = folder(tmp_path)
@@ -334,8 +332,7 @@ def test_power_loss_during_an_import_blocks_writes_until_verified(api, dataset, 
         with pytest.raises(ApiError):
             ops.import_folder(api, dataset, src, workers=1, echo=quiet)
     assert no_versions(api, dataset)
-    damaged = sent[3]
-    path = store.path(damaged)
+    path = store.path(sent[3])
     data = bytearray(path.read_bytes())
     data[:] = bytes(len(data))  # what an unsynced file can look like after a power cut: same size, zeros
     path.chmod(0o644)
@@ -343,6 +340,15 @@ def test_power_loss_during_an_import_blocks_writes_until_verified(api, dataset, 
     # the restart: a new boot of the machine, a new server process
     monkeypatch.setattr(store_module, '_boot_id', lambda: 'boot-after-the-power-cut')
     monkeypatch.setattr(store, '_boot', 'boot-after-the-power-cut')
+    return src, files, path
+
+
+def test_power_loss_during_an_import_blocks_writes_until_verified(api, dataset, tmp_path, service, database,
+                                                                  monkeypatch):
+    """Nothing reported an error, but after the restart the store must refuse writes until verify --rehash has
+    checked it; otherwise the retry reuses the damaged file and freezes a version that cannot be fetched."""
+    store = service.app.state.store
+    src, files, path = _power_cut_during_an_import(api, dataset, tmp_path, service, monkeypatch)
     with pytest.raises(ApiError) as e:
         ops.import_folder(api, dataset, src, echo=quiet)
     assert e.value.status == 503 and no_versions(api, dataset)
@@ -356,3 +362,32 @@ def test_power_loss_during_an_import_blocks_writes_until_verified(api, dataset, 
     finally:
         cache.close()
     assert read_tree(tmp_path / 'out') == files
+
+
+def test_verify_fails_when_it_cannot_lift_the_block_after_a_power_loss(api, dataset, tmp_path, service, database,
+                                                                       monkeypatch, capsys):
+    """Everything checks out, but the record of the old boot cannot be removed: uploads stay refused, so verify
+    must fail instead of reporting the block as lifted."""
+    from fwserver.store import UNSYNCED
+    store = service.app.state.store
+    src, files, path = _power_cut_during_an_import(api, dataset, tmp_path, service, monkeypatch)
+    record = os.fspath(store.root / UNSYNCED)
+    real_unlink = os.unlink
+
+    def unlink(p, *args, **kwargs):
+        if os.fspath(p) == record:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_unlink(p, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(os, 'unlink', unlink)
+        assert verify_rehash(monkeypatch, database, store) == 1
+    out = capsys.readouterr()
+    assert '已解除' not in out.out and '没能解除写入阻断' in out.err
+    with pytest.raises(ApiError) as e:
+        ops.import_folder(api, dataset, src, echo=quiet)
+    assert e.value.status == 503 and no_versions(api, dataset)
+    assert verify_rehash(monkeypatch, database, store) == 0  # the disk works again
+    assert '已解除' in capsys.readouterr().out
+    ops.import_folder(api, dataset, src, echo=quiet)
+    assert all_frozen_versions_complete(service, database)
