@@ -1,0 +1,35 @@
+[importlinter]
+root_packages =
+    fw
+    fwserver
+
+[importlinter:contract:server-layers]
+name = Server modules only call downwards (cli, app -> datasets, auth -> store, db, settings)
+type = layers
+layers =
+    fwserver.cli
+    fwserver.app
+    fwserver.datasets | fwserver.auth
+    fwserver.store | fwserver.db | fwserver.settings
+
+[importlinter:contract:client-standalone]
+name = The fw client never imports the server
+type = forbidden
+source_modules =
+    fw
+forbidden_modules =
+    fwserver
+
+[importlinter:contract:contract-pure]
+name = fw.contract (shared with the server) depends on nothing else in fw
+type = forbidden
+source_modules =
+    fw.contract
+forbidden_modules =
+    fw.api
+    fw.cache
+    fw.checks
+    fw.cli
+    fw.config
+    fw.layout
+    fw.ops

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aoi-flywheel-server"
+description = "fw-server: the aoi-flywheel platform service (file store, dataset versions)"
+requires-python = ">=3.10"
+dependencies = [
+    "aoi-flywheel-client",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httptools>=0.6",
+    "uvloop>=0.19",
+    "psycopg[binary]>=3.1.18",
+    "psycopg-pool>=3.2",
+]
+dynamic = ["version"]
+
+[project.scripts]
+fw-server = "fwserver.cli:main"
+
+[tool.setuptools]
+packages = ["fwserver"]
+
+[tool.setuptools.package-data]
+fwserver = ["migrations/*.sql"]
+
+[tool.setuptools.dynamic]
+version = {attr = "fwserver.__version__"}

@@ -1,0 +1,7 @@
+# 镜像只需要 client、server 和 deploy/constraints.txt（见 deploy/Dockerfile）
+*
+!client
+!server
+!deploy/constraints.txt
+**/__pycache__
+**/*.egg-info
