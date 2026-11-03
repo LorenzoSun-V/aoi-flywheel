@@ -221,40 +221,52 @@ class _Rows:
     def fetchone(self):
         return self._rows[0] if self._rows else None
 
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _StaleRead:
+    """A cache's index connection that lets another fw process run just after this one has read its rows."""
+
+    def __init__(self, db, query, then):
+        self._db, self._query, self._then = db, query, then
+        self.fired = False
+
+    def execute(self, sql, *args):
+        if self.fired or not sql.startswith(self._query):
+            return self._db.execute(sql, *args)
+        rows = self._db.execute(sql, *args).fetchall()
+        self.fired = True
+        self._then()
+        return _Rows(rows)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def _out_of_date(cache, digest):
+    """The cached file no longer matches its index row (some other program touched it), so the next fetch
+    downloads it again. The row is moved an hour back: no copy installed from now on can match it, even where
+    two installs land in the same tick of the file system's clock."""
+    with cache._lock:
+        cache._db.execute('UPDATE objects SET mtime_ns = mtime_ns - ? WHERE sha256 = ?', (3600 * 10 ** 9, digest))
+
 
 def test_a_stale_index_row_never_deletes_a_fresh_copy(tmp_path, api, monkeypatch):
     """Two fw processes share one cache. B reads an object's index row; before B looks at the file, A finds
-    the object changed and installs a fresh copy. B's row is out of date now, and B must not delete A's copy
-    because of it."""
+    the object out of date and installs a fresh copy (on Windows: keeps the intact one and records it). B's
+    row no longer describes the file, and B must not delete A's copy because of it."""
     data = b'A' * 100
     ops.import_folder(api, 'SES-TX', make_folder(tmp_path / 'v1', {'a.bmp': data, 'a.json': b'{}'}), echo=quiet)
     digest = hash_file(tmp_path / 'v1' / 'a.bmp')
     a, b = Cache(tmp_path / 'shared'), Cache(tmp_path / 'shared')
     try:
         path = a.fetch(api, digest)
-        past = path.stat().st_mtime_ns - 3600 * 10 ** 9
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-        os.utime(path, ns=(past, past))  # some other program touched it: the next fetch downloads it again
-        os.chmod(path, stat.S_IREAD)
+        _out_of_date(a, digest)
         fresh = []
-        real_db = b._db
-
-        class StaleRead:
-            """B's index connection: just after B has read the row, A runs."""
-
-            def execute(self, sql, *args):
-                if not sql.startswith('SELECT size') or fresh:
-                    return real_db.execute(sql, *args)
-                rows = real_db.execute(sql, *args).fetchall()
-                fresh.append(a.fetch(api, digest))
-                return _Rows(rows)
-
-            def __getattr__(self, name):
-                return getattr(real_db, name)
-
-        monkeypatch.setattr(b, '_db', StaleRead())
-        assert b.cached(digest) is None  # B's row says the file was changed: B would download it again
-        assert fresh == [path] and path.stat().st_mtime_ns != past
+        monkeypatch.setattr(b, '_db', _StaleRead(b._db, 'SELECT size', lambda: fresh.append(a.fetch(api, digest))))
+        assert b.cached(digest) is None  # the row B read is out of date by now: B would download it again
+        assert fresh == [path]
         assert path.read_bytes() == data and a.cached(digest) == path
         assert b.fetch(api, digest) == path and path.read_bytes() == data
     finally:
