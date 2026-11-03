@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from fwserver.store import FLAG, MARKER, Store, StoreError
+from fwserver.store import FLAG, MARKER, UNSYNCED, Store, StoreError
 
 
 def failing_syncfs(fd):
@@ -93,3 +93,88 @@ def test_listing_objects_fails_on_a_folder_it_cannot_read(tmp_path, monkeypatch,
             list(s.iter_objects())
     finally:
         s.close()
+
+
+def _store_on_boot(monkeypatch, root, boot):
+    from fwserver import store as store_module
+    monkeypatch.setattr(store_module, '_boot_id', lambda: boot)
+    return Store(root)
+
+
+def _lose_power(s):
+    os.close(s._fd)  # the process is gone without a clean stop; the page cache with it
+
+
+def test_a_write_is_on_record_before_the_object_appears(tmp_path, monkeypatch):
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    real_link = os.link
+    seen = []
+
+    def link(src, dst, *args, **kwargs):
+        seen.append((tmp_path / 's' / UNSYNCED).read_text().strip())
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'link', link)
+    s.put_bytes(b'abc')
+    assert seen == ['boot-1']
+    s.sync()  # now nothing can be lost: the record goes
+    assert not (tmp_path / 's' / UNSYNCED).exists()
+    s.close()
+
+
+def test_a_restart_with_writes_not_yet_on_disk_blocks_until_verified(tmp_path, monkeypatch):
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    digest, _ = s.put_bytes(b'abc')
+    _lose_power(s)
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-2')
+    try:
+        assert UNSYNCED in s.problem()
+        with pytest.raises(StoreError, match='verify --rehash'):
+            s.writer(digest)
+        s.move_to_quarantine(digest)  # what verify does with a damaged file: allowed, the record stays
+        assert (tmp_path / 's' / UNSYNCED).read_text().strip() == 'boot-1'
+        s.mark_verified()
+        assert s.problem() is None and not (tmp_path / 's' / UNSYNCED).exists()
+        s.put_bytes(b'abc')
+    finally:
+        s.close()
+
+
+def test_a_restart_after_everything_reached_the_disk_needs_no_check(tmp_path, monkeypatch):
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    s.put_bytes(b'abc')
+    s.sync()
+    _lose_power(s)
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-2')
+    assert s.problem() is None
+    s.close()
+
+
+def test_a_clean_stop_makes_writes_durable(tmp_path, monkeypatch):
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    s.put_bytes(b'abc')
+    s.close()
+    assert not (tmp_path / 's' / UNSYNCED).exists()
+    s = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-2')
+    assert s.problem() is None
+    s.close()
+
+
+def test_the_record_is_not_removed_while_another_process_writes(tmp_path, monkeypatch):
+    import threading
+    a = _store_on_boot(monkeypatch, tmp_path / 's', 'boot-1')
+    b = Store(tmp_path / 's')
+    writing = a._writing()
+    writing.__enter__()  # a is between "on record" and "object installed"
+    done = threading.Event()
+    t = threading.Thread(target=lambda: (b.sync(), done.set()))
+    t.start()
+    try:
+        assert not done.wait(0.3)  # b's sync cannot clear the record under a's write
+        assert (tmp_path / 's' / UNSYNCED).exists()
+    finally:
+        writing.__exit__(None, None, None)
+    t.join(10)
+    assert done.is_set() and not (tmp_path / 's' / UNSYNCED).exists()
+    a.close()
+    b.close()

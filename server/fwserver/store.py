@@ -19,12 +19,20 @@ empty store gets WRITE-OK when it is first opened; a store with objects but no W
 elsewhere, or the marker was lost) has to be verified first.
 If the disk cannot even delete WRITE-OK (read-only or failing), only the in-memory block is left: after
 repairing the disk, run verify --rehash before relying on the store again.
+
+A power cut or a crash of the machine reports no error at all, yet loses whatever had not reached the disk:
+an object written since the last syncfs can come back missing, short, or the right size full of zeros. So
+before an object appears (or is moved aside), UNSYNCED is made durable with the machine's boot id, and the
+syncfs that makes everything durable removes it again. An UNSYNCED that holds another boot id means the
+machine went down with writes not yet on the disk: writes are refused until verify --rehash passes, as after
+a syncfs error. A shared/exclusive file lock keeps the removal from racing a write in another process.
 """
 from __future__ import annotations
 
 import ctypes
 import datetime
 import errno
+import fcntl
 import hashlib
 import logging
 import os
@@ -34,6 +42,7 @@ import shutil
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -43,12 +52,22 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 HEX2 = re.compile(r'[0-9a-f]{2}\Z')
 FLAG = 'WRITE-ERROR'  # present: writes refused; says what went wrong and when
 MARKER = 'WRITE-OK'  # absent: writes refused; a new random content each time verify --rehash passes
+UNSYNCED = 'UNSYNCED'  # present: objects written since the last syncfs, on the boot it names
+LOCK = '.unsynced.lock'
 _UNREADABLE = object()
 log = logging.getLogger('fwserver.store')
 
 
 class StoreError(RuntimeError):
     pass
+
+
+def _boot_id() -> Optional[str]:
+    """Changes every time the machine starts (Linux); the same inside and outside containers."""
+    try:
+        return Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip() or None
+    except OSError:
+        return None
 
 
 class BadContent(ValueError):
@@ -98,11 +117,20 @@ class Store:
         self._fd = os.open(self.root, os.O_RDONLY)
         self._lock = threading.Lock()
         self._failed: Optional[Tuple[str, object]] = None  # (what happened, WRITE-OK as it was then)
+        self._boot = _boot_id()
         if self._marker() is None and not (self.root / FLAG).exists() and not any(self.objects.iterdir()):
             self._write_marker()  # a new, empty store: nothing has been written that could be lost
 
     def close(self):
-        os.close(self._fd)
+        """A clean stop: make what was written durable, so that a restart of the machine afterwards needs no
+        check. If that fails, the store is marked as after any syncfs error."""
+        try:
+            if self._unsynced() is not None:
+                self.sync()
+        except StoreError:
+            pass
+        finally:
+            os.close(self._fd)
 
     # --- objects -------------------------------------------------------------------------------
     def path(self, digest: str) -> Path:
@@ -152,18 +180,85 @@ class Store:
         os.chmod(tmp, 0o444)
         dst = self.path(digest)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(tmp, dst)  # never replaces: two uploads of the same object race safely
+        with self._writing():
+            try:
+                os.link(tmp, dst)  # never replaces: two uploads of the same object race safely
+                return True
+            except FileExistsError:
+                pass
+            st = dst.stat()
+            if st.st_size == tmp.stat().st_size and hash_path(dst)[0] == digest:
+                return False
+            os.replace(tmp, dst)  # the existing copy was damaged: the verified upload repairs it
             return True
-        except FileExistsError:
-            pass
-        st = dst.stat()
-        if st.st_size == tmp.stat().st_size and hash_path(dst)[0] == digest:
-            return False
-        os.replace(tmp, dst)  # the existing copy was damaged: the verified upload repairs it
-        return True
 
     # --- durability ----------------------------------------------------------------------------
+    @contextmanager
+    def _locked(self, exclusive: bool):
+        # A descriptor of its own each time: flock is per open file, so threads of one process exclude each
+        # other this way as well as processes do.
+        fd = os.open(self.root / LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(fd)
+
+    def _unsynced(self) -> Optional[str]:
+        """The boot id UNSYNCED names, None if there is none, '?' if it cannot be read."""
+        try:
+            return (self.root / UNSYNCED).read_text(encoding='utf-8').strip() or '?'
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError):
+            return '?'
+
+    @contextmanager
+    def _writing(self):
+        """Around anything that makes an object appear or move: UNSYNCED is on the disk first."""
+        with self._locked(exclusive=False):
+            # One left by an earlier boot (or unreadable) stays as it is: it already blocks uploads, and only
+            # verify --rehash, whose repairs and moves come through here too, may remove it.
+            if self._boot is not None and self._unsynced() is None:
+                self._write_unsynced()
+            yield
+
+    def _write_unsynced(self) -> None:
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=f'.{UNSYNCED}.')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(f'{self._boot}\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.root / UNSYNCED)
+            os.fsync(self._fd)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise StoreError(f'文件库记不下 {UNSYNCED}（{e}），不能写入') from None
+
+    def _lost_writes(self) -> str:
+        return (f'机器上次断电或死机时，文件库里还有没落盘的写入（{UNSYNCED}），那时写进来的文件可能已经坏了')
+
+    def _clear_unsynced(self, any_boot: bool = False) -> None:
+        """After a syncfs that succeeded: nothing written so far can be lost any more. Under the exclusive lock
+        no object appears meanwhile, and one more syncfs covers what appeared since the first."""
+        seen = self._unsynced()
+        if seen is None or (seen != self._boot and not any_boot):
+            return  # another boot's UNSYNCED stays until verify --rehash
+        with self._locked(exclusive=True):
+            self._syncfs_or_fail()
+            try:
+                os.unlink(self.root / UNSYNCED)
+                os.fsync(self._fd)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning('could not remove %s (%s): the next restart of the machine will ask for a check',
+                            UNSYNCED, e)
+
     def _marker(self) -> Optional[str]:
         try:
             return (self.root / MARKER).read_text(encoding='utf-8').strip() or None
@@ -240,6 +335,9 @@ class Store:
         flag = self.flag_text()
         if flag is not None:
             return f'文件库写盘出过错（{flag or "原因没能写下来"}）'
+        seen = self._unsynced()
+        if seen is not None and self._boot is not None and seen != self._boot:
+            return self._lost_writes()
         if marker is None:
             return f'文件库缺少 {MARKER} 标记（写盘出过错，或者文件库是从别处拷来的，还没核对过）'
         return None
@@ -252,6 +350,10 @@ class Store:
     def sync(self) -> None:
         """Make every object written so far durable (data and directory entries), or refuse writes from now
         on and raise."""
+        self._syncfs_or_fail()
+        self._clear_unsynced()
+
+    def _syncfs_or_fail(self) -> None:
         if self._syncfs is not None:
             if self._syncfs(self._fd) == 0:
                 return
@@ -274,6 +376,7 @@ class Store:
         every server process write again."""
         self.sync()
         try:
+            self._clear_unsynced(any_boot=True)  # also one left by an earlier boot: everything checked out
             self._write_marker()
             try:
                 os.unlink(self.root / FLAG)
@@ -311,10 +414,11 @@ class Store:
         src = self.path(digest)
         self.quarantine.mkdir(exist_ok=True)
         stamp = time.strftime('%Y%m%d-%H%M%S')
-        try:
-            os.replace(src, self.quarantine / f'{digest}.{stamp}')
-        except FileNotFoundError:
-            pass
+        with self._writing():  # undone by a power cut before the next syncfs, the damaged file would be back
+            try:
+                os.replace(src, self.quarantine / f'{digest}.{stamp}')
+            except FileNotFoundError:
+                pass
 
     def repair_from(self, digest: str, other_root: Path) -> bool:
         """Copy an intact copy of `digest` from another store (for example the backup) into this one."""
