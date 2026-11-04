@@ -416,3 +416,16 @@ def test_import_timing_leaves_out_the_time_spent_confirming(tmp_path, api, monke
     timing = next(line for line in lines if '用时' in line)
     assert float(re.search(r'上传 ([0-9.]+) 秒', timing).group(1)) < 1, timing
     assert '不含等你确认的时间' in timing
+
+
+def test_get_tells_cache_hits_from_downloads(tmp_path, api, cache):
+    """A warm fetch must say it downloaded nothing; the same content at two paths is one object."""
+    src = make_folder(tmp_path / 'src', {'a/x.png': b'same', 'b/x.png': b'same', 'c.png': b'other'})
+    ops.import_folder(api, 'SES-TX', src, echo=quiet)
+    cold, warm = [], []
+    ops.get(api, cache, 'SES-TX@1', tmp_path / 'cold', echo=cold.append)
+    ops.get(api, cache, 'SES-TX@1', tmp_path / 'warm', echo=warm.append)
+    assert '2 种不同内容：本机缓存已有 0 个，要下载 2 个' in cold
+    assert '缓存命中 0 个，下载 2 个' in cold[-1]
+    assert '2 种不同内容：本机缓存已有 2 个，要下载 0 个' in warm
+    assert '缓存命中 2 个，下载 0 个' in warm[-1]
