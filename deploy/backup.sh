@@ -2,7 +2,7 @@
 # 在线备份，不停服务：先导出数据库（一个一致的快照），再把文件库里新增的文件拷到备份目录。
 #
 #   sudo bash deploy/backup.sh /backup/flywheel
-#   每天 2 点（root 的 crontab）：0 2 * * * bash /opt/aoi-flywheel/deploy/backup.sh /backup/flywheel >> /var/log/flywheel-backup.log 2>&1
+#   每天 2 点（/etc/cron.d/aoi-flywheel，见 docs/commands.md）：0 2 * * * root bash /opt/aoi-flywheel/deploy/backup.sh /backup/flywheel >> /var/log/flywheel-backup.log 2>&1
 #
 # 顺序不能反：数据库只在文件落盘之后才提交引用它们的记录，所以先导出的数据库里引用的文件，
 # 这时都已经在文件库里，后面的 rsync 一定会拷到。文件写进去以后不再改，所以只拷新文件。

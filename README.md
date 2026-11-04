@@ -2,6 +2,8 @@
 
 数据飞轮平台的底座：数据集版本、模型版本、预标注（推理）。设计见[架构文档](docs/architecture.md)（[在线版](https://claude.ai/artifact/A8f2NKVHhLEF295TwomviL)）。
 
+文档：[命令手册](docs/commands.md)（全部命令、选项、环境变量和常见问题）、[维护和开发说明](docs/development.md)（代码结构、不能破的规则、测试、怎么扩展）、[清单格式](docs/manifest-format.md)、[更新记录](CHANGELOG.md)。
+
 分四步做，每步一个 PR：
 
 1. **文件库、数据集版本、`fw` 命令行**，加部署、在线备份和恢复（本次）
@@ -100,6 +102,8 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 | `fw export SES-TX@3 --to /mnt/usb/SES-TX@3` | 导出给连不上平台的机器，到那边 `fw verify /mnt/usb/SES-TX@3` 核对 |
 | `fw cache info` / `fw cache clear` | 本机缓存大小 / 清空（已经取出的目录不受影响） |
 
+每条命令的全部选项、输出怎么看、缓存放在哪和怎么挪（`FW_CACHE`）、Windows 上的安装问题，见[命令手册](docs/commands.md)。
+
 导入前的检查沿用试点的 01 号脚本：只差大小写的文件名、Windows 用不了的文件名、链接文件直接拒绝；同名不同扩展名的图片要加 `--force`，图片和标注以外的文件要加 `--allow-other-files`；没标注的图、没有图的标注、不同目录里的同名图片、内容完全相同的图片列出来提醒。
 
 训练脚本里：
@@ -112,15 +116,18 @@ print(v['id'], v['path'])                                  # 第二步登记模�
 
 ## 备份、恢复和核对
 
+定时任务（整段在服务器终端运行，建 `/etc/cron.d/aoi-flywheel`）：
+
 ```
-# root 的 crontab
-0 2 * * *  bash /opt/aoi-flywheel/deploy/backup.sh /backup/flywheel >> /var/log/flywheel-backup.log 2>&1
-0 4 * * 0  cd /opt/aoi-flywheel/deploy && docker compose exec -T server fw-server verify --rehash >> /var/log/flywheel-verify.log 2>&1
+sudo tee /etc/cron.d/aoi-flywheel >/dev/null <<'EOF'
+0 2 * * *  root  bash /opt/aoi-flywheel/deploy/backup.sh /backup/flywheel >> /var/log/flywheel-backup.log 2>&1
+0 4 * * 0  root  cd /opt/aoi-flywheel/deploy && docker compose exec -T server fw-server verify --rehash >> /var/log/flywheel-verify.log 2>&1
+EOF
 ```
 
 - 备份不停服务：先 `pg_dump`（一致的快照），再把文件库新增的文件 `rsync` 到备份目录。数据库只在文件落盘后才提交引用，所以先导出的数据库引用的文件这时都在文件库里。备份目录最好在另一块盘或另一台机器上。
 - 恢复：`sudo bash deploy/restore.sh /backup/flywheel`。把数据库换成备份里的那份（原数据库改名保留），然后在不开端口的一次性容器里按这份数据库核对文件库：缺的和坏了的文件从备份补回，每个文件都从盘上读出来重算哈希，补回的文件落盘后才算完。全部通过才重新对外服务；任何一步失败（包括核对没通过）都换回原来的数据库，服务在原来的数据上继续运行。核对要把用到的每个文件读一遍，用时和文件库大小成正比：部署演练里 6000 个文件（89 MB）整个恢复约 13 秒，更大的文件库还没实测。在新机器上先 `sudo bash deploy/setup.sh`（不用建管理员，账号和凭据都在备份里）再恢复。
-- 核对：`fw-server verify` 检查每个版本的清单项能重建登记的清单哈希、用到的每个文件都在且大小对；加 `--rehash` 逐个重算哈希，读之前先丢掉这个文件的页缓存，读到的是盘上真实的内容；还没有版本用到的文件（导入中断时留下的）也算，坏了的移到 `quarantine/`，不算问题，重新导入时会再上传；读不了的目录或文件算问题，核对不通过；全部通过后才解除写盘出错的标记。损坏的文件可以加 `--repair-from /backup/flywheel/store` 从备份取回，取回的文件落盘后才报告；没有备份的移到 `quarantine/`，重新导入含它的目录就会补回。
+- 核对：`fw-server verify` 检查每个版本的清单项能重建登记的清单哈希、用到的每个文件都在且大小对；加 `--rehash` 逐个重算哈希，读之前先丢掉这个文件的页缓存，读到的是盘上真实的内容；还没有版本用到的文件（导入中断时留下的）也算，坏了的移到 `quarantine/`，不算问题，重新导入时会再上传；读不了的目录或文件算问题，核对不通过；全部通过后才解除写盘出错的标记。损坏的文件可以用 `--repair-from` 从备份取回（备份目录要挂进容器，命令见[命令手册](docs/commands.md#verify核对文件库)），取回的文件落盘后才报告；没有备份的移到 `quarantine/`，重新导入含它的目录就会补回。
 
 ## 第一步验收（试点服务器）
 
@@ -134,6 +141,8 @@ print(v['id'], v['path'])                                  # 第二步登记模�
 8. 规模：`FW_SERVER=... FW_TOKEN=... python tools/bench.py --pairs 100000 --work /data/tmp`，十万对（20 万个文件）入库、差异、冷取、热取的时间；`--pairs 500000` 是百万文件。
 
 ## 开发
+
+代码结构、必须守住的规则和测试方法见[维护和开发说明](docs/development.md)。
 
 ```
 python -m venv .venv && . .venv/bin/activate

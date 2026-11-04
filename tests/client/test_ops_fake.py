@@ -139,6 +139,8 @@ def test_damaged_cache_object_is_caught_and_downloaded_again(tmp_path, api, cach
     ops.get(api, cache, 'SES-TX@1', tmp_path / 'out2', echo=lines.append)
     assert read_tree(tmp_path / 'out2') == files
     assert any('重新下载' in line for line in lines)
+    summary = next(line for line in lines if '缓存命中' in line)
+    assert '缓存命中 1 个，下载 1 个' in summary, summary  # the damaged one came from the server, not the cache
 
 
 def test_download_with_a_wrong_hash_never_enters_the_cache(tmp_path, api, cache):
@@ -416,3 +418,23 @@ def test_import_timing_leaves_out_the_time_spent_confirming(tmp_path, api, monke
     timing = next(line for line in lines if '用时' in line)
     assert float(re.search(r'上传 ([0-9.]+) 秒', timing).group(1)) < 1, timing
     assert '不含等你确认的时间' in timing
+
+
+def test_get_tells_cache_hits_from_downloads(tmp_path, api, cache):
+    """A warm fetch must say it downloaded nothing; the same content at two paths is one object."""
+    src = make_folder(tmp_path / 'src', {'a/x.png': b'same', 'b/x.png': b'same', 'c.png': b'other'})
+    ops.import_folder(api, 'SES-TX', src, echo=quiet)
+    cold, warm = [], []
+    ops.get(api, cache, 'SES-TX@1', tmp_path / 'cold', echo=cold.append)
+    ops.get(api, cache, 'SES-TX@1', tmp_path / 'warm', echo=warm.append)
+    assert '2 种不同内容：本机缓存已有 0 个，要下载 2 个' in cold
+    assert '缓存命中 0 个，下载 2 个' in cold[-1]
+    assert '2 种不同内容：本机缓存已有 2 个，要下载 0 个' in warm
+    assert '缓存命中 2 个，下载 0 个' in warm[-1]
+
+
+def test_training_scripts_can_catch_platform_errors_from_the_package():
+    """docs/commands.md tells training scripts to catch fw.ApiError and fw.FwError."""
+    import fw
+    from fw.api import ApiError
+    assert fw.ApiError is ApiError and not issubclass(fw.ApiError, fw.FwError)

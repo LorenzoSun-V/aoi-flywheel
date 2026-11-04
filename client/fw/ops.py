@@ -299,8 +299,16 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     t0 = time.perf_counter()
     objects = {d: size for _, d, size in entries}
     before = cache.downloaded_files
-    progress = Progress('下载', len(objects))
-    paths = cache.fetch_many(api, list(objects.items()), workers=workers, progress=progress)
+    progress = Progress('下载', 0)
+    cached = set()
+
+    def on_cached(digests):
+        cached.update(digests)
+        n = len(digests)
+        progress.total = len(objects) - n
+        echo(f'{len(objects)} 种不同内容：本机缓存已有 {n} 个，要下载 {len(objects) - n} 个')
+
+    paths = cache.fetch_many(api, list(objects.items()), workers=workers, progress=progress, on_cached=on_cached)
     progress.done()
     t1 = time.perf_counter()
     for parent in sorted({_local(dest, rel).parent for rel, _, _ in entries}):
@@ -331,7 +339,8 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     _parallel(place, entries, _file_workers([size for _, _, size in entries], workers), '摆放并核对')
     t2 = time.perf_counter()
     echo(f'{version["ref"]} 已放到 {dest}：{len(entries)} 个文件，每个都按清单核对过；'
-         f'下载 {cache.downloaded_files - before} 个，方式：{layout.describe()}；'
+         f'缓存命中 {len(cached - refetched)} 个，下载 {cache.downloaded_files - before} 个，'
+         f'方式：{layout.describe()}；'
          f'用时 下载 {t1 - t0:.1f} 秒，摆放和核对 {t2 - t1:.1f} 秒')
     if refetched:
         echo(f'  本机缓存里有 {len(refetched)} 个文件和哈希对不上，已重新下载')
