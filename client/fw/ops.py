@@ -248,10 +248,12 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
     if dry_run:
         echo('试运行：没有上传，没有建版本')
         return None
+    t_check = time.perf_counter()
     if confirm is not None and not confirm(f'确认建 {name}@{number} 吗？'):
         echo('没有建版本')
         return None
 
+    t_upload = time.perf_counter()  # the time spent answering the question above is nobody's speed
     uploaded = _upload(api, missing, sources, sizes, workers, '上传')
     api.put_bytes(data)
     t2 = time.perf_counter()
@@ -261,7 +263,8 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
     t3 = time.perf_counter()
     echo(f'已冻结 {version["ref"]}：{version["file_count"]} 个文件，{size_text(version["total_bytes"])}；'
          f'上传了 {len(missing)} 个文件，{size_text(uploaded)}')
-    echo(f'  用时：算哈希 {t1 - t0:.1f} 秒，上传 {t2 - t1:.1f} 秒，建版本 {t3 - t2:.1f} 秒')
+    echo(f'  用时：算哈希 {t1 - t0:.1f} 秒，查服务器和对比 {t_check - t1:.1f} 秒，上传 {t2 - t_upload:.1f} 秒，'
+         f'建版本 {t3 - t2:.1f} 秒（不含等你确认的时间）')
     return version
 
 
