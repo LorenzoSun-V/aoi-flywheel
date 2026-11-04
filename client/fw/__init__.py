@@ -8,6 +8,7 @@ For training scripts:
 """
 __version__ = '0.1.0'
 
+from .api import ApiError  # noqa: E402
 from .ops import FwError, get_version  # noqa: E402
 
-__all__ = ['FwError', 'get_version', '__version__']
+__all__ = ['ApiError', 'FwError', 'get_version', '__version__']

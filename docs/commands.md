@@ -201,7 +201,25 @@ v = fw.get_version('SES-TX@3', '/data/train/SES-TX@3')   # 取到本地（目录
 print(v['id'], v['path'])                                  # 第二步登记模型时带上 v['id']
 ```
 
-和 `fw get` 一样用缓存、逐个核对；进度和结果打印到 stderr。出错时抛 `fw.FwError`。要先在这台机器上 `fw login`，或者设好 `FW_SERVER`、`FW_TOKEN`。
+和 `fw get` 一样用缓存、逐个核对；进度和结果打印到 stderr。要先在这台机器上 `fw login`，或者设好 `FW_SERVER`、`FW_TOKEN`。
+
+出错时可能抛三种异常，训练脚本要都接住：
+
+| 异常 | 什么时候 |
+|---|---|
+| `fw.ApiError` | 平台拒绝了请求：版本不存在（`.status` 是 404）、凭据失效（401）、没有权限（403）、文件库停写（503）等；`.status` 是 HTTP 状态码，`.message` 是中文说明 |
+| `fw.FwError` | 本机的问题：版本写法不对、目标目录不是空的、缓存里的文件重新下载后仍对不上等 |
+| `httpx.TransportError` | 连不上平台（地址不对、网络断了、服务没起） |
+
+```python
+import httpx
+import fw
+
+try:
+    v = fw.get_version('SES-TX@3', '/data/train/SES-TX@3')
+except (fw.ApiError, fw.FwError, httpx.TransportError) as e:
+    raise SystemExit(f'取数据失败：{e}')
+```
 
 ## fw-server 命令
 
@@ -243,8 +261,17 @@ fw-server token revoke 3                          # 按 list 里的编号吊销
 ```
 fw-server verify                                    # 快：每个版本的清单能对上，用到的文件都在、大小对
 fw-server verify --rehash                           # 慢：把文件库里每个文件从盘上读出来重算哈希
-fw-server verify --rehash --repair-from /backup/flywheel/store   # 坏的、缺的从备份取回
 ```
+
+坏的、缺的文件要从备份取回时，备份目录得先挂进容器：`fw-server` 在容器里运行，只看得到容器里的路径，宿主机上的 `/backup/flywheel` 它看不到（看不到就修不了，只会把坏文件隔离、核对不通过）。用一个挂上备份目录的临时容器：
+
+```
+cd /opt/aoi-flywheel/deploy
+sudo docker compose run --rm --no-deps -v /backup/flywheel/store:/backup:ro server \
+  fw-server verify --rehash --repair-from /backup
+```
+
+`-v 宿主机目录:/backup:ro` 把备份只读挂到容器的 `/backup`，`--repair-from` 后面写容器里的这个路径。`restore.sh` 也是这样做的。
 
 - 报「问题 0 个」并退出 0 才算通过。
 - 文件库停止写入时（写盘出错，或者断电时有没落盘的写入），导入会被拒绝（503），只有 `--rehash` 通过才会解除：最后一行显示「全部核对通过，已解除：…」，`echo $?` 为 0。如果显示「核对通过了，但没能解除写入阻断」或退出码不是 0，就是还在停写，先检查磁盘。

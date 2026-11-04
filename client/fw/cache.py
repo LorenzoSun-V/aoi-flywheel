@@ -175,12 +175,12 @@ class Cache:
                    on_cached=None) -> Dict[str, Path]:
         """Make sure every (sha256, size) is in the cache and return sha256 -> cached path. Small objects come
         in batches of up to FETCH_COUNT per request, large ones one by one; every object is checked against
-        its hash before it enters the cache. on_cached(n) hears how many were in the cache already, before
+        its hash before it enters the cache. on_cached(digests) hears which were in the cache already, before
         any download starts; progress counts downloads only."""
         sizes = dict(objects)
         paths = self.cached_many(sizes)
         if on_cached:
-            on_cached(len(paths))
+            on_cached(set(paths))
         todo = sorted(d for d in sizes if d not in paths)
         small = [(d, sizes[d]) for d in todo if sizes[d] <= BATCH_OBJECT_MAX]
         large = [d for d in todo if sizes[d] > BATCH_OBJECT_MAX]
