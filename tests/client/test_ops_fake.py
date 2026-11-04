@@ -398,3 +398,21 @@ def test_file_changed_after_hashing_is_not_uploaded(tmp_path, api, new_content, 
     with pytest.raises(Exception, match=message):
         ops.import_folder(api, 'SES-TX', src, confirm=change_then_confirm, echo=quiet)
     assert api.datasets['SES-TX'] == []
+
+
+def test_import_timing_leaves_out_the_time_spent_confirming(tmp_path, api, monkeypatch):
+    """The person reads the preview and answers y: those seconds are not the upload's."""
+    import re
+    clock = [100.0]
+    monkeypatch.setattr(ops.time, 'perf_counter', lambda: clock[0])
+    src = make_folder(tmp_path / 'src', {'a.png': b'a', 'a.json': b'{}'})
+    lines = []
+
+    def answer_slowly(prompt):
+        clock[0] += 60  # a minute reading the preview
+        return True
+
+    ops.import_folder(api, 'SES-TX', src, confirm=answer_slowly, echo=lines.append)
+    timing = next(line for line in lines if '用时' in line)
+    assert float(re.search(r'上传 ([0-9.]+) 秒', timing).group(1)) < 1, timing
+    assert '不含等你确认的时间' in timing
