@@ -8,6 +8,7 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -420,3 +421,128 @@ def get_version(ref: str, dest, link: str = 'auto') -> dict:
     finally:
         cache.close()
         api.close()
+
+
+# --- training-set snapshots ------------------------------------------------------------------------
+SPLITS = ('train', 'val', 'test')
+
+
+def _width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text)
+
+
+def read_classes(path) -> List[str]:
+    """classes.txt: one class name per line, the line number (from 0) is the class id."""
+    try:
+        text = Path(path).read_text(encoding='utf-8-sig')
+    except OSError as e:
+        raise FwError(f'读不了类别表 {path}：{e.strerror or e}') from None
+    except UnicodeDecodeError:
+        raise FwError(f'类别表 {path} 不是 UTF-8') from None
+    lines = text.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    names = [line.strip() for line in lines]
+    empty = [str(i + 1) for i, n in enumerate(names) if not n]
+    if empty:
+        raise FwError(f'类别表 {path} 第 {"、".join(empty[:5])} 行是空的；行号就是类别编号，中间不能有空行')
+    if not names:
+        raise FwError(f'类别表 {path} 是空的')
+    return names
+
+
+def read_split_file(path) -> Dict[str, str]:
+    """A split made elsewhere: one sample per line, '<site>/<line>/<image path>' and train, val or test,
+    separated by a tab or spaces; empty lines and lines starting with # are skipped."""
+    out: Dict[str, str] = {}
+    try:
+        lines = Path(path).read_text(encoding='utf-8-sig').splitlines()
+    except OSError as e:
+        raise FwError(f'读不了划分清单 {path}：{e.strerror or e}') from None
+    for n, line in enumerate(lines, start=1):
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        key, _, split = line.rstrip().rpartition('\t') if '\t' in line else line.rstrip().rpartition(' ')
+        key, split = key.strip().replace('\\', '/'), split.strip()  # paths copied from Windows Explorer
+        if not key or split not in SPLITS:
+            raise FwError(f'划分清单 {path} 第 {n} 行应为「<现场>/<产线>/<图片路径> train|val|test」：{line!r}')
+        if key in out:
+            raise FwError(f'划分清单 {path} 第 {n} 行：{key} 出现了两次')
+        out[key] = split
+    if not out:
+        raise FwError(f'划分清单 {path} 是空的')
+    return out
+
+
+def show_trainset_plan(echo: Echo, preview: dict, classes: List[str]) -> None:
+    counts = preview['counts']
+    parts = []
+    for split in SPLITS:
+        c = counts[split]
+        parts.append(f'{split} {c["samples"]} 张' + (f'（无标注 {c["negatives"]}）' if c['negatives'] else ''))
+    echo('划分：' + '，'.join(parts))
+    rows = [(name, [counts[s]['boxes'].get(name, 0) for s in SPLITS]) for name in classes]
+    width = max(_width(n) for n in classes + ['类别'])
+
+    def pad(text):
+        return text + ' ' * (width - _width(text))
+    echo(f'  {pad("类别")}  ' + '  '.join(f'{s:>6}' for s in SPLITS) + '  （框数）')
+    for name, nums in rows:
+        echo(f'  {pad(name)}  ' + '  '.join(f'{n:>6}' for n in nums))
+    unused = [n for n, nums in rows if not any(nums)]
+    if unused:
+        echo(f'  注意：类别表里有 {len(unused)} 个类别一个框都没有：{"、".join(unused[:5])}')
+    ch = preview.get('changes') or {}
+    if ch:
+        echo(f'相比 {preview["based_on"]}：新增 {ch["added"]}、移除 {ch["removed"]}、换了划分 {ch["moved"]}、'
+             f'标注改了 {ch["relabeled"]}')
+        _show(echo, '换了划分', ch.get('moved_examples', []))
+
+
+def create_trainset(api: Api, name: str, sources: List[str], classes: List[str], val: float = 0.2, seed: int = 0,
+                    test_dirs=(), merge_test: bool = False, new_to: str = 'test',
+                    split: Optional[Dict[str, str]] = None, fresh: bool = False, note: str = '',
+                    dry_run: bool = False, confirm: Optional[Confirm] = None, echo: Echo = print) -> Optional[dict]:
+    """Preview a training-set snapshot, ask, then freeze it. The server builds both from the same inputs, so
+    what is frozen is what was shown; if someone made another snapshot of this name meanwhile, it refuses."""
+    body = {'sources': list(sources), 'classes': list(classes), 'val': val, 'seed': seed,
+            'test_dirs': list(test_dirs), 'merge_test': merge_test, 'new_to': new_to, 'split': split,
+            'fresh': fresh, 'note': note}
+    preview = api.preview_trainset(name, body)
+    if preview['based_on']:
+        how = f'接着 {preview["based_on"]} 的划分' if not fresh else f'重新划分（不接着 {preview["based_on"]}）'
+    else:
+        how = '第一版'
+    echo(f'{name}：{how}；来源 {"、".join(preview["sources"])}；类别 {len(classes)} 个')
+    show_trainset_plan(echo, preview, classes)
+    if preview['problems']:
+        raise FwError('没有建训练集快照：\n  ' + '\n  '.join(preview['problems']))
+    echo(f'新快照：{preview["samples"]} 个样本，{preview["file_count"]} 个文件，{size_text(preview["total_bytes"])}')
+    if dry_run:
+        return None
+    if confirm is not None and not confirm(f'确认建 {name} 的新快照吗？'):
+        echo('没有建快照')
+        return None
+    body['expect_latest_id'] = preview['expect_latest_id']
+    version = api.create_trainset(name, body)
+    echo(f'已冻结 {version["ref"]}：{preview["samples"]} 个样本，{version["file_count"]} 个文件；'
+         f'取到本地：fw get {version["ref"]} --to <目录>')
+    return version
+
+
+def get_trainset(ref: str, dest, link: str = 'auto') -> dict:
+    """For training scripts: lay out a training-set snapshot in `dest` (empty or missing) and return its record:
+    'id' (pass it when registering the model), 'ref', 'path', 'classes' (the index is the class id),
+    'counts' and 'sources'. Progress goes to stderr."""
+    name, number = parse_ref(ref)
+    api = connect()
+    cache = Cache()
+    try:
+        info = api.trainset(name, number)
+        version = get(api, cache, info['ref'], dest, link=link, echo=lambda s: print(s, file=sys.stderr))
+    finally:
+        cache.close()
+        api.close()
+    ts = info['trainset']
+    return dict(version, classes=ts['classes'], counts=ts['counts'], sources=ts['sources'],
+                based_on=ts['based_on'], rule=ts['rule'])

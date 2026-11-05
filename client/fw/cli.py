@@ -17,7 +17,8 @@ from .cache import Cache
 from .contract import ContractError
 
 ROLE_NAMES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'deploy': '部署'}
-KINDS = {'pool': '数据池', 'test': '测试集', 'regression': '回归集', 'other': '其他'}
+KINDS = {'pool': '数据池', 'test': '测试集', 'regression': '回归集', 'other': '其他'}  # what fw dataset create makes
+KIND_NAMES = dict(KINDS, trainset='训练集快照')  # trainsets are made by fw trainset create only
 
 
 def _width(text: str) -> int:
@@ -62,7 +63,7 @@ def cmd_dataset_list(args, api: Api) -> None:
     rows = []
     for d in api.datasets():
         v = d.get('latest')
-        rows.append([d['name'], KINDS.get(d['kind'], d['kind']), d['site'], d['line'],
+        rows.append([d['name'], KIND_NAMES.get(d['kind'], d['kind']), d['site'], d['line'],
                      f'@{v["number"]}' if v else '-', v['file_count'] if v else 0,
                      ops.size_text(v['total_bytes']) if v else '-', _when(v['created_at']) if v else '-'])
     if rows:
@@ -138,8 +139,54 @@ def cmd_cache(args) -> None:
         cache.close()
 
 
+def cmd_trainset_create(args, api: Api) -> int:
+    classes = ops.read_classes(args.classes)
+    split = ops.read_split_file(args.split_file) if args.split_file else None
+    test_dirs = [d for item in args.test_dirs for d in item.split(',') if d.strip()]
+    result = ops.create_trainset(api, args.name, args.sources, classes, val=args.val, seed=args.seed,
+                                 test_dirs=test_dirs, merge_test=args.merge_test, new_to=args.new_to, split=split,
+                                 fresh=args.fresh, note=args.note, dry_run=args.dry_run,
+                                 confirm=None if args.yes else _ask)
+    return 0 if result is not None or args.dry_run else 1
+
+
+def cmd_trainset_list(args, api: Api) -> None:
+    rows = []
+    for d in api.trainsets():
+        v = d.get('latest')
+        rows.append([d['name'], d['site'], d['line'], f'@{v["number"]}' if v else '-', v['file_count'] if v else 0,
+                     ops.size_text(v['total_bytes']) if v else '-', _when(v['created_at']) if v else '-'])
+    if rows:
+        _table(['训练集', '现场', '产线', '最新', '文件数', '大小', '更新时间'], rows)
+    else:
+        print('还没有训练集快照；用 fw trainset create 建一个')
+
+
+def cmd_trainset_show(args, api: Api) -> None:
+    name, number = ops.parse_ref(args.ref)
+    v = api.trainset(name, number)
+    ts = v['trainset']
+    rule = ts['rule']
+    print(f'{v["ref"]}（id {v["id"]}）：{v["file_count"]} 个文件，{ops.size_text(v["total_bytes"])}，'
+          f'{_when(v["created_at"])} {v["created_by"]}' + (f'，备注：{v["note"]}' if v['note'] else ''))
+    print(f'来源：{"、".join(ts["sources"])}')
+    if rule['mode'] == 'split-file':
+        how = f'按划分清单（{rule["split_count"]} 行）'
+    else:
+        how = (f'接着 {ts["based_on"]}' if ts['based_on'] else '重新划分') + f'，val {rule["val"]}，种子 {rule["seed"]}'
+        if rule.get('test_dirs'):
+            how += f'，test 目录 {"、".join(rule["test_dirs"])}'
+        if rule.get('merge_test'):
+            how += '，旧 test 并入 train/val'
+        if rule.get('new_to') == 'trainval':
+            how += '，新样本进 train/val'
+    print(f'规则：{how}')
+    ops.show_trainset_plan(print, {'counts': ts['counts']}, ts['classes'])
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog='fw', description='数据飞轮平台命令行：数据集版本的导入、取回、对比和导出。')
+    p = argparse.ArgumentParser(prog='fw', description='数据飞轮平台命令行：数据集版本的导入、取回、对比和导出，'
+                                                       '训练集快照。')
     p.add_argument('--version', action='version', version=f'fw {__version__}')
     sub = p.add_subparsers(dest='command', required=True, metavar='命令')
 
@@ -182,6 +229,32 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('second', nargs='?', help='新版本，例如 SES-TX@3')
     s.add_argument('--list', action='store_true', help='列出全部变化的文件（制表符分隔）')
     s.set_defaults(func=cmd_dataset_diff)
+
+    ts = sub.add_parser('trainset', help='训练集快照：create、list、show').add_subparsers(
+        dest='action', required=True, metavar='操作')
+    s = ts.add_parser('create', help='从数据池版本建训练集快照（划分好 train/val/test 并冻结）')
+    s.add_argument('name', help='快照名称，例如 SES-TX-det；再次运行就是它的下一版')
+    s.add_argument('--from', dest='sources', action='append', required=True, metavar='版本',
+                   help='来源数据池版本，例如 SES-TX@4；可写多次')
+    s.add_argument('--classes', required=True, help='类别表 classes.txt：一行一个类别名，行号（从 0 起）是类别编号')
+    s.add_argument('--val', type=float, default=0.2, help='train/val 里 val 的比例（默认 0.2）')
+    s.add_argument('--seed', type=int, default=0, help='划分用的种子（默认 0）；同样的样本和种子总是同样的划分')
+    s.add_argument('--test-dirs', action='append', default=[], metavar='目录',
+                   help='这些目录下的新样本进 test，例如 2026-10 或 SES/TX/2026-10；逗号分隔或写多次')
+    s.add_argument('--merge-test', action='store_true', help='上一版 test 里的样本重新分到 train/val')
+    s.add_argument('--new-to', choices=['test', 'trainval'], default='test',
+                   help='接着上一版时，新样本去哪：test（默认）或 trainval')
+    s.add_argument('--split-file', help='用自己的划分清单：每行「<现场>/<产线>/<图片路径> train|val|test」')
+    s.add_argument('--fresh', action='store_true', help='不接着上一版的划分，全部重新分')
+    s.add_argument('--note', default='', help='备注')
+    s.add_argument('--dry-run', action='store_true', help='只预览划分和统计，不建快照')
+    s.add_argument('--yes', action='store_true', help='不问确认，直接建快照')
+    s.set_defaults(func=cmd_trainset_create)
+    s = ts.add_parser('list', help='列出训练集快照')
+    s.set_defaults(func=cmd_trainset_list)
+    s = ts.add_parser('show', help='看一个快照的来源、划分和每类框数')
+    s.add_argument('ref', help='快照，例如 SES-TX-det@2；只写名称就是最新版')
+    s.set_defaults(func=cmd_trainset_show)
 
     s = sub.add_parser('get', help='把一个版本取到本地目录')
     s.add_argument('ref', help='版本，例如 SES-TX@3；只写名称就是最新版')

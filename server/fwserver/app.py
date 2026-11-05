@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
                          frame_header)
 
-from . import __version__, auth, datasets, db
+from . import __version__, auth, datasets, db, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -59,6 +59,24 @@ class VersionBody(BaseModel):
     expect_latest_id: Optional[int]
     source: str = ''
     note: str = ''
+
+
+class TrainsetBody(BaseModel):
+    sources: List[str] = Field(min_length=1, max_length=100)  # pool versions, e.g. SES-TX@4
+    classes: List[str] = Field(min_length=1, max_length=trainsets.MAX_CLASSES)
+    val: float = 0.2
+    seed: int = 0
+    test_dirs: List[str] = Field(default_factory=list, max_length=1000)
+    merge_test: bool = False
+    new_to: str = 'test'
+    split: Optional[Dict[str, str]] = None  # key (<site>/<line>/<image path>) -> train, val or test
+    fresh: bool = False
+    note: str = ''
+    expect_latest_id: Optional[int] = None  # create only: the newest snapshot seen in the preview
+
+    def options(self) -> trainsets.Options:
+        return trainsets.Options(self.sources, self.classes, self.val, self.seed, self.test_dirs, self.merge_test,
+                                 self.new_to, self.split, self.fresh, self.note)
 
 
 def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None) -> FastAPI:
@@ -301,6 +319,31 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def get_version_by_id(version_id: int, user: dict = Depends(data_user)):
         with conn() as c:
             return datasets.get_version_by_id(c, version_id)
+
+    # --- training-set snapshots ------------------------------------------------------------------
+    @app.get('/api/v1/trainsets')
+    def list_trainsets(user: dict = Depends(data_user)):
+        with conn() as c:
+            return trainsets.list_trainsets(c)
+
+    @app.post('/api/v1/trainsets/{name}/preview')
+    def preview_trainset(name: str, body: TrainsetBody, user: dict = Depends(data_user)):
+        """What `create` would make, without making it: counts, changes against the previous snapshot, problems."""
+        with conn() as c:
+            return trainsets.plan(c, store, name, body.options()).summary()
+
+    @app.post('/api/v1/trainsets/{name}/versions', status_code=201)
+    def create_trainset(name: str, body: TrainsetBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            v = trainsets.create(c, store, user['user_id'], name, body.options(), body.expect_latest_id,
+                                 before_freeze=hooks.get('before_freeze'))
+        log.info('trainset %s frozen by %s: %s samples', v['ref'], user['name'], v['summary']['samples'])
+        return v
+
+    @app.get('/api/v1/trainsets/{name}/versions/{number}')
+    def get_trainset(name: str, number: str, user: dict = Depends(data_user)):
+        with conn() as c:
+            return trainsets.get(c, name, number)
 
     @app.get('/api/v1/diff')
     def diff(old: int, new: int, user: dict = Depends(data_user)):

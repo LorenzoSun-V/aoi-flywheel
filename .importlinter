@@ -4,11 +4,12 @@ root_packages =
     fwserver
 
 [importlinter:contract:server-layers]
-name = Server modules only call downwards (cli, app -> datasets, auth -> store, db, settings)
+name = Server modules only call downwards (cli, app -> trainsets -> datasets, auth -> store, db, settings)
 type = layers
 layers =
     fwserver.cli
     fwserver.app
+    fwserver.trainsets
     fwserver.datasets | fwserver.auth
     fwserver.store | fwserver.db | fwserver.settings
 

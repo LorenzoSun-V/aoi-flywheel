@@ -9,11 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Tuple
 
-from .contract import collisions, path_problem
-
-IMAGE_EXTS = {'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp'}
-LABEL_EXTS = {'.json', '.txt'}  # LiteAnno / X-AnyLabeling JSON, YOLO txt
-META_NAMES = {'classes.txt', 'classes.names', 'obj.names', 'data.yaml', 'dataset.yaml', 'mask_colors.json'}
+from .contract import IMAGE_EXTS, LABEL_EXTS, META_NAMES, collisions, path_problem
 JUNK_NAMES = {'thumbs.db', 'desktop.ini', '.ds_store'}
 _NAME_SURROGATE = 0x20000000  # Windows reparse tags with this bit lead somewhere else: symlinks, junctions
 

@@ -18,6 +18,9 @@ import unicodedata
 from typing import Dict, Iterable, List, Tuple
 
 MANIFEST_HEADER = 'fw-manifest 1'
+IMAGE_EXTS = frozenset({'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp'})
+LABEL_EXTS = frozenset({'.json', '.txt'})  # LiteAnno / X-AnyLabeling JSON, YOLO txt
+META_NAMES = frozenset({'classes.txt', 'classes.names', 'obj.names', 'data.yaml', 'dataset.yaml', 'mask_colors.json'})
 CHUNK = 1 << 20
 MAX_PATH_BYTES = 1024
 
