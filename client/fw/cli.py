@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import datetime
 import getpass
+import os
+import signal
 import sys
 import unicodedata
 
@@ -209,6 +211,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _interrupted() -> None:
+    """Ctrl+C: say so and exit at once with 130. No cleanup runs first: closing the cache or the connection
+    could wait for an upload or download thread still running, and nothing needs it (the server keeps only
+    what it has checked, the cache replaces files atomically, SQLite survives being cut off)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, RuntimeError, ValueError):  # RuntimeError: Ctrl+C came in the middle of a write
+            pass
+    try:
+        sys.stderr.write('\n已中断\n')
+        sys.stderr.flush()
+    except (OSError, RuntimeError, ValueError):
+        pass
+    os._exit(130)
+
+
+def _on_sigint(signum, frame) -> None:
+    _interrupted()
+
+
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -217,6 +240,10 @@ def main(argv=None) -> int:
             pass
     args = build_parser().parse_args(argv)
     api = None
+    try:
+        previous_sigint = signal.signal(signal.SIGINT, _on_sigint)
+    except ValueError:  # not the main thread (main() called from a thread): KeyboardInterrupt never comes here
+        previous_sigint = None
     try:
         if getattr(args, 'needs_api', True):
             api = ops.connect()
@@ -230,10 +257,12 @@ def main(argv=None) -> int:
     except httpx.TransportError as e:
         print(f'错误：连不上平台服务（{e.__class__.__name__}: {e}）', file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        print('\n已中断', file=sys.stderr)
-        return 130
+    except KeyboardInterrupt:  # raised by code rather than by Ctrl+C, which _on_sigint handles at once
+        _interrupted()
+        return 130  # only reached when os._exit is replaced in tests
     finally:
+        if previous_sigint is not None:
+            signal.signal(signal.SIGINT, previous_sigint)
         if api is not None:
             api.close()
 
