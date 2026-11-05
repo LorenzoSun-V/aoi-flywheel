@@ -367,8 +367,15 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     if version.get('kind') == 'trainset':
         out['format'] = fmt
     if fmt == 'yolo' and not subpath:
-        out['data_yaml'] = str(_write_data_yaml(dest, [rel for rel, _, _ in entries]))
-        echo(f'  已生成 {out["data_yaml"]}（不在快照里）：yolo train data={out["data_yaml"]}')
+        rels = [rel for rel, _, _ in entries]
+        out['data_yaml'] = str(_write_data_yaml(dest, rels))
+        empty = [s for s in ('train', 'val') if not any(p.startswith(f'images/{s}/') for p in rels)]
+        if empty:
+            out['missing_splits'] = empty
+            echo(f'  已生成 {out["data_yaml"]}（不在快照里）；这个快照没有 {"、".join(empty)} 样本，'
+                 f'不能直接 yolo train（ultralytics 要 train 和 val），只能当测试集用')
+        else:
+            echo(f'  已生成 {out["data_yaml"]}（不在快照里）：yolo train data={out["data_yaml"]}')
     return out
 
 
@@ -550,15 +557,19 @@ def show_trainset_plan(echo: Echo, preview: dict, classes: List[str]) -> None:
 def create_trainset(api: Api, name: str, sources: List[str], classes: List[str], val: float = 0.2, seed: int = 0,
                     test_dirs=(), merge_test: bool = False, new_to: str = 'test',
                     split: Optional[Dict[str, str]] = None, fresh: bool = False, note: str = '',
-                    dry_run: bool = False, confirm: Optional[Confirm] = None, echo: Echo = print) -> Optional[dict]:
-    """Preview a training-set snapshot, ask, then freeze it. The server builds both from the same inputs, so
-    what is frozen is what was shown; if someone made another snapshot of this name meanwhile, it refuses."""
+                    require_labels: bool = False, dry_run: bool = False, confirm: Optional[Confirm] = None,
+                    echo: Echo = print) -> Optional[dict]:
+    """Preview a training-set snapshot, ask, then freeze it. The server builds both from the same inputs (the
+    source versions the preview resolved, e.g. SES-TX@4 for SES-TX), so what is frozen is what was shown; if
+    someone made another snapshot of this name meanwhile, it refuses."""
     body = {'sources': list(sources), 'classes': list(classes), 'val': val, 'seed': seed,
             'test_dirs': list(test_dirs), 'merge_test': merge_test, 'new_to': new_to, 'split': split,
-            'fresh': fresh, 'note': note}
+            'fresh': fresh, 'note': note, 'require_labels': require_labels}
     preview = api.preview_trainset(name, body)
     if preview['based_on']:
-        how = f'接着 {preview["based_on"]} 的划分' if not fresh else f'重新划分（不接着 {preview["based_on"]}）'
+        how = f'接着 {preview["based_on"]} 的划分'
+    elif preview.get('latest'):
+        how = f'{"用划分清单" if split is not None else "重新划分"}（不接着 {preview["latest"]}）'
     else:
         how = '第一版'
     echo(f'{name}：{how}；来源 {"、".join(preview["sources"])}；类别 {len(classes)} 个')
@@ -577,6 +588,7 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
         echo('没有建快照')
         return None
     body['expect_latest_id'] = preview['expect_latest_id']
+    body['sources'] = preview['sources']  # the versions shown, not whatever is latest by now
     version = api.create_trainset(name, body)
     echo(f'已冻结 {version["ref"]}：{preview["samples"]} 个样本，{version["file_count"]} 个文件；'
          f'取到本地：fw get {version["ref"]} --to <目录>')

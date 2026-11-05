@@ -156,3 +156,15 @@ def test_trainset_layouts():
         trainset_layout(stored, 'voc')
     with pytest.raises(ContractError, match='不认识的路径'):
         trainset_layout([('other/x.png', 'x', 1)], 'yolo')
+
+
+def test_yolo_layout_renames_images_folders():
+    from fw.contract import trainset_layout, yolo_safe
+    assert yolo_safe('SES/TX/a/1.png') == 'SES/TX/a/1.png'
+    assert yolo_safe('SES/images/images/images_/Images/images') == 'SES/images_/images_/images__/Images/images'
+    stored = [('images/val/SES/TX/b/images/1.png', 'i', 1), ('labels/val/SES/TX/b/images/1.txt', 'l', 1),
+              ('json/val/SES/TX/b/images/1.json', 'j', 1)]
+    assert [p for p, _, _ in trainset_layout(stored, 'yolo')] == ['images/val/SES/TX/b/images_/1.png',
+                                                                 'labels/val/SES/TX/b/images_/1.txt']
+    assert [p for p, _, _ in trainset_layout(stored, 'json')] == ['val/SES/TX/b/images/1.png',
+                                                                 'val/SES/TX/b/images/1.json']

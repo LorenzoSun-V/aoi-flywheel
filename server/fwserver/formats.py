@@ -38,6 +38,7 @@ class Label:
     outside: int = 0  # boxes with nothing left inside the image
     shapes: Counter = field(default_factory=Counter)  # json: shape types used as boxes, other than rectangle
     refused: Counter = field(default_factory=Counter)  # json: shape types that cannot be a detection box
+    data: Optional[bytes] = None  # txt: the file without the UTF-8 BOM it was written with (None: no BOM)
 
 
 def _number(v) -> Optional[float]:
