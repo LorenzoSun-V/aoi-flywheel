@@ -72,13 +72,13 @@ def _repo(value: str, what: str, required: bool) -> str:
 
 
 def _name(value: str, what: str) -> str:
-    """A site or a line: release refs are <site>-<line>-r<n>, so neither may hold '-' (A-B/C and A/B-C would
-    both be A-B-C-r1)."""
+    """A site or a line: letters, digits, _ and . only. Release refs are <site>-<line>-r<n> and go into URL
+    paths, so neither may hold '-' (A-B/C and A/B-C would both be A-B-C-r1), '/' or the like."""
     value = _text(value, what, 64, line=True)
     if not value:
         raise DatasetError(400, f'要写{what}')
-    if '-' in value:
-        raise DatasetError(400, f'{what}里不能有 -（发布编号是 <现场>-<产线>-r<序号>）：{value}')
+    if not all(c.isalnum() or c in '_.' for c in value):
+        raise DatasetError(400, f'{what}只能用字母、数字、_ 和 .（发布编号是 <现场>-<产线>-r<序号>，不能有 -、/ 等）：{value}')
     return value
 
 

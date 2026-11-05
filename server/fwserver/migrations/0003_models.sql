@@ -109,8 +109,8 @@ CREATE TRIGGER fileset_files_delete AFTER DELETE ON fileset_files
 CREATE TABLE models (
   id          bigserial PRIMARY KEY,
   name        text NOT NULL CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  site        text NOT NULL CHECK (site <> '' AND site !~ '-'),  -- no '-': release refs are <site>-<line>-r<n>
-  line        text NOT NULL CHECK (line <> '' AND line !~ '-'),
+  site        text NOT NULL CHECK (site <> '' AND site !~ '[-/\\%?#[:space:]]'),  -- no '-': release refs are <site>-<line>-r<n>
+  line        text NOT NULL CHECK (line <> '' AND line !~ '[-/\\%?#[:space:]]'),
   task        text NOT NULL CHECK (task IN ('det')),
   note        text NOT NULL DEFAULT '',
   created_by  bigint NOT NULL REFERENCES users(id),
@@ -214,8 +214,8 @@ CREATE TRIGGER eval_reports_check BEFORE INSERT ON eval_reports
 -- late with an earlier deployed_at never displaces the one actually deployed after it.
 CREATE TABLE releases (
   id                bigserial PRIMARY KEY,
-  site              text NOT NULL CHECK (site <> '' AND site !~ '-'),  -- so that a ref names one line
-  line              text NOT NULL CHECK (line <> '' AND line !~ '-'),
+  site              text NOT NULL CHECK (site <> '' AND site !~ '[-/\\%?#[:space:]]'),  -- so that a ref names one line
+  line              text NOT NULL CHECK (line <> '' AND line !~ '[-/\\%?#[:space:]]'),
   number            int NOT NULL CHECK (number > 0),
   model_version_id  bigint NOT NULL REFERENCES model_versions(id),
   deploy_repo       text NOT NULL CHECK (deploy_repo <> '' AND deploy_repo !~* '^https?://[^/]*@'),

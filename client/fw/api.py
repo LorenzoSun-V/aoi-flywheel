@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 from typing import BinaryIO, Callable, List, Optional, Tuple
+from urllib.parse import quote
 
 import httpx
 
@@ -279,7 +280,7 @@ class Api:
         return self.get('/releases/current', site=site, line=line)
 
     def release(self, ref: str):
-        return self.get(f'/releases/{ref}')
+        return self.get(f'/releases/{quote(ref, safe="")}')
 
     def chain(self, ref: str, check: bool = False):
         return self.get('/chain', ref=ref, check=str(check).lower())

@@ -336,6 +336,12 @@ def test_a_token_in_the_repository_is_never_printed(api, model, snapshot, tmp_pa
                             code_repo='https://bot:ghp_SECRET123@git.example.com/train.git', echo=lines.append)
     assert mv['code_repo'] == 'https://git.example.com/train.git'
     assert lines and not any('SECRET' in line for line in lines)
+    lines.clear()  # blanks around the address (re-review 13:47): the token is still caught before it is shown
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'],
+                            code_repo='  https://bot:ghp_SECRET456@git.example.com/train.git\t', echo=lines.append)
+    assert mv['code_repo'] == 'https://git.example.com/train.git' and mv['existing']
+    assert lines and not any('SECRET' in line for line in lines)
+    assert ops.strip_credentials(' HTTPS://u:t@h/x ') == 'HTTPS://h/x'
 
 
 def test_two_lines_never_share_a_release_ref(api, make_api, snapshot, tmp_path):
@@ -344,9 +350,11 @@ def test_two_lines_never_share_a_release_ref(api, make_api, snapshot, tmp_path):
         api.create_model(name, 'A-B', 'C', 'det', '')
     api.create_model(name, 'A', 'B', 'det', '')
     register(api, name, snapshot, files_in(tmp_path))
-    for site, line in (('A-B', 'C'), ('A', 'B-C')):
-        with pytest.raises(ApiError, match='不能有 -'):
+    for site, line in (('A-B', 'C'), ('A', 'B-C'), ('SES/A', 'TX'), ('SES', 'T X'), ('S%2F', 'TX'), ('S?', 'TX')):
+        with pytest.raises(ApiError, match='只能用字母、数字'):
             release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site=site, line=line)
+    r = release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site='现场1', line='L_2.a')
+    assert api.release(r['ref'])['ref'] == r['ref'] == '现场1-L_2.a-r1'
 
 
 def test_the_chain_check_covers_the_test_sets(api, model, snapshot, tmp_path, service):
@@ -364,6 +372,28 @@ def test_the_chain_check_covers_the_test_sets(api, model, snapshot, tmp_path, se
         assert c['check']['problem_count'] == 1 and f'{test_pool}@1：t/a.png' in c['check']['problems'][0]
     finally:
         moved.rename(path)
+
+
+def test_a_report_rewritten_while_it_is_registered(api, model, snapshot, tmp_path, monkeypatch):
+    """summary.json is replaced (same image count) after the metrics were read and before the folder is
+    archived: nothing is registered, so the metrics never disagree with the archived report."""
+    register(api, model, snapshot, files_in(tmp_path))
+    out = deteval_out(tmp_path)
+    real = ops._send_files
+
+    def rewrite_first(api_, items, workers, echo):
+        doc = json.loads((out / 'summary.json').read_text(encoding='utf-8'))
+        doc['model_s0']['test']['mAP50'] = 0.95
+        (out / 'summary.json').write_text(json.dumps(doc), encoding='utf-8')
+        return real(api_, items, workers, echo)
+
+    monkeypatch.setattr(ops, '_send_files', rewrite_first)
+    with pytest.raises(ops.FwError, match='登记途中被改了'):
+        ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=out, echo=quiet)
+    assert api.model_version(model, 1)['evals'] == []
+    monkeypatch.setattr(ops, '_send_files', real)
+    e = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=out, echo=quiet)
+    assert e['metrics']['mAP50'] == 0.95
 
 
 def test_a_file_set_has_one_owner(sql, api, model, snapshot, tmp_path):

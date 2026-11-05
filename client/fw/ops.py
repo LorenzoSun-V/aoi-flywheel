@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -630,9 +631,11 @@ def parse_model_ref(ref: str) -> Tuple[str, str]:
 
 
 def strip_credentials(url: str) -> str:
-    """https://user:token@host/x -> https://host/x: a token in a repository URL must never be recorded."""
-    m = re.match(r'(https?://)[^/]*@(.*)\Z', url or '', re.I | re.S)
-    return m.group(1) + m.group(2) if m else (url or '')
+    """https://user:token@host/x -> https://host/x: a token in a repository URL must never be recorded or shown.
+    Surrounding blanks are removed first (the server removes them too), so ' https://u:t@h/x' is caught."""
+    url = (url or '').strip()
+    m = re.match(r'(https?://)[^/]*@(.*)\Z', url, re.I | re.S)
+    return m.group(1) + m.group(2) if m else url
 
 
 def _git(folder, *args) -> Optional[str]:
@@ -655,8 +658,9 @@ def git_info(folder) -> Optional[dict]:
             'dirty': bool(status)}
 
 
-def _read_json_object(path, what: str, undefined: Optional[list] = None) -> dict:
-    """undefined: read NaN and ±Infinity as null and append each to it (the platform keeps only standard JSON)."""
+def _read_json_object(path, what: str, undefined: Optional[list] = None, read: Optional[dict] = None) -> dict:
+    """undefined: read NaN and ±Infinity as null and append each to it (the platform keeps only standard JSON).
+    read: record the sha256 of the bytes that were parsed under the path (to check the archived copy is them)."""
     def constant(name):
         if undefined is None:
             raise ValueError(f'有 {name}，不是标准 JSON')
@@ -671,7 +675,10 @@ def _read_json_object(path, what: str, undefined: Optional[list] = None) -> dict
             return [finite(x) for x in v]
         return v
     try:
-        doc = finite(json.loads(Path(path).read_text(encoding='utf-8-sig'), parse_constant=constant))
+        data = Path(path).read_bytes()
+        if read is not None:
+            read[str(path)] = hashlib.sha256(data).hexdigest()
+        doc = finite(json.loads(data.decode('utf-8-sig'), parse_constant=constant))
     except OSError as e:
         raise FwError(f'读不了{what} {path}（{e.strerror or e}）') from None
     except ValueError as e:
@@ -679,6 +686,14 @@ def _read_json_object(path, what: str, undefined: Optional[list] = None) -> dict
     if not isinstance(doc, dict):
         raise FwError(f'{what} {path} 应该是一个 JSON 对象（{{…}}）')
     return doc
+
+
+def _same_as_read(rows: List[list], items: List[Tuple[str, Path]], read: dict) -> None:
+    """The files archived are the ones the metrics were read from: a report rewritten meanwhile is refused."""
+    digest = {rel: d for rel, d, _ in rows}
+    for rel, path in items:
+        if str(path) in read and digest.get(rel) != read[str(path)]:
+            raise FwError(f'{path} 在登记途中被改了（读指标时和归档时内容不一样），没有登记；等评估写完再登记')
 
 
 def _folder_files(folder: Path, prefix: str) -> List[Tuple[str, Path]]:
@@ -844,12 +859,12 @@ def _image_count(api: Api, version: dict, split: str) -> int:
 
 
 def _deteval_metrics(api: Api, folder: Path, model: Optional[str], set_name: Optional[str], version: dict,
-                     split: str, echo: Echo) -> Tuple[dict, str, str]:
+                     split: str, read: dict, echo: Echo) -> Tuple[dict, str, str]:
     """(metrics, model, set) from an aoi-deteval output folder: the set of the report that IS this test set.
     It must be named (the split's name, or set_name) and must have evaluated as many images as the test set
     has, or nothing is registered: a val report must never become a test result."""
     undefined: List[str] = []
-    summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果', undefined)
+    summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果', undefined, read)
     names = sorted(summary)
     if model is None:
         if len(names) != 1:
@@ -894,26 +909,29 @@ def register_eval(api: Api, model_ref: str, testset: str, metrics=None, deteval=
         raise FwError('--metrics 和 --deteval 要写一个，只写一个')
     mv = _pin(api, model_ref)
     version, split = _testset(api, testset)
+    read: Dict[str, str] = {}  # path -> sha256 of the bytes the metrics came from
     items: List[Tuple[str, Path]] = []
     rows: List[list] = []
     if deteval is not None:
         folder = Path(deteval)
         doc, deteval_model, deteval_set = _deteval_metrics(api, folder, deteval_model, deteval_set, version, split,
-                                                           echo)
+                                                           read, echo)
         data = json.dumps(doc, ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
         rows.append(['metrics.json', api.put_bytes(data), len(data)])
         items += _folder_files(folder, 'files/')
         if tool is None:
             tool = 'aoi-deteval'
         if tool_version is None and (folder / 'run_info.json').is_file():
-            tool_version = str(_read_json_object(folder / 'run_info.json', 'aoi-deteval 的 run_info', []).get(
+            tool_version = str(_read_json_object(folder / 'run_info.json', 'aoi-deteval 的 run_info', [], read).get(
                 'deteval_version', ''))
         note = '；'.join(t for t in (note, f'aoi-deteval 结果里的模型 {deteval_model}、集合 {deteval_set}') if t)
     else:
         _read_json_object(metrics, '指标文件')
         items.append(('metrics.json', Path(metrics)))
     items += _attachments(files)
-    rows += _send_files(api, items, workers, echo) if items else []
+    sent = _send_files(api, items, workers, echo) if items else []
+    _same_as_read(sent, items, read)
+    rows += sent
     e = api.register_eval(mv['model'], mv['number'], {
         'testset_id': version['id'], 'split': split, 'files': rows, 'tool': tool or '',
         'tool_version': tool_version or '', 'note': note})
