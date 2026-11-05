@@ -147,8 +147,8 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     assert v['ref'] == f'{name}@1' and v['kind'] == 'trainset'
     ts = v['trainset']
     assert ts['classes'] == CLASSES and ts['sources'] == [f'{src}@1'] and ts['based_on'] is None
-    assert ts['task'] == 'det' and ts['formats'] == ['yolo', 'coco']  # one label is YOLO txt: no JSON layout
-    assert 'YOLO txt' in v['summary']['missing_formats']['json']
+    assert ts['task'] == 'det' and ts['formats'] == ['yolo', 'coco', 'json']  # JSON made for the YOLO txt too
+    assert v['summary']['missing_formats'] == {}
     counts = ts['counts']
     assert counts['test']['samples'] == 5 and counts['test']['boxes'] == {'scratch': 5, 'dent': 0}
     assert counts['train']['samples'] + counts['val']['samples'] == 24
@@ -160,7 +160,7 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     assert tree['classes.txt'] == b'scratch\ndent\n'
     info = json.loads(tree['trainset.json'])
     assert info['format'] == trainsets.FORMAT and info['counts'] == counts and info['classes'] == CLASSES
-    assert info['task'] == 'det' and info['formats'] == ['yolo', 'coco'] and 'json' in info['missing_formats']
+    assert info['task'] == 'det' and info['formats'] == ['yolo', 'coco', 'json'] and info['missing_formats'] == {}
     assert info['sources'][0]['ref'] == f'{src}@1'
     assert info['rule'] == {'mode': 'fresh', 'val': 0.25, 'seed': 0, 'test_dirs': ['2026-10'], 'merge_test': False}
     splits = splits_of(tree)
@@ -200,11 +200,14 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     boxes = [a['bbox'] for a in extra[0]['annotations'] if a['image_id'] == extra[1]['id']]
     assert boxes == [[90.0, 45.0, 20.0, 10.0], [30.0, 15.0, 20.0, 10.0]]
 
-    with pytest.raises(ops.FwError, match='没有 json 格式'):
-        fetch(api, cache, v['ref'], tmp_path / 'json', fmt='json')
+    js = fetch(api, cache, v['ref'], tmp_path / 'json', fmt='json')
+    made = json.loads(js[f'{splits["SES/TX/2026-09/extra.bmp"]}/SES/TX/2026-09/extra.json'])
+    assert made['imagePath'] == 'extra.bmp' and (made['imageWidth'], made['imageHeight']) == (W, H)
+    assert [(sh['label'], sh['shape_type'], sh['points'][0], sh['points'][2]) for sh in made['shapes']] == [
+        ('scratch', 'rectangle', [90.0, 45.0], [110.0, 55.0]), ('dent', 'rectangle', [30.0, 15.0], [50.0, 25.0])]
     every = fetch(api, cache, v['ref'], tmp_path / 'all', fmt='all')
     assert {p.split('/')[0] for p in every} == {'classes.txt', 'trainset.json', 'images', 'labels', 'coco', 'json'}
-    assert len([p for p in every if p.startswith('json/')]) == 25  # kept for the JSON labels there are
+    assert len([p for p in every if p.startswith('json/')]) == 26  # 25 from the pool, 1 made from the YOLO txt
     with pytest.raises(ops.FwError, match='不是训练集快照'):
         fetch(api, cache, f'{src}@1', tmp_path / 'pool', fmt='yolo')
     assert api.trainset(name)['trainset'] == ts
@@ -260,6 +263,22 @@ def test_labels_that_cannot_be_detection_boxes(api, tmp_path, files, message):
     src = pool(api, tmp_path, files)
     preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES})
     assert any(message in p for p in preview['problems']), preview['problems']
+
+
+def test_json_from_yolo_needs_the_image_size(api, cache, tmp_path):
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.txt': yolo_line(0).encode(),
+                               'b.png': b'raw bytes', 'b.txt': yolo_line(1).encode()})
+    v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'])
+    assert v['trainset']['formats'] == ['yolo']
+    assert 'SES/TX/b.png' in v['summary']['missing_formats']['json']
+    # continuing it: the YOLO labels did not change, whatever was made from them
+    files = {'a.png': png(uuid.uuid4().hex), 'a.txt': yolo_line(0).encode()}
+    src2 = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    make(api, name, [f'{src2}@1'])
+    add_version(api, tmp_path, src2, {**files, 'c.png': png(uuid.uuid4().hex)})
+    v2 = make(api, name, [f'{src2}@2'])
+    assert v2['summary']['changes']['relabeled'] == 0 and v2['summary']['changes']['added'] == 1
 
 
 def test_coco_needs_every_image_size(api, cache, tmp_path):
@@ -475,7 +494,8 @@ def test_previous_splits_keep_the_extension(monkeypatch):
             ('images/test/SES/TX/b.png', 'i3', 1), ('classes.txt', 'c', 1)]
     monkeypatch.setattr(trainsets, '_files', lambda conn, version_id: rows)
     assert trainsets._previous_splits(None, {'id': 1}) == {
-        'SES/TX/same/a.png': ('train', 'j1'), 'SES/TX/same/a.jpg': ('val', 'l2'), 'SES/TX/b.png': ('test', None)}
+        'SES/TX/same/a.png': ('train', {'j1', 'l1'}), 'SES/TX/same/a.jpg': ('val', {'l2'}),
+        'SES/TX/b.png': ('test', set())}
 
 
 def test_same_stem_in_two_sources_is_refused(api, tmp_path):

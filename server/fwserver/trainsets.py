@@ -6,7 +6,8 @@ A snapshot is a version of a dataset of kind 'trainset'. Its files (docs/trainse
     trainset.json                                sources, classes, split rule, counts, formats
     images/<split>/<site>/<line>/<path in pool>  every image
     labels/<split>/<site>/<line>/<stem>.txt      YOLO detection label (made from the JSON, or the pool's txt)
-    json/<split>/<site>/<line>/<stem>.json       the pool's LiteAnno / X-AnyLabeling label, unchanged
+    json/<split>/<site>/<line>/<stem>.json       the pool's LiteAnno / X-AnyLabeling label, unchanged (made from
+                                                 the boxes when the pool has a YOLO txt)
     coco/<split>.json                            COCO detection annotations of the split
 
 so it is frozen, fetched, exported and verified exactly like any other version, and its manifest hash
@@ -284,7 +285,6 @@ def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -
 
 def _formats(store: Store, samples: Dict[str, Sample]) -> Dict[str, Optional[str]]:
     """Which formats the snapshot can hold: format -> None, or why it is left out."""
-    txt = [s.key for s in samples.values() if s.parsed is not None and s.parsed.kind == 'txt']
     unsized = []
     for s in samples.values():
         if s.size is None:
@@ -294,8 +294,9 @@ def _formats(store: Store, samples: Dict[str, Sample]) -> Dict[str, Optional[str
     out: Dict[str, Optional[str]] = {'yolo': None, 'coco': None, 'json': None}
     if unsized:
         out['coco'] = f'{len(unsized)} 张图读不出尺寸（只认 PNG、JPEG、BMP、GIF、TIFF、WebP 的文件头）：{_examples(unsized, 3)}'
-    if txt:
-        out['json'] = f'{len(txt)} 张图的标注是 YOLO txt，没有 LiteAnno JSON：{_examples(txt, 3)}'
+    txt = [k for k in unsized if samples[k].parsed is not None and samples[k].parsed.kind == 'txt']
+    if txt:  # their JSON is made from the YOLO boxes, which needs the image size
+        out['json'] = f'{len(txt)} 张图的标注是 YOLO txt，图片尺寸又读不出来，生成不了 LiteAnno JSON：{_examples(txt, 3)}'
     return out
 
 
@@ -312,9 +313,9 @@ def _latest_trainset(conn, name: str) -> Optional[dict]:
 
 
 def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]]]:
-    """key -> (split, sha256 of the pool's label) of every sample in a snapshot, read back from its tree: the
-    label is the one under json/ when there is one (labels/ then holds the converted copy), else labels/. Each
-    image is matched with the label of its own split and stem; the key keeps the image's extension."""
+    """key -> (split, sha256 of its label files) of every sample in a snapshot, read back from its tree: the
+    files under json/ and labels/ of its split and stem (one of them is the pool's label, the other made from
+    it). The key keeps the image's extension."""
     images: Dict[str, str] = {}
     found: Dict[str, Dict[str, str]] = {'json': {}, 'labels': {}}
     for path, digest, _ in _files(conn, previous['id']):
@@ -329,7 +330,7 @@ def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]
     out = {}
     for key, split in images.items():
         where = f'{split}/{_stem(key)}'
-        out[key] = (split, found['json'].get(where) or found['labels'].get(where))
+        out[key] = (split, frozenset(d for d in (found['json'].get(where), found['labels'].get(where)) if d))
     return out
 
 
@@ -409,8 +410,15 @@ def _changes(samples: Dict[str, Sample], previous: Optional[Dict[str, Tuple[str,
         return {}
     moved = sorted(f'{k}：{previous[k][0]} → {s.split}' for k, s in samples.items()
                    if k in previous and previous[k][0] != s.split)
-    relabeled = sum(1 for k, s in samples.items()
-                    if k in previous and previous[k][1] != (s.label[1] if s.label else None))
+    def relabeled_(k: str, s: Sample) -> bool:
+        if s.label is None:
+            return bool(previous[k][1])
+        mine = {s.label[1]}
+        if s.parsed is not None and s.parsed.data is not None:  # frozen without its BOM
+            mine.add(hashlib.sha256(s.parsed.data).hexdigest())
+        return not mine & previous[k][1]
+
+    relabeled = sum(1 for k, s in samples.items() if k in previous and relabeled_(k, s))
     added = sum(1 for k in samples if k not in previous)
     removed = sum(1 for k in previous if k not in samples)
     return {'added': added, 'removed': removed, 'moved': len(moved), 'moved_examples': moved[:EXAMPLES],
@@ -437,14 +445,18 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         rest = f'{s.split}/{s.site}/{s.line}/'
         stem = _stem(s.image[0])
         entries.append(('images/' + rest + s.image[0], s.image[1], s.image[2]))
-        if s.parsed is not None:
-            if s.parsed.kind == 'txt' and s.parsed.data is not None:  # the same label without its BOM
+        if s.parsed is not None and s.parsed.kind == 'txt':
+            if s.parsed.data is not None:  # the same label without its BOM
                 entries.append(made('labels/' + rest + stem + '.txt', s.parsed.data))
-            elif s.parsed.kind == 'txt':  # already a YOLO detection label: as it is
+            else:  # already a YOLO detection label: as it is
                 entries.append(('labels/' + rest + stem + '.txt', s.label[1], s.label[2]))
-            else:
-                entries.append(made('labels/' + rest + stem + '.txt', formats.yolo_bytes(s.parsed, classes, s.size)))
-                entries.append(('json/' + rest + stem + '.json', s.label[1], s.label[2]))
+            if available['json'] is None:  # for LiteAnno: rectangles from the boxes
+                name = PurePosixPath(s.image[0]).name
+                entries.append(made('json/' + rest + stem + '.json',
+                                    formats.liteanno_bytes(s.parsed, classes, s.size, name)))
+        elif s.parsed is not None:
+            entries.append(made('labels/' + rest + stem + '.txt', formats.yolo_bytes(s.parsed, classes, s.size)))
+            entries.append(('json/' + rest + stem + '.json', s.label[1], s.label[2]))
         if available['coco'] is None:
             boxes = formats.pixel_boxes(s.parsed, classes, s.size) if s.parsed is not None else []
             coco[s.split].append((s.key, s.size, boxes))
