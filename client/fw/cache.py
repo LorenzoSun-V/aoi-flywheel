@@ -18,12 +18,12 @@ import stat
 import tempfile
 import threading
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import cache_dir
 from .contract import BATCH_OBJECT_MAX, batches
 from .layout import hash_file
+from .pool import run_all
 
 FETCH_COUNT = 2000          # objects per batch download
 FETCH_BYTES = 32 << 20      # bytes per batch download
@@ -209,13 +209,7 @@ class Cache:
                 progress.add()
 
         jobs = [(run_batch, b) for b in batches(small, FETCH_COUNT, FETCH_BYTES)] + [(run_large, d) for d in large]
-        if workers <= 1 or len(jobs) <= 1:
-            for fn, arg in jobs:
-                fn(arg)
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                for _ in pool.map(lambda job: job[0](job[1]), jobs):
-                    pass
+        run_all(lambda job: job[0](job[1]), jobs, workers)
         return paths
 
     def fetch(self, api, digest: str, force: bool = False) -> Path:

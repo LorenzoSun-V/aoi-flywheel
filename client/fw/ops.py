@@ -8,7 +8,6 @@ import socket
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -19,6 +18,7 @@ from .checks import IMAGE_EXTS, scan_folder
 from .contract import (BATCH_OBJECT_MAX, Entry, batches, diff_entries, manifest_bytes, manifest_hash, parse_manifest,
                        sha256_file)
 from .layout import Layout
+from .pool import run_all
 
 Echo = Callable[[str], None]
 Confirm = Callable[[str], bool]
@@ -99,11 +99,7 @@ def _parallel(fn, items, workers: int, label: str) -> list:
         progress.add()
         return result
 
-    if workers <= 1:
-        out = [run(item) for item in items]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            out = list(pool.map(run, items))
+    out = run_all(run, items, workers)
     progress.done()
     return out
 
@@ -135,11 +131,7 @@ def _upload(api: Api, digests: List[str], sources: Dict[str, Path], sizes: Dict[
         return n
 
     jobs = [('batch', b) for b in batches(small, UPLOAD_COUNT, UPLOAD_BYTES)] + [('file', d) for d in large]
-    if workers <= 1 or len(jobs) <= 1:
-        total = sum(run(job) for job in jobs)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            total = sum(pool.map(run, jobs))
+    total = sum(run_all(run, jobs, workers))
     progress.done()
     return total
 

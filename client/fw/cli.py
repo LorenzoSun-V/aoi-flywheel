@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import getpass
+import os
 import sys
 import unicodedata
 
@@ -232,7 +233,12 @@ def main(argv=None) -> int:
         return 1
     except KeyboardInterrupt:
         print('\n已中断', file=sys.stderr)
-        return 130
+        # Exit now instead of waiting for uploads or downloads still running in other threads: the server
+        # keeps nothing it has not checked, and the cache replaces files atomically.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130)
+        return 130  # only reached when os._exit is replaced in tests
     finally:
         if api is not None:
             api.close()
