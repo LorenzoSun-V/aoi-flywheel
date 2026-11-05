@@ -44,3 +44,42 @@ def test_ctrl_c_reaches_the_main_thread_while_a_slow_job_runs():
     with pytest.raises(KeyboardInterrupt):
         run_all(job, list(range(100)), workers=4)
     assert time.monotonic() - started < 1.5
+
+
+def test_ctrl_c_reaches_the_main_thread_with_a_single_job():
+    """Review of PR #6: one job (or workers=1) ran in the main thread, so a blocking call in it (a fetch of a
+    single batch waiting up to 120 s for the cache index) still held Ctrl+C back."""
+    for items, workers in (([0], 4), ([0, 1, 2], 1)):
+        threading.Timer(0.1, signal.raise_signal, (signal.SIGINT,)).start()
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            run_all(lambda i: time.sleep(3), items, workers=workers)
+        assert time.monotonic() - started < 1.5
+
+
+def test_ctrl_c_while_jobs_are_being_submitted_cancels_the_ones_queued(monkeypatch):
+    """Review of PR #6: futures was assigned only after every submit, so Ctrl+C in the middle of submitting
+    left the jobs already queued running in the background (a Python caller that catches the interrupt
+    would see them go on)."""
+    import fw.pool as pool_module
+    release, started = threading.Event(), []
+
+    class Pool(pool_module.ThreadPoolExecutor):
+        submitted = 0
+
+        def submit(self, fn, *args):
+            Pool.submitted += 1
+            if Pool.submitted == 6:
+                raise KeyboardInterrupt
+            return super().submit(fn, *args)
+
+    def job(i):
+        started.append(i)
+        release.wait(5)
+
+    monkeypatch.setattr(pool_module, 'ThreadPoolExecutor', Pool)
+    with pytest.raises(KeyboardInterrupt):
+        run_all(job, list(range(10)), workers=2)
+    release.set()
+    time.sleep(0.3)
+    assert sorted(started) == [0, 1]

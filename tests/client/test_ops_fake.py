@@ -474,3 +474,27 @@ def test_ctrl_c_ends_the_command_without_waiting_for_uploads_in_flight(monkeypat
     monkeypatch.setattr(cli.ops, 'connect', lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
     cli.main(['whoami'])
     assert exits == [130] and '已中断' in capsys.readouterr().err
+
+
+def test_ctrl_c_exits_before_any_cleanup_can_hold_the_command(monkeypatch, capsys):
+    """Review of PR #6: KeyboardInterrupt first ran the commands' cleanup (closing the cache waited for a
+    download thread holding its lock), so os._exit(130) came only seconds later. Ctrl+C must exit at once."""
+    import signal
+    import time
+    from fw import cli
+    order = []
+    monkeypatch.setattr(cli.os, '_exit', lambda code: order.append(('exit', code)))
+
+    def connect():
+        try:
+            signal.raise_signal(signal.SIGINT)
+            time.sleep(0.5)
+        finally:
+            order.append('cleanup')
+        raise KeyboardInterrupt  # what the real exit would never get to
+
+    monkeypatch.setattr(cli.ops, 'connect', connect)
+    previous = signal.getsignal(signal.SIGINT)
+    cli.main(['whoami'])
+    assert order[0] == ('exit', 130) and '已中断' in capsys.readouterr().err
+    assert signal.getsignal(signal.SIGINT) is previous  # in-process callers get their handler back

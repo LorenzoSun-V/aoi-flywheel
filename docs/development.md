@@ -85,7 +85,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 下载的文件核对哈希后才进缓存；摆出来的每个文件都再核对 | `cache._install`、`layout.py` | `test_download_with_a_wrong_hash_never_enters_the_cache`、`test_damaged_cache_object_is_caught_and_downloaded_again` |
 | 缓存从不因为索引记录对不上就删文件（别的 fw 进程可能刚装好） | `cache.cached` / `cached_many` | `test_a_stale_index_row_never_deletes_a_fresh_copy*` |
 | 改取出来的文件不影响缓存；硬链接只在明确要求时用，只限 Linux | `layout.py`、`ops.get` | `test_editing_a_fetched_folder_leaves_the_cache_alone`、`test_hardlink_*` |
-| Ctrl+C 立即生效，不等还在排队的上传、下载（Windows 上无超时的等待接不到 Ctrl+C） | `pool.run_all`、`cli.main` 的 `os._exit(130)` | `test_pool.py`、`test_ctrl_c_*` |
+| Ctrl+C 立即生效，不等还在排队的上传、下载（Windows 上无超时的等待接不到 Ctrl+C） | `pool.run_all`（单个任务也在线程里跑）、`cli._on_sigint` 不做清理直接 `os._exit(130)`、`Cache.close` 不等别的线程 | `test_pool.py`、`test_cache.py`、`test_ctrl_c_*` |
 | 同一数据集同时导入，后提交的被拒，不悄悄覆盖 | `datasets.create_version` | `test_concurrent_import_into_same_dataset_is_refused`、`test_someone_else_added_a_version_meanwhile` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 

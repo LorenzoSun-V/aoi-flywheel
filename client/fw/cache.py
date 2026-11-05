@@ -91,8 +91,15 @@ class Cache:
         self.downloaded_bytes = 0
 
     def close(self):
-        with self._lock:
+        """Close the index. If another thread still holds it (a download left running after Ctrl+C, waiting
+        for SQLite), do not wait for it: the connection is closed when that thread is done with the object
+        or the process ends, and SQLite keeps the index consistent either way."""
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
             self._db.close()
+        finally:
+            self._lock.release()
 
     def object_path(self, digest: str) -> Path:
         return self.root / 'objects' / digest[:2] / digest[2:4] / digest

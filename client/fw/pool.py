@@ -18,12 +18,15 @@ STEP = 0.2  # seconds the main thread waits at a time; a blocking wait would not
 def run_all(fn: Callable[[T], R], items: Sequence[T], workers: int) -> List[R]:
     """fn(item) for every item, in up to `workers` threads; results in the order of items. The first
     error (or Ctrl+C) cancels every job not started yet and is raised."""
-    if workers <= 1 or len(items) <= 1:
-        return [fn(item) for item in items]
-    pool = ThreadPoolExecutor(max_workers=workers)
+    if not items:
+        return []
+    # Even one job, or workers=1, runs in a thread: in the main thread a blocking call inside fn (a request,
+    # a wait for the cache index) would hold Ctrl+C back just the same.
+    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(items))))
     futures = []
     try:
-        futures = [pool.submit(fn, item) for item in items]
+        for item in items:
+            futures.append(pool.submit(fn, item))  # one by one: Ctrl+C here must still cancel those queued
         pending = set(futures)
         while pending:
             done, pending = wait(pending, timeout=STEP, return_when=FIRST_EXCEPTION)
