@@ -640,6 +640,26 @@ def _check_chain(conn, store: Store, mv: dict, evals: List[dict], trainset: dict
     return {'objects': len(wanted), 'problem_count': len(problems), 'problems': problems[:50]}
 
 
+# --- fw-server verify --------------------------------------------------------------------------------------
+def verify_inputs(conn) -> Tuple[List[str], Dict[str, Tuple[Optional[int], str]], int]:
+    """For datasets.verify: file sets whose rows no longer rebuild their manifest hash, every object the file
+    sets of model versions and evaluation reports hold (its size, None for a manifest, and where it is used),
+    and how many file sets there are."""
+    sets = conn.execute(
+        "SELECT s.id, encode(s.manifest_sha256, 'hex') AS m, encode(fileset_manifest_sha256(s.id), 'hex') AS rebuilt, "
+        "coalesce((SELECT m.name || '@' || mv.number FROM model_versions mv JOIN models m ON m.id = mv.model_id "
+        "          WHERE mv.fileset_id = s.id), "
+        "         (SELECT '评估报告 #' || e.id FROM eval_reports e WHERE e.fileset_id = s.id)) AS ref "
+        'FROM filesets s ORDER BY s.id').fetchall()
+    problems = [f'{s["ref"]}：文件清单和登记的清单哈希对不上' for s in sets if s['m'] != s['rebuilt']]
+    ref = {s['id']: s['ref'] for s in sets}
+    wanted: Dict[str, Tuple[Optional[int], str]] = {s['m']: (None, s['ref']) for s in sets}
+    for r in conn.execute("SELECT encode(sha256, 'hex') AS d, size, min(fileset_id) AS fid FROM fileset_files "
+                          'GROUP BY sha256, size'):
+        wanted[r['d']] = (r['size'], ref[r['fid']])
+    return problems, wanted, len(sets)
+
+
 # --- who may download what ---------------------------------------------------------------------------------
 def model_objects_only(conn, digests: Sequence[str]) -> bool:
     """Whether every one of these objects belongs to a model version: one of its files or the manifest of its

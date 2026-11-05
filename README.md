@@ -7,7 +7,7 @@
 分四步做，每步一个 PR：
 
 1. **文件库、数据集版本、`fw` 命令行**，加部署、在线备份和恢复（已完成）
-2. **训练集快照**（已写好，见下文），然后是模型版本、引擎、评估、发布登记、追溯链（进行中）
+2. **训练集快照**，**模型版本、评估报告、发布登记、追溯链**（已写好，见下文；引擎由第三步从 ONNX 构建）
 3. 推理任务、GPU worker、预测集、预标注写回（执行你们自己的 TRT 部署代码）
 4. 网页，之后接上批次复核
 
@@ -37,6 +37,8 @@ docs/        架构文档、清单格式
 | 改取回目录不影响缓存 | 默认 reflink（btrfs、XFS），文件系统不支持就复制（ext4、NTFS）。硬链接只在加 `--hardlink` 时用，只限 Linux：不多占盘，但文件只读、和缓存共用一份数据。 |
 | 不会悄悄丢掉别人的修改 | 每个版本是一个目录的完整快照。两个人同时往一个数据集导入，后提交的会被拒绝，要以新的最新版本为父版本重新导入。 |
 | 中途失败不留半个版本 | 上传断了、数据库提交失败、写盘出错，都不会留下缺文件的冻结版本；已经传上去的文件下次直接复用。 |
+| 模型版本、评估、发布登记后不变 | 模型版本、评估报告、发布和模型都只能新增，数据库触发器拒绝修改和删除；模型版本、评估报告的文件和数据集版本一样按清单冻结。登记前文件必须已经在服务器上。标签（候选、弃用）是唯一能改的，每次改动多一条记录。 |
+| 从发布查回训练数据 | 每个模型版本必须引用一个训练集快照；`fw model chain <发布>` 从发布一路打印到模型版本、快照、数据池版本，`--check` 核对链上每个文件都在。产线现在用的模型是部署时间最晚的发布，补登旧的不会顶掉新的。 |
 | 训练集快照冻结的是结果 | 每张图分在 train、val 还是 test，类别表，以及建快照时转好的 YOLO、COCO 标注，都作为一个版本冻结；取回时原样摆出来，不重新划分、不重新转换。标注里有类别表以外的类别、转不成检测框的形状、图外的框，直接不建。同名再建一版时，原来的样本不换划分。 |
 
 还没做：归档、清理（垃圾回收）。你们 intake.py 里按画面布局分线、标注口径、像素查重这些 SES 专用的检查，等批次入库那一步做成每个项目可配的检查。
@@ -66,12 +68,12 @@ docker save aoi-flywheel-server:local postgres:16.15-bookworm | gzip > fw-images
 
 ## 账号和凭据
 
-| 角色 | 第一步能做的 |
+| 角色 | 能做的 |
 |---|---|
-| `admin` 管理员 | 和算法工程师一样；账号和凭据在服务器上用 `fw-server` 管 |
-| `algo` 算法工程师 | 建数据集、导入、取回、对比、导出 |
-| `field` 现场实施 | 第一步还不能碰数据集（批次上传下载在网页那步） |
-| `deploy` 部署 | 第一步还不能碰数据集（发布登记在第二步） |
+| `admin` 管理员 | 算法工程师和部署能做的都能做；账号和凭据在服务器上用 `fw-server` 管 |
+| `algo` 算法工程师 | 数据集、训练集快照；建模型、登记模型版本和评估报告、打标签；看发布和追溯链 |
+| `field` 现场实施 | 还不能用平台的数据和模型（批次上传下载在网页那步） |
+| `deploy` 部署 | 看模型和评估、取模型版本的文件（取不了数据集）；登记发布；看追溯链 |
 
 每台机器一个凭据，能列出、能吊销；停用账号会立即吊销它的全部凭据。
 
@@ -102,6 +104,11 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 | `fw get SES-TX@3 --to /data/train/SES-TX@3` | 取到一个空目录：只下载缓存里没有的，每个文件按清单核对 |
 | `fw export SES-TX@3 --to /mnt/usb/SES-TX@3` | 导出给连不上平台的机器，到那边 `fw verify /mnt/usb/SES-TX@3` 核对 |
 | `fw cache info` / `fw cache clear` | 本机缓存大小 / 清空（已经取出的目录不受影响） |
+| `fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt` | 建训练集快照：划分 train/val/test，转好 YOLO、COCO，冻结 |
+| `fw model register SES-TX-detr --onnx best.onnx --trainset SES-TX-det@2 --metrics val.json` | 上传 ONNX，登记模型的下一个版本 |
+| `fw eval register SES-TX-detr@3 --testset SES-TX-det@2:test --deteval results/` | 登记 aoi-deteval 的评估结果 |
+| `fw release register --model SES-TX-detr@3 --deploy-repo … --deploy-commit …` | 部署成功后登记发布（部署账号） |
+| `fw model chain SES-TX-r3 --check` | 追溯链：发布 → 模型版本 → 训练集快照 → 数据池版本 |
 
 每条命令的全部选项、输出怎么看、缓存放在哪和怎么挪（`FW_CACHE`）、Windows 上的安装问题，见[命令手册](docs/commands.md)。
 
@@ -111,8 +118,11 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 
 ```python
 import fw
-v = fw.get_version('SES-TX@3', '/data/train/SES-TX@3')   # 取到本地，返回版本记录
-print(v['id'], v['path'])                                  # 第二步登记模型时带上这个 id
+ts = fw.get_trainset('SES-TX-det@2', '/data/train/SES-TX-det@2')   # 取训练集快照，默认 YOLO 目录
+# ……训练，读 ts['data_yaml']……
+mv = fw.register_model('SES-TX-detr', onnx='best.onnx', trainset=ts, metrics='val.json',
+                       code_commit='<训练代码提交号>')
+print(mv['ref'])                                                   # SES-TX-detr@3
 ```
 
 ## 备份、恢复和核对

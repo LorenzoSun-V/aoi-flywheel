@@ -875,12 +875,12 @@ def register_release(api: Api, model_ref: str, deploy_repo: str, deploy_commit: 
         echo(f'{r["ref"]} 已经登记过（同一条产线、模型版本、部署提交号和部署时间），没有重复登记')
     else:
         echo(f'已登记发布 {r["ref"]}：{r["site"]}/{r["line"]} 部署了 {r["model_version"]["ref"]}，'
-             f'部署时间 {r["deployed_at"]}')
+             f'部署时间 {local_time(r["deployed_at"])}')
     current = r['current']
     if current['ref'] == r['ref']:
         echo(f'{r["site"]}/{r["line"]} 现在用的模型就是 {r["model_version"]["ref"]}')
     else:
-        echo(f'它的部署时间早于 {current["ref"]}（{current["deployed_at"]}），'
+        echo(f'它的部署时间早于 {current["ref"]}（{local_time(current["deployed_at"])}），'
              f'{r["site"]}/{r["line"]} 现在用的仍是 {current["model_version"]["ref"]}')
     return r
 
@@ -910,13 +910,21 @@ def latest_eval(mv: dict, testset: str) -> Optional[dict]:
     return found[-1] if found else None
 
 
+def local_time(stamp: Optional[str]) -> str:
+    """A time from the server (ISO 8601) in this machine's time zone, to the minute."""
+    if not stamp:
+        return '-'
+    return datetime.datetime.fromisoformat(stamp).astimezone().strftime('%Y-%m-%d %H:%M')
+
+
 def show_chain(echo: Echo, c: dict) -> None:
     """The trace chain, one level after another, from the release down to the pool versions."""
+    t_ = local_time
     r = c['release']
     mv = c['model_version']
     if r:
-        echo(f'发布 {r["ref"]}：{r["site"]}/{r["line"]}，部署于 {r["deployed_at"]}，'
-             f'{r["created_by"]} 登记于 {r["created_at"]}')
+        echo(f'发布 {r["ref"]}：{r["site"]}/{r["line"]}，部署于 {t_(r["deployed_at"])}，'
+             f'{r["created_by"]} 登记于 {t_(r["created_at"])}')
         echo(f'  部署仓库 {r["deploy_repo"]} @ {r["deploy_commit"]}')
         built = [x for x in (r['gpu'], f'TensorRT {r["trt_version"]}' if r['trt_version'] else '',
                              r['precision'].upper()) if x]
@@ -926,27 +934,27 @@ def show_chain(echo: Echo, c: dict) -> None:
         if r['note']:
             echo(f'  备注：{r["note"]}')
     elif c['releases']:
-        echo(f'发布过 {len(c["releases"])} 次：' + '、'.join(f'{x["ref"]}（{x["deployed_at"]}）' for x in c['releases']))
+        echo(f'发布过 {len(c["releases"])} 次：' + '、'.join(f'{x["ref"]}（{t_(x["deployed_at"])}）' for x in c['releases']))
     else:
         echo('还没有发布过')
     echo(f'模型版本 {mv["ref"]}：ONNX {mv["onnx_sha256"][:12]}（{size_text(mv["onnx_size"])}），'
-         f'文件清单 {mv["manifest_sha256"][:12]}，{mv["created_by"]} 登记于 {mv["created_at"]}')
+         f'文件清单 {mv["manifest_sha256"][:12]}，{mv["created_by"]} 登记于 {t_(mv["created_at"])}')
     echo(f'  训练代码 {mv["code_repo"] or "（没有登记仓库地址）"} @ {mv["code_commit"]}'
          + ('，训练时有没提交的改动' if mv['code_dirty'] else ''))
     if mv['tags']:
         echo('  标签：' + '、'.join(TAG_NAMES.get(t, t) for t in mv['tags']))
     for e in c['evals']:
         tool = f'，{e["tool"]} {e["tool_version"]}'.rstrip() if e['tool'] else ''
-        echo(f'  评估报告 #{e["id"]}：{e["testset"]["ref"]}{tool}，{e["created_by"]} 登记于 {e["created_at"]}')
+        echo(f'  评估报告 #{e["id"]}：{e["testset"]["ref"]}{tool}，{e["created_by"]} 登记于 {t_(e["created_at"])}')
     t = c['trainset']
     ts = t['trainset']
     counts = '，'.join(f'{s} {ts["counts"][s]["samples"]}' for s in SPLITS if ts['counts'].get(s, {}).get('samples'))
     echo(f'训练集快照 {t["ref"]}：清单 {t["manifest_sha256"][:12]}，{len(ts["classes"])} 个类别，{counts}；'
-         f'{t["created_by"]} 建于 {t["created_at"]}' + (f'，接着 {ts["based_on"]} 的划分' if ts['based_on'] else ''))
+         f'{t["created_by"]} 建于 {t_(t["created_at"])}' + (f'，接着 {ts["based_on"]} 的划分' if ts['based_on'] else ''))
     for v in c['sources']:
         parent = f'，父版本 {v["parent"]["ref"]}' if v.get('parent') else ''
         echo(f'数据池版本 {v["ref"]}：清单 {v["manifest_sha256"][:12]}，{v["file_count"]} 个文件{parent}；'
-             f'{v["created_by"]} 导入于 {v["created_at"]}')
+             f'{v["created_by"]} 导入于 {t_(v["created_at"])}')
         if v['source']:
             echo(f'  来源：{v["source"]}')
         if v['note']:

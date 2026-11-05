@@ -13,7 +13,7 @@ from fw import ops
 from fw.api import ApiError
 from fw.contract import sha256_file
 from fwserver import datasets as ds
-from fwserver import db
+from fwserver import db, models
 
 from test_trainsets import CLASSES, make, pool, sample_files, status_of
 
@@ -350,7 +350,7 @@ def test_chain_from_a_release_down_to_the_pool(api, make_api, model, snapshot, t
         check = api.chain(r['ref'], check=True)['check']
         assert check['problem_count'] == 1 and 'model.onnx' in check['problems'][0]
         with db.connect(service.settings.dsn) as conn:
-            problems = ds.verify(conn, store, echo=quiet)
+            problems = ds.verify(conn, store, echo=quiet, more=models.verify_inputs)
         assert any(mv['onnx_sha256'][:12] in p for p in problems)
     finally:
         aside.rename(path)

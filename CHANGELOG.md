@@ -2,13 +2,22 @@
 
 ## 0.2.0（未发布）
 
-第二步：训练集快照、模型版本、引擎、评估、发布和追溯链。
+第二步：训练集快照、模型版本、评估、发布和追溯链（引擎构建放到第三步）。
 
 - 新增训练集快照：`fw trainset create` 从一个或几个数据池版本建快照，每张图分到 train、val 或 test，连同类别表冻结；先预览每个划分的张数和每类框数，确认后才建。同名再建一版时默认接着上一版的划分（原来的样本不换划分，新样本进 test），可选 `--test-dirs`、`--merge-test`、`--new-to trainval`、`--split-file`、`--fresh`。标注里有类别表以外的类别、YOLO 编号超出范围、标注没有图片等情况直接拒绝。格式见[训练集快照的格式](docs/trainset-format.md)。
 - 建快照时服务器把标注转成 YOLO 和 COCO 检测框，和图片、原始 LiteAnno JSON 一起冻结；`fw get <快照>` 默认摆成 YOLO 的目录并生成 `data.yaml`，`--format coco` 摆成 RF-DETR 读的 COCO 目录，`--format json` 摆成 LiteAnno 能直接打开的目录。类别编号都是 classes.txt 的行号。
 - `fw trainset list`、`fw trainset show`；快照用 `fw get`、`fw export`、`fw verify`、`fw dataset diff` 取回、导出、核对和对比，和数据集版本一样。训练脚本用 `fw.get_trainset()` 取快照，返回 id、目录、类别表和 `data_yaml`。
 - `fw dataset list` 里快照的类型显示为「训练集快照」；往快照里 `fw dataset import` 会被拒绝。
 - 数据库迁移 `0002_trainsets.sql`：服务启动时自动应用，不用手动操作；升级前照常备份。
+- 新增模型和模型版本：`fw model create` 建模型（现场、产线、任务类型），`fw model register` 或训练脚本里的 `fw.register_model()` 把 ONNX、指标、附件和训练集快照登记成下一个版本。文件先传到服务器再登记，`classes.txt` 从快照复制；训练代码的提交号默认从当前目录的 git 读，并记下有没有没提交的改动，仓库地址里的账号和令牌不记。同一个 ONNX 再登记返回已有的版本，内容不一样就拒绝。`fw model list/versions/show`，`fw model get` 和 `fw.get_model()` 把模型版本取到本地（和 `fw get` 共用缓存）。
+- 标签：`fw model tag` 标候选、弃用，只追加，历史都在；`fw model compare` 并排对比几个版本的指标。
+- 评估报告：`fw eval register` 登记一个模型版本在测试集（快照的某个划分或数据集版本）上的指标和报告文件，`--deteval` 直接读 aoi-deteval 的输出目录；`fw eval list/show`。
+- 发布：`fw release register` 由部署仓库在部署成功后登记，发布 ID 是「现场-产线-r序号」；不上传引擎，记下现场构建引擎用的 GPU、TensorRT 版本、精度和可选的引擎哈希。`fw release current` 按部署成功时间最晚的发布回答产线现在用的模型，补登旧发布不会顶掉新的。`fw release list/show`。
+- 追溯链：`fw model chain <发布或模型版本>` 从发布一路显示到模型版本、评估、训练集快照和数据池版本，`--check` 核对链上每个文件都在文件库里。
+- 部署账号现在能读模型、登记发布、下载模型版本的文件（取不了数据集和快照的文件）；现场实施账号仍然什么都碰不到。
+- `fw-server verify` 也核对模型版本和评估报告的文件。
+- 数据库迁移 `0003_models.sql`：服务启动时自动应用；模型、模型版本、评估报告、发布和标签记录登记后数据库拒绝修改和删除。
+- 部署演练（`tools/deploy-drill.sh`）加上训练集快照、模型登记、评估、发布，在另一台机器恢复后核对追溯链并取回 ONNX 比对。
 
 ## 0.1.0（未发布）
 

@@ -15,6 +15,7 @@ from fw.cache import Cache
 from fw.contract import sha256_file
 from fwserver import cli
 from fwserver import datasets as ds
+from fwserver import models
 from fwserver.store import FLAG, MARKER, Store
 
 
@@ -42,7 +43,7 @@ def no_versions(api, dataset):
 def all_frozen_versions_complete(service, database):
     from fwserver import db
     with db.connect(database) as c:
-        return ds.verify(c, service.app.state.store, rehash=True, echo=quiet) == []
+        return ds.verify(c, service.app.state.store, rehash=True, echo=quiet, more=models.verify_inputs) == []
 
 
 @pytest.mark.parametrize('route', ['batch', 'single'])
