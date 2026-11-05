@@ -7,7 +7,8 @@ job that has not started is cancelled; only the ones already running finish (or 
 """
 from __future__ import annotations
 
-from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+import threading
+from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from typing import Callable, List, Sequence, TypeVar
 
 T = TypeVar('T')
@@ -22,11 +23,20 @@ def run_all(fn: Callable[[T], R], items: Sequence[T], workers: int) -> List[R]:
         return []
     # Even one job, or workers=1, runs in a thread: in the main thread a blocking call inside fn (a request,
     # a wait for the cache index) would hold Ctrl+C back just the same.
+    stop = threading.Event()
+
+    def job(item):
+        # Set on error or Ctrl+C. Cancelling the futures is not enough: Ctrl+C can come after submit() has
+        # queued a job and before its future is recorded, and that job must not start either.
+        if stop.is_set():
+            raise CancelledError()
+        return fn(item)
+
     pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(items))))
     futures = []
     try:
         for item in items:
-            futures.append(pool.submit(fn, item))  # one by one: Ctrl+C here must still cancel those queued
+            futures.append(pool.submit(job, item))
         pending = set(futures)
         while pending:
             done, pending = wait(pending, timeout=STEP, return_when=FIRST_EXCEPTION)
@@ -36,6 +46,7 @@ def run_all(fn: Callable[[T], R], items: Sequence[T], workers: int) -> List[R]:
                     raise error
         return [f.result() for f in futures]
     except BaseException:
+        stop.set()
         for f in futures:
             f.cancel()
         raise

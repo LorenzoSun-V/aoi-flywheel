@@ -83,3 +83,31 @@ def test_ctrl_c_while_jobs_are_being_submitted_cancels_the_ones_queued(monkeypat
     release.set()
     time.sleep(0.3)
     assert sorted(started) == [0, 1]
+
+
+def test_ctrl_c_right_after_a_job_was_queued_still_stops_it(monkeypatch):
+    """Review of PR #6 (round 2): Ctrl+C after pool.submit() queued a job but before its future was recorded
+    left that one job to run after the interrupt."""
+    import fw.pool as pool_module
+    release, started = threading.Event(), []
+
+    class Pool(pool_module.ThreadPoolExecutor):
+        submitted = 0
+
+        def submit(self, fn, *args):
+            future = super().submit(fn, *args)
+            Pool.submitted += 1
+            if Pool.submitted == 6:
+                raise KeyboardInterrupt  # job 5 is queued, its future never reaches run_all
+            return future
+
+    def job(i):
+        started.append(i)
+        release.wait(5)
+
+    monkeypatch.setattr(pool_module, 'ThreadPoolExecutor', Pool)
+    with pytest.raises(KeyboardInterrupt):
+        run_all(job, list(range(10)), workers=2)
+    release.set()
+    time.sleep(0.3)
+    assert sorted(started) == [0, 1]
