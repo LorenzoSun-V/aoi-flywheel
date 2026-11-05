@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, auth, datasets, db
+from . import __version__, auth, datasets, db, models
 from .settings import Settings, SettingsError
 from .store import Store, StoreError
 
@@ -66,7 +66,8 @@ def cmd_verify(args, settings):
     try:
         with db.connect(settings.dsn) as conn:
             problems = datasets.verify(conn, store, rehash=args.rehash,
-                                       repair_from=Path(args.repair_from) if args.repair_from else None)
+                                       repair_from=Path(args.repair_from) if args.repair_from else None,
+                                       more=models.verify_inputs)
         for p in problems[:50]:
             print(f'  {p}')
         if len(problems) > 50:

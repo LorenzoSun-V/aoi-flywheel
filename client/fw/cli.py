@@ -187,9 +187,197 @@ def cmd_trainset_show(args, api: Api) -> None:
     ops.show_trainset_plan(print, {'counts': ts['counts']}, ts['classes'])
 
 
+# --- models, evaluations, releases -----------------------------------------------------------------
+TASK_NAMES = {'det': '检测'}
+
+
+def _tags(mv: dict) -> str:
+    return '、'.join(ops.TAG_NAMES.get(t, t) for t in mv['tags'])
+
+
+def _number(v) -> str:
+    return f'{v:.4f}'.rstrip('0').rstrip('.') if isinstance(v, float) else str(v)
+
+
+def _show_metrics(metrics: dict, indent: str = '  ', limit: int = 40) -> None:
+    rows = ops.flatten_metrics(metrics)
+    for k, v in rows[:limit]:
+        print(f'{indent}{k}: {_number(v)}')
+    if len(rows) > limit:
+        print(f'{indent}……还有 {len(rows) - limit} 项，见 metrics.json')
+
+
+def cmd_model_create(args, api: Api) -> None:
+    m = api.create_model(args.name, args.site, args.line, args.task, args.note)
+    print(f'已建模型 {m["name"]}（{m["site"]}/{m["line"]}，{TASK_NAMES.get(m["task"], m["task"])}）；'
+          f'登记版本：fw model register {m["name"]} --onnx best.onnx --trainset <快照>')
+
+
+def cmd_model_list(args, api: Api) -> None:
+    rows = api.models()
+    if not rows:
+        print('还没有模型；用 fw model create 建')
+        return
+    _table(['名称', '现场', '产线', '任务', '版本数', '最新', '备注'],
+           [[m['name'], m['site'], m['line'], TASK_NAMES.get(m['task'], m['task']), m['version_count'],
+             m['latest'] or '-', m['note']] for m in rows])
+
+
+def cmd_model_versions(args, api: Api) -> None:
+    rows = api.model_versions(args.name)
+    if not rows:
+        print(f'{args.name} 还没有版本；用 fw model register 登记')
+        return
+    _table(['版本', '训练集快照', 'ONNX', '代码提交', '标签', '登记人', '登记时间', '备注'],
+           [[v['ref'], v['trainset']['ref'], v['onnx_sha256'][:12], v['code_commit'][:10] + ('*' if v['code_dirty'] else ''),
+             _tags(v) or '-', v['created_by'], _when(v['created_at']), v['note']] for v in rows])
+    if any(v['code_dirty'] for v in rows):
+        print('提交号后面有 * 的：训练时代码有没提交的改动')
+
+
+def cmd_model_show(args, api: Api) -> None:
+    mv = api.model_version(*ops.parse_model_ref(args.ref))
+    print(f'{mv["ref"]}：{mv["site"]}/{mv["line"]}，{TASK_NAMES.get(mv["task"], mv["task"])}，'
+          f'{mv["created_by"]} 登记于 {_when(mv["created_at"])}')
+    print(f'训练集快照：{mv["trainset"]["ref"]}；类别：{"、".join(mv["classes"])}')
+    print(f'训练代码：{mv["code_repo"] or "（没有登记仓库地址）"} @ {mv["code_commit"]}'
+          + ('（训练时有没提交的改动）' if mv['code_dirty'] else ''))
+    if mv['tags']:
+        print(f'标签：{_tags(mv)}')
+    if mv['note']:
+        print(f'备注：{mv["note"]}')
+    print(f'文件（{mv["file_count"]} 个，{ops.size_text(mv["total_bytes"])}）：')
+    for f in mv['files']:
+        print(f'  {f["path"]}  {f["sha256"][:12]}  {ops.size_text(f["size"])}')
+    if mv['metrics']:
+        print('验证指标：')
+        _show_metrics(mv['metrics'])
+    for e in mv['evals']:
+        print(f'评估报告 #{e["id"]}：{e["testset"]["ref"]}' + (f'，{e["tool"]} {e["tool_version"]}' if e['tool'] else '')
+              + f'，{e["created_by"]} 登记于 {_when(e["created_at"])}')
+    for r in mv['releases']:
+        print(f'发布 {r["ref"]}：部署于 {_when(r["deployed_at"])}')
+
+
+def cmd_model_register(args, api: Api) -> None:
+    ops.register_model(api, args.name, args.onnx, args.trainset, args.metrics, args.file, args.code_commit,
+                       args.code_repo, args.note, workers=args.workers)
+
+
+def cmd_model_get(args, api: Api) -> None:
+    link = 'hardlink' if args.hardlink else 'copy' if args.copy else 'auto'
+    cache = Cache()
+    try:
+        ops.get_model(api, cache, args.ref, args.to, link=link, workers=args.workers)
+    finally:
+        cache.close()
+
+
+def cmd_model_tag(args, api: Api) -> None:
+    name, number = ops.parse_model_ref(args.ref)
+    mv = api.set_tag(name, number, args.tag, not args.remove, args.note)
+    label = ops.TAG_NAMES.get(args.tag, args.tag)
+    if not mv['changed']:
+        print(f'{mv["ref"]} {"本来就没有" if args.remove else "已经有"}标签「{label}」')
+    else:
+        print(f'{mv["ref"]} {"去掉了" if args.remove else "加上了"}标签「{label}」；现在的标签：{_tags(mv) or "无"}')
+
+
+def cmd_model_compare(args, api: Api) -> int:
+    a = api.model_version(*ops.parse_model_ref(args.first))
+    b = api.model_version(*ops.parse_model_ref(args.second))
+    if args.testset:
+        ea, eb = ops.latest_eval(a, args.testset), ops.latest_eval(b, args.testset)
+        for mv, e in ((a, ea), (b, eb)):
+            if e is None:
+                raise ops.FwError(f'{mv["ref"]} 没有在 {args.testset} 上的评估报告；先 fw eval register')
+        print(f'{args.testset} 上的评估：{a["ref"]} 用 #{ea["id"]}，{b["ref"]} 用 #{eb["id"]}')
+        old, new = ea['metrics'], eb['metrics']
+    else:
+        print('验证指标（登记模型版本时的 metrics.json）：')
+        old, new = a['metrics'], b['metrics']
+    rows = ops.compare_metrics(old, new)
+    if not rows:
+        print('两边都没有数值指标')
+        return 0
+    def cell(v):
+        return '-' if v is None else _number(v)
+    def change(x, y):
+        return '' if x is None or y is None else f'{y - x:+.4f}'.rstrip('0').rstrip('.')
+    _table(['指标', a['ref'], b['ref'], '变化'], [[k, cell(x), cell(y), change(x, y)] for k, x, y in rows[:args.limit]])
+    if len(rows) > args.limit:
+        print(f'……还有 {len(rows) - args.limit} 项，加 --limit 看更多')
+    return 0
+
+
+def cmd_model_chain(args, api: Api) -> int:
+    c = api.chain(args.ref, check=args.check)
+    ops.show_chain(print, c)
+    return 1 if c.get('check') and c['check']['problem_count'] else 0
+
+
+def cmd_eval_register(args, api: Api) -> None:
+    ops.register_eval(api, args.model, args.testset, metrics=args.metrics, deteval=args.deteval,
+                      deteval_model=args.deteval_model, deteval_set=args.deteval_set, files=args.file, tool=args.tool,
+                      tool_version=args.tool_version, note=args.note, workers=args.workers)
+
+
+def cmd_eval_list(args, api: Api) -> None:
+    rows = api.evals(args.model or '')
+    if not rows:
+        print('还没有评估报告')
+        return
+    _table(['编号', '模型版本', '测试集', '工具', '登记人', '登记时间', '备注'],
+           [[f'#{e["id"]}', e['model_version']['ref'], e['testset']['ref'],
+             f'{e["tool"]} {e["tool_version"]}'.strip() or '-', e['created_by'], _when(e['created_at']), e['note']]
+            for e in rows])
+
+
+def cmd_eval_show(args, api: Api) -> None:
+    e = api.eval(int(args.id.lstrip('#')))
+    print(f'评估报告 #{e["id"]}：{e["model_version"]["ref"]} 在 {e["testset"]["ref"]} 上'
+          + (f'，{e["tool"]} {e["tool_version"]}' if e['tool'] else '')
+          + f'，{e["created_by"]} 登记于 {_when(e["created_at"])}')
+    if e['note']:
+        print(f'备注：{e["note"]}')
+    print(f'文件（{e["file_count"]} 个，{ops.size_text(e["total_bytes"])}）：')
+    for f in e['files']:
+        print(f'  {f["path"]}  {f["sha256"][:12]}  {ops.size_text(f["size"])}')
+    print('指标：')
+    _show_metrics(e['metrics'])
+
+
+def cmd_release_register(args, api: Api) -> None:
+    ops.register_release(api, args.model, args.deploy_repo, args.deploy_commit, args.deployed_at, args.site,
+                         args.line, args.gpu, args.trt, args.precision, args.engine_file, args.note)
+
+
+def _release_rows(rows):
+    return [[r['ref'], r['model_version']['ref'], _when(r['deployed_at']), r['deploy_commit'][:10],
+             '，'.join(x for x in (r['gpu'], r['trt_version'] and f'TRT {r["trt_version"]}', r['precision'].upper()) if x)
+             or '-', r['created_by'], r['note']] for r in rows]
+
+
+def cmd_release_list(args, api: Api) -> None:
+    rows = api.releases(args.site or '', args.line or '')
+    if not rows:
+        print('还没有登记过发布')
+        return
+    _table(['发布', '模型版本', '部署时间', '部署提交', '引擎', '登记人', '备注'], _release_rows(rows))
+
+
+def cmd_release_current(args, api: Api) -> None:
+    r = api.current_release(args.site, args.line)
+    print(f'{r["site"]}/{r["line"]} 现在用的是 {r["model_version"]["ref"]}（发布 {r["ref"]}，部署于 {_when(r["deployed_at"])}）')
+
+
+def cmd_release_show(args, api: Api) -> None:
+    ops.show_chain(print, api.chain(args.ref))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='fw', description='数据飞轮平台命令行：数据集版本的导入、取回、对比和导出，'
-                                                       '训练集快照。')
+                                                       '训练集快照，模型版本、评估、发布和追溯链。')
     p.add_argument('--version', action='version', version=f'fw {__version__}')
     sub = p.add_subparsers(dest='command', required=True, metavar='命令')
 
@@ -260,6 +448,112 @@ def build_parser() -> argparse.ArgumentParser:
     s = ts.add_parser('show', help='看一个快照的来源、划分和每类框数')
     s.add_argument('ref', help='快照，例如 SES-TX-det@2；只写名称就是最新版')
     s.set_defaults(func=cmd_trainset_show)
+
+    md = sub.add_parser('model', help='模型：create、list、versions、show、register、get、tag、compare、chain').add_subparsers(
+        dest='action', required=True, metavar='操作')
+    s = md.add_parser('create', help='新建模型（一条产线上的一种模型）')
+    s.add_argument('name', help='名称：字母、数字、. _ -，例如 SES-TX-detr')
+    s.add_argument('--site', required=True, help='现场，例如 SES')
+    s.add_argument('--line', required=True, help='产线，例如 TX')
+    s.add_argument('--task', default='det', choices=list(TASK_NAMES), help='任务类型：det（检测，默认）')
+    s.add_argument('--note', default='', help='备注')
+    s.set_defaults(func=cmd_model_create)
+    s = md.add_parser('list', help='列出模型')
+    s.set_defaults(func=cmd_model_list)
+    s = md.add_parser('versions', help='列出一个模型的版本')
+    s.add_argument('name')
+    s.set_defaults(func=cmd_model_versions)
+    s = md.add_parser('show', help='看一个模型版本：文件、快照、代码、指标、评估和发布')
+    s.add_argument('ref', help='模型版本，例如 SES-TX-detr@3；只写名称就是最新版')
+    s.set_defaults(func=cmd_model_show)
+    s = md.add_parser('register', help='上传 ONNX，登记为模型的下一个版本')
+    s.add_argument('name', help='模型名称（先用 fw model create 建）')
+    s.add_argument('--onnx', required=True, help='ONNX 文件')
+    s.add_argument('--trainset', required=True, help='训练用的训练集快照，例如 SES-TX-det@2')
+    s.add_argument('--metrics', help='验证指标 JSON（一个 JSON 对象，比如训练结束时的 val 指标）')
+    s.add_argument('--file', action='append', default=[], metavar='文件或目录',
+                   help='附件：权重、配置等，登记在 files/ 下；可写多次')
+    s.add_argument('--code-commit', help='训练代码的 git 提交号；不写就用当前目录 git 仓库的 HEAD')
+    s.add_argument('--code-repo', help='训练代码仓库地址；不写就用当前目录的 origin（去掉其中的账号和令牌）')
+    s.add_argument('--note', default='', help='备注')
+    s.add_argument('--workers', type=int, default=8)
+    s.set_defaults(func=cmd_model_register)
+    s = md.add_parser('get', help='把模型版本的文件取到本地目录（部署账号也能用）')
+    s.add_argument('ref', help='模型版本，例如 SES-TX-detr@3')
+    s.add_argument('--to', required=True, help='目标目录（不存在或为空）')
+    g = s.add_mutually_exclusive_group()
+    g.add_argument('--copy', action='store_true', help='总是复制（默认先试 reflink，不支持再复制）')
+    g.add_argument('--hardlink', action='store_true', help='硬链接（只限 Linux），文件只读')
+    s.add_argument('--workers', type=int, default=8)
+    s.set_defaults(func=cmd_model_get)
+    s = md.add_parser('tag', help='给模型版本加上或去掉标签 candidate（候选）、deprecated（弃用）')
+    s.add_argument('ref', help='模型版本，例如 SES-TX-detr@3')
+    s.add_argument('tag', choices=list(ops.TAG_NAMES))
+    s.add_argument('--remove', action='store_true', help='去掉这个标签')
+    s.add_argument('--note', default='', help='为什么改')
+    s.set_defaults(func=cmd_model_tag)
+    s = md.add_parser('compare', help='对比两个模型版本的指标')
+    s.add_argument('first', help='旧版本，例如 SES-TX-detr@2')
+    s.add_argument('second', help='新版本，例如 SES-TX-detr@3')
+    s.add_argument('--testset', help='对比在这个测试集上的评估报告（例如 SES-TX-det@2:test）；不写就对比验证指标')
+    s.add_argument('--limit', type=int, default=60, help='最多列多少项（默认 60）')
+    s.set_defaults(func=cmd_model_compare)
+    s = md.add_parser('chain', help='追溯链：从发布或模型版本一路查到数据池版本')
+    s.add_argument('ref', help='发布（例如 SES-TX-r3）或模型版本（例如 SES-TX-detr@3）')
+    s.add_argument('--check', action='store_true', help='同时核对链上每个文件都还在文件库里')
+    s.set_defaults(func=cmd_model_chain)
+
+    ev = sub.add_parser('eval', help='评估报告：register、list、show').add_subparsers(
+        dest='action', required=True, metavar='操作')
+    s = ev.add_parser('register', help='登记一个模型版本在测试集上的评估结果')
+    s.add_argument('model', help='模型版本，例如 SES-TX-detr@3')
+    s.add_argument('--testset', required=True,
+                   help='测试集版本，例如 SES-TX-test@1；训练集快照要写划分，例如 SES-TX-det@2:test')
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument('--deteval', metavar='目录', help='aoi-deteval evaluate 的输出目录（summary.json、run_info.json 等，整个目录都登记）')
+    g.add_argument('--metrics', help='别的评估工具的指标 JSON（一个 JSON 对象）')
+    s.add_argument('--deteval-model', help='summary.json 里有几个模型时，这个模型版本对应哪一个')
+    s.add_argument('--deteval-set', help='aoi-deteval 结果里哪个集合是这个测试集（默认是和划分同名的那个）；'
+                                         '评的图片数要和测试集一样')
+    s.add_argument('--file', action='append', default=[], metavar='文件或目录', help='附带的报告文件；可写多次')
+    s.add_argument('--tool', help='评估工具名（用 --deteval 时是 aoi-deteval）')
+    s.add_argument('--tool-version', help='评估工具版本（用 --deteval 时从 run_info.json 读）')
+    s.add_argument('--note', default='', help='备注')
+    s.add_argument('--workers', type=int, default=8)
+    s.set_defaults(func=cmd_eval_register)
+    s = ev.add_parser('list', help='列出评估报告')
+    s.add_argument('model', nargs='?', help='只列这个模型的')
+    s.set_defaults(func=cmd_eval_list)
+    s = ev.add_parser('show', help='看一份评估报告的文件和指标')
+    s.add_argument('id', help='编号，例如 12')
+    s.set_defaults(func=cmd_eval_show)
+
+    rl = sub.add_parser('release', help='发布：register、list、current、show').add_subparsers(
+        dest='action', required=True, metavar='操作')
+    s = rl.add_parser('register', help='部署成功后登记一次发布（部署账号或管理员）')
+    s.add_argument('--model', required=True, help='部署的模型版本，例如 SES-TX-detr@3')
+    s.add_argument('--site', default='', help='现场；不写就是模型的现场')
+    s.add_argument('--line', default='', help='产线；不写就是模型的产线')
+    s.add_argument('--deploy-repo', required=True, help='部署仓库地址（不要带账号和令牌）')
+    s.add_argument('--deploy-commit', required=True, help='部署仓库的 git 提交号')
+    s.add_argument('--deployed-at', help='部署成功的时间，例如 2026-11-20T10:30+08:00；不写就是现在')
+    s.add_argument('--gpu', default='', help='现场构建引擎用的 GPU，例如 RTX3070')
+    s.add_argument('--trt', default='', help='现场的 TensorRT 版本，例如 10.3')
+    s.add_argument('--precision', default='', choices=['', 'fp32', 'fp16'], help='引擎精度 fp32 或 fp16')
+    s.add_argument('--engine-file', help='现场从 ONNX 构建的引擎文件：只记它的哈希和大小，文件不上传')
+    s.add_argument('--note', default='', help='备注')
+    s.set_defaults(func=cmd_release_register)
+    s = rl.add_parser('list', help='列出发布，按部署时间排')
+    s.add_argument('--site')
+    s.add_argument('--line')
+    s.set_defaults(func=cmd_release_list)
+    s = rl.add_parser('current', help='一条产线现在用的是哪个模型（部署时间最晚的发布）')
+    s.add_argument('--site', required=True)
+    s.add_argument('--line', required=True)
+    s.set_defaults(func=cmd_release_current)
+    s = rl.add_parser('show', help='看一次发布和它的追溯链')
+    s.add_argument('ref', help='发布编号，例如 SES-TX-r3')
+    s.set_defaults(func=cmd_release_show)
 
     s = sub.add_parser('get', help='把一个版本取到本地目录')
     s.add_argument('ref', help='版本，例如 SES-TX@3；只写名称就是最新版')

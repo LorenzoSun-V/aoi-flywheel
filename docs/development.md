@@ -28,12 +28,14 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
   layout.py          把缓存里的文件摆成版本的目录：reflink、复制、硬链接，每个文件摆完都核对哈希
   pool.py            并行跑一组任务（上传、下载）：出错或 Ctrl+C 时取消还没开始的，不等手上的
   ops.py             每条命令真正做的事（import_folder、get、export、verify、diff、get_version、
-                     create_trainset、get_trainset）
+                     create_trainset、get_trainset、register_model、get_model、register_eval、
+                     register_release、show_chain）
   cli.py             命令行参数和输出格式，只调 ops
   config.py          设置文件和缓存的位置
 server/fwserver/     fw-server：只支持 Linux
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
+  models.py          模型、模型版本、评估报告、发布、标签、追溯链；部署账号能下载哪些文件
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
   formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
   datasets.py        数据集和版本：建版本、冻结、差异、核对（verify）
@@ -50,7 +52,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ### 分层（`lint-imports` 检查）
 
-- 服务端只能往下调：`cli`、`app` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
+- 服务端只能往下调：`cli`、`app` → `models` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
 - 客户端永远不 import 服务端。
 - `fw.contract` 不依赖 `fw` 里的任何其他模块：服务端也 import 它，它必须保持纯粹。
 
@@ -88,6 +90,20 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径（YOLO 时再写 `data.yaml`，并用 `yolo_safe` 把原路径里叫 `images` 的目录改名，因为 ultralytics 和 aoi-deteval 把最后一个 `images/` 换成 `labels/` 找标注）。
 
+## 一次登记模型版本在代码里怎么走
+
+`fw model register`（`ops.register_model`）和 `fw.register_model`：
+
+1. 本机先查 ONNX 的开头（ir_version）、指标文件是 JSON 对象、训练集快照存在而且是快照；没写提交号时用 `git_info` 读当前目录的 HEAD、origin（`strip_credentials` 去掉账号和令牌）和有没有没提交的改动。
+2. `_send_files`：算哈希、`api.missing`、只上传服务器上没有的。
+3. `api.register_model_version`：服务端 `models.register_model_version` 核对每个文件都在文件库里且大小对，从文件库读 `metrics.json` 和 `model.onnx` 的开头（记下的是存着的文件，不是请求里说的），加上快照的 `classes.txt`，写好文件集的清单并 `store.flush()`；然后一个事务里锁住模型、看同一个 ONNX 是不是登记过（一样就返回已有的，不一样就 409）、插入文件集、冻结、插入模型版本。
+
+评估报告（`register_eval`）走同一条路，文件集里是 `metrics.json` 和 `files/…`。发布不带文件：现场构建的引擎只记哈希和大小。
+
+文件集（`filesets`、`fileset_files`）就是不属于数据集的「冻结的一组文件」：和数据集版本一样按清单哈希冻结，`fw model get` 用的是和 `fw get` 同一套缓存和摆放代码（`ops._lay_out`）。`fw-server verify` 通过 `models.verify_inputs` 也核对这些文件；`datasets.verify` 的 `more` 参数是必填的，免得哪里调用时漏掉模型文件（`--rehash` 时不认识的文件会被当成导入中断留下的）。
+
+部署账号能下载的只有模型版本文件集里的文件和清单（`models.model_objects_only`，`app.may_download`），别的一律 403。
+
 ## 绝不能破的规则
 
 每条后面是守住它的地方和测试。改到相关代码时，先跑这些测试；新的修复先写一个在旧代码上失败的复现测试。
@@ -111,14 +127,22 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | YOLO 格式里每张图的标注就在 ultralytics 找的位置 | `contract.yolo_safe`、`trainsets._tree`（去掉 BOM） | `test_images_folders_inside_the_pool_path`、`test_yolo_label_with_a_bom`、`test_yolo_layout_renames_images_folders` |
 | 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split` |
 | 转好的 YOLO / COCO 标注随快照冻结，取回只改路径不改内容；转不了的形状、图外的框不悄悄丢掉，直接不建 | `formats.py`、`trainsets._tree`、`contract.trainset_layout` | `test_formats.py`、`test_first_snapshot_layout_and_formats`、`test_labels_that_cannot_be_detection_boxes` |
-| 恢复时核对全部通过才对外服务，失败换回原数据库 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
+| 模型、模型版本、评估报告、发布、标签记录登记后不能改、不能删；文件集冻结后不能改；每个文件集只属于一个模型版本或评估报告（新建文件集时和插入模型版本、评估报告时都查）；模型版本只能引用训练集快照，ONNX 哈希就是文件集里的 `model.onnx`；现场和产线只能用汉字、英文字母、数字、`_`、`.`，和 `models.SITE_LINE` 是同一条按码位的规则 | 数据库触发器和 CHECK（`0003_models.sql`） | `test_records_cannot_change`、`test_what_the_database_refuses`、`test_a_file_set_has_one_owner`、`test_two_lines_never_share_a_release_ref`、`test_the_database_takes_the_names_the_server_takes` |
+| 评估和发布登记在具体的模型版本上，重试不会换版本；`--deteval` 的集合就是声明的测试集（集合名、图片数） | `ops._pin`、`models._pinned`、`ops._deteval_metrics` | `test_a_retry_stays_on_the_version_it_meant`、`test_a_deteval_report_must_be_the_test_set` |
+| 附件目录读不全就不登记；令牌不打印；指标只收标准 JSON 里的有限数 | `ops._folder_files`（`os.walk` 的 `onerror`）、`ops.register_model`、`models._no_nul` | `test_an_unreadable_folder_is_never_left_out`、`test_a_token_in_the_repository_is_never_printed`、`test_numbers_out_of_range` |
+| 登记前文件已经在服务器上；登记的指标来自存着的文件；同样的东西再登记返回已有的，不一样就拒绝 | `models.register_model_version`、`register_eval`、`register_release` | `test_register_and_get_a_model_version`、`test_what_a_model_version_must_be`、`test_eval_reports` |
+| 产线现在用的模型是部署时间最晚的发布，补登旧的不顶掉新的 | `models.current_release` | `test_releases_and_the_current_model` |
+| 部署账号只能取模型版本的文件，取不了数据；现场实施什么都碰不到 | `app.may_download`、`models.model_objects_only` | `test_roles` |
+| 仓库地址里的账号和令牌不会被记下 | `ops.strip_credentials`，数据库 CHECK 拒绝 `https://…@` | `test_code_commit_from_git`、`test_register_and_get_a_model_version` |
+| `fw-server verify` 和追溯链 `--check` 也核对模型版本和评估报告的文件（`--check` 还核对评估用的测试集） | `models.verify_inputs`、`models._check_chain` | `test_chain_from_a_release_down_to_the_pool` |
+| 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
 ## 数据库和迁移
 
 - 表结构只通过 `server/fwserver/migrations/` 里的编号 SQL 文件改：`0002_xxx.sql`、`0003_xxx.sql`……服务启动时按顺序应用没应用过的。
 - **应用过的迁移文件不能再改**：数据库记着每个文件的哈希，改了服务拒绝启动（`test_edited_or_newer_schema_is_refused`）。要改就再加一个新文件。
 - 数据库比程序新时服务也拒绝启动（防止旧程序写新库）。
-- 每个模块管自己的表，别的模块不直接读写它的表。
+- 每个模块管自己的表，只有它写；上层模块可以读下层的表（例如 `models` 读快照的 `trainset_versions`），下层不读上层的（`datasets.verify` 要核对模型文件时由调用方传入 `models.verify_inputs`）。
 - 不用 ORM，SQL 写在模块里，用 psycopg 3 的参数绑定，不拼字符串。
 
 ## 格式和接口的版本

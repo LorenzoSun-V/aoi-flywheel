@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 from typing import BinaryIO, Callable, List, Optional, Tuple
+from urllib.parse import quote
 
 import httpx
 
@@ -232,3 +233,54 @@ class Api:
 
     def trainset(self, name: str, number='latest'):
         return self.get(f'/trainsets/{name}/versions/{number}')
+
+    # --- models, evaluations, releases -------------------------------------------------------------
+    def models(self):
+        return self.get('/models')
+
+    def model(self, name: str):
+        return self.get(f'/models/{name}')
+
+    def create_model(self, name: str, site: str, line: str, task: str, note: str):
+        return self.post('/models', {'name': name, 'site': site, 'line': line, 'task': task, 'note': note})
+
+    def model_versions(self, name: str):
+        return self.get(f'/models/{name}/versions')
+
+    def model_version(self, name: str, number='latest'):
+        """The version with its files, evaluations and releases."""
+        return self.get(f'/models/{name}/versions/{number}')
+
+    def register_model_version(self, name: str, body: dict):
+        """Registering the same files again returns the existing version (existing: true), so a retry after
+        a network error is harmless."""
+        return self._json(_retry(lambda: self.http.post(f'/models/{name}/versions', json=body)))
+
+    def set_tag(self, name: str, number, tag: str, added: bool, note: str = ''):
+        return self.post(f'/models/{name}/versions/{number}/tags', {'tag': tag, 'added': added, 'note': note})
+
+    def register_eval(self, name: str, number, body: dict):
+        """Like register_model_version: the same report again returns the existing one."""
+        return self._json(_retry(lambda: self.http.post(f'/models/{name}/versions/{number}/evals', json=body)))
+
+    def evals(self, model: str = ''):
+        return self.get('/evals', model=model)
+
+    def eval(self, eval_id: int):
+        return self.get(f'/evals/{eval_id}')
+
+    def releases(self, site: str = '', line: str = ''):
+        return self.get('/releases', site=site, line=line)
+
+    def register_release(self, body: dict):
+        """The same release again (same line, model version, deploy commit and time) returns the existing one."""
+        return self._json(_retry(lambda: self.http.post('/releases', json=body)))
+
+    def current_release(self, site: str, line: str):
+        return self.get('/releases/current', site=site, line=line)
+
+    def release(self, ref: str):
+        return self.get(f'/releases/{quote(ref, safe="")}')
+
+    def chain(self, ref: str, check: bool = False):
+        return self.get('/chain', ref=ref, check=str(check).lower())

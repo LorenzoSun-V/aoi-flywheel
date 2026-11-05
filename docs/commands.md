@@ -2,7 +2,7 @@
 
 平台的全部命令、选项和设置，每条附上用途、例子和容易踩的坑。命令行里 `-h` 只有一句提示，这里写清楚为什么、什么时候用。
 
-- **`fw`**：在笔记本、训练机、服务器上都能用，导入、取回、对比、导出数据集版本，建训练集快照。
+- **`fw`**：在笔记本、训练机、服务器上都能用，导入、取回、对比、导出数据集版本，建训练集快照，登记模型版本、评估报告和发布，查追溯链。
 - **`fw-server`**：只在平台服务器上用，管账号和凭据、核对文件库。它在服务容器里运行，命令前面都要加 `sudo docker compose exec server`（先 `cd /opt/aoi-flywheel/deploy`）。
 - **部署脚本**：`deploy/` 下的 `setup.sh`、`backup.sh`、`restore.sh`，在平台服务器上用 `sudo bash` 运行。
 - **工具**：`tools/` 下的测速和演练脚本。
@@ -42,6 +42,18 @@ fw --version
 `数据集名@序号`，例如 `SES-TX@3`。只写名称（`SES-TX`）就是最新版。数据集名只能用字母、数字和 `. _ -`。
 
 每个版本是一个目录的**完整快照**：导入的目录里有什么，这个版本就是什么。冻结以后谁也改不了，也删不掉；新的导入只会多出一个版本。
+
+其他记录的写法：
+
+| 记录 | 写法 | 例子 |
+|---|---|---|
+| 训练集快照 | 和数据集版本一样 | `SES-TX-det@2` |
+| 训练集快照的一个划分（评估用） | `快照@序号:划分` | `SES-TX-det@2:test` |
+| 模型版本 | `模型名@序号`，只写名称就是最新版 | `SES-TX-detr@3` |
+| 评估报告 | 编号 | `12`（显示为 `#12`） |
+| 发布 | `现场-产线-r序号`，平台按产线依次编号 | `SES-TX-r3` |
+
+模型版本、评估报告和发布登记以后都不能改、不能删；只有标签（候选、弃用）可以改，每次改动都留记录。
 
 ## fw 命令
 
@@ -250,6 +262,129 @@ fw trainset show SES-TX-det@2    # 来源、划分规则、每个划分的张数
 
 取回用 `fw get SES-TX-det@2 --to <目录>`，导出、核对、对比也和数据集版本一样（`fw export`、`fw verify`、`fw dataset diff`）。对比两个快照时，换了划分的样本显示成改名。`fw dataset list` 里也列出快照，类型是「训练集快照」。
 
+### fw model create、list、versions、show
+
+```
+fw model create SES-TX-detr --site SES --line TX     # 一条产线上的一种模型；--task 现在只有 det（检测）
+fw model list                                        # 全部模型和它们的最新版
+fw model versions SES-TX-detr                        # 每个版本的快照、ONNX、代码提交号、标签
+fw model show SES-TX-detr@3                          # 文件、类别、训练代码、验证指标、评估报告、发布
+```
+
+模型名称和数据集一样只能用字母、数字和 `. _ -`，不分大小写，不能重名。现场和产线只能用汉字、英文字母、数字、`_` 和 `.`（如 `现场1`、`线_2.a`；汉字指 CJK 统一汉字及扩展 A 区，全角符号不算；数据库按同一条规则检查）：发布编号是 `<现场>-<产线>-r<序号>`，有 `-` 会撞号（`A-B`/`C` 和 `A`/`B-C`），有 `/`、`@`、空格等查不了。
+
+### fw model register
+
+```
+fw model register SES-TX-detr --onnx runs/best.onnx --trainset SES-TX-det@2 --metrics runs/val.json \
+  --file runs/best.pt --file configs/train.yaml
+```
+
+把 ONNX 传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
+
+| 选项 | 说明 |
+|---|---|
+| `--onnx` | 必填，ONNX 文件。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
+| `--trainset` | 必填，训练用的训练集快照，例如 `SES-TX-det@2`。追溯链就是从这里接到数据的；类别表也用这个快照的，登记时一起放进模型版本 |
+| `--metrics` | 验证指标 JSON，要是一个 JSON 对象，内容随意（训练结束时的 val 指标），`fw model show`、`fw model compare` 会列出里面的数值 |
+| `--file` | 附件：权重、训练配置等，登记在 `files/` 下；写目录就带上整个目录；可写多次 |
+| `--code-commit` | 训练代码的 git 提交号。不写就用当前目录 git 仓库的 HEAD，有没提交的改动时会提示，并记在这个版本上 |
+| `--code-repo` | 训练代码仓库地址；不写就用当前目录的 origin。地址里带的账号和令牌（`https://user:token@…`）会去掉，不会记下来 |
+| `--note` | 备注 |
+
+- 同一个模型里，一个 ONNX 只登记一次。同样的 ONNX、快照、代码和文件再登记一次（脚本跑了两遍，网络断了重试），返回已有的那个版本，不会多出一个；ONNX 一样而别的不一样就拒绝。
+- 模型版本里的文件：`model.onnx`、`classes.txt`（快照的类别表）、`metrics.json`（有 `--metrics` 时）、`files/…`（附件）。
+- 引擎不在这里登记：上传的引擎不一定能在部署的机器上用，引擎要从 ONNX 在目标环境里构建（第三步由 GPU worker 调部署仓库的构建入口；在那之前现场自己构建，发布时记下 GPU、TensorRT 版本和引擎的哈希，见 `fw release register`）。
+
+### fw model get
+
+```
+fw model get SES-TX-detr@3 --to /opt/deploy/models/SES-TX-detr@3
+```
+
+把模型版本的文件取到一个空目录：`model.onnx`、`classes.txt`、`metrics.json`、`files/…`，另外生成 `fw-model.json`（不在模型版本里：版本编号、快照、类别表、ONNX 哈希、训练代码提交号）。和 `fw get` 一样走本机缓存，每个文件按清单核对；`--copy`、`--hardlink` 也一样。部署账号也能用，但只能取模型版本的文件，取不了数据集。
+
+### fw model tag、fw model compare
+
+```
+fw model tag SES-TX-detr@3 candidate                      # 标成候选
+fw model tag SES-TX-detr@2 deprecated --note '漏检多'      # 标成弃用
+fw model tag SES-TX-detr@3 candidate --remove             # 去掉标签
+fw model compare SES-TX-detr@2 SES-TX-detr@3              # 对比验证指标
+fw model compare SES-TX-detr@2 SES-TX-detr@3 --testset SES-TX-det@2:test   # 对比在同一个测试集上的评估
+```
+
+- 标签只有 `candidate`（候选）和 `deprecated`（弃用）两种，不做「阶段」流转；「产线现在用哪个模型」看发布（`fw release current`）。每次加、去标签都留一条记录，`fw model chain` 里能看到。
+- `compare` 把两边指标 JSON 里的数值摊平（`box.map50` 这样带点的键）逐项对比，最后一列是新减旧。`--testset` 时用两个版本在这个测试集上最近的一份评估报告。
+
+### fw model chain
+
+```
+fw model chain SES-TX-r3 --check       # 从一次发布查起
+fw model chain SES-TX-detr@3           # 从一个模型版本查起
+```
+
+追溯链一级一级打印：发布（部署仓库和提交号、现场怎么构建的引擎）→ 模型版本（ONNX 哈希、训练代码提交号、标签、评估报告）→ 训练集快照（清单哈希、类别、各划分张数）→ 数据池版本（清单哈希、从哪里导入、备注）。每一级都有编号、哈希、登记人和时间。
+
+`--check` 顺便核对链上每个文件都还在文件库里、大小对（模型文件、评估报告的文件、快照和数据池版本的每个文件）；有问题时列出来，退出码 1。重算哈希用 `fw-server verify --rehash`。
+
+### fw eval register、list、show
+
+```
+fw eval register SES-TX-detr@3 --testset SES-TX-det@2:test --deteval results/
+fw eval register SES-TX-detr@3 --testset SES-TX-det@2:test --deteval results/ --deteval-model detr_s0
+fw eval register SES-TX-detr@3 --testset SES-TX-test@1 --metrics my_eval.json --tool mytool --tool-version 1.0
+fw eval list SES-TX-detr
+fw eval show 12
+```
+
+登记一个模型版本在测试集上的评估结果。平台这一步不自己算分，记下的是你们评估得到的结果和文件。
+
+| 选项 | 说明 |
+|---|---|
+| `--testset` | 必填，测试集版本。训练集快照要写明划分，例如 `SES-TX-det@2:test`；别的数据集版本（例如测试集 `SES-TX-test@1`）不写划分 |
+| `--deteval` | aoi-deteval `evaluate` 的输出目录：指标取自 `summary.json` 里这个模型在**这个测试集**上的那一行（加上阈值等），工具版本取自 `run_info.json`，整个目录（`metrics.csv`、`per_image.csv`、`report.txt` 等）都登记在 `files/` 下。`summary.json` 里没有定义的指标（aoi-deteval 写成 `NaN`，例如测试集里没有某个类别）登记为 `null`，原文件不改 |
+| `--deteval-model` | `summary.json` 里有几个模型时，这个模型版本对应哪一个（记在备注里） |
+| `--deteval-set` | aoi-deteval 结果里哪个集合就是这个测试集（记在备注里）。不写时：快照取和划分同名的集合（`:test` 就是 `test`）；数据集版本取结果里唯一的那个集合 |
+| `--metrics` | 不用 aoi-deteval 时，指标 JSON（一个 JSON 对象，标准 JSON：没有定义的值写 `null`，不能写 `NaN`）；和 `--deteval` 二选一 |
+| `--file` | 另外附带的报告文件或目录；可写多次 |
+| `--tool`、`--tool-version` | 评估工具和版本；用 `--deteval` 时自动填 |
+| `--note` | 备注 |
+
+- 同样的模型版本、测试集和文件再登记一次，返回已有的那份报告。
+- 模型版本只写名称时，先定下是哪个版本（例如 `SES-TX-detr@3`）再登记；网络断了重试，也还是登记在这个版本上。
+- 用 `--deteval` 时，先把整个输出目录复制一份，指标从这份复制里读，归档的也是这份：登记途中评估程序再改、删、加文件都不影响这次登记。
+- 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按现场、产线、原路径分了几层，要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
+
+### fw release register、list、current、show
+
+```
+fw release register --model SES-TX-detr@3 --deploy-repo git@git.example.com:deploy/trt.git \
+  --deploy-commit 89abcdef --deployed-at 2026-11-20T10:30+08:00 --gpu RTX3070 --trt 10.3 --precision fp16 \
+  --engine-file /opt/deploy/engines/model_fp16.engine
+fw release list --site SES --line TX       # 按部署时间排
+fw release current --site SES --line TX    # 这条产线现在用的是哪个模型
+fw release show SES-TX-r3                  # 这次发布和它的追溯链
+```
+
+部署成功后由部署仓库（用部署账号）登记一次发布，平台给它一个编号 `SES-TX-r3`。
+
+| 选项 | 说明 |
+|---|---|
+| `--model` | 必填，部署的模型版本 |
+| `--site`、`--line` | 现场和产线；不写就是模型的 |
+| `--deploy-repo`、`--deploy-commit` | 必填，部署仓库地址和 git 提交号。地址里不能带账号和令牌 |
+| `--deployed-at` | 部署成功的时间，例如 `2026-11-20T10:30+08:00`；不写时区按这台机器的时区，不写就是现在。不能比服务器的时间晚 |
+| `--gpu`、`--trt`、`--precision` | 现场从 ONNX 构建引擎用的 GPU、TensorRT 版本、精度（`fp32` 或 `fp16`） |
+| `--engine-file` | 现场构建的引擎文件：只记它的 sha256 和大小，文件不上传（引擎留在现场） |
+| `--note` | 备注 |
+
+- 「产线现在用哪个模型」是**部署时间最晚**的那次发布，不是最后登记的那次：补登一次以前的发布，不会顶掉后来真正部署的那次。
+- 同一条产线、同一个模型版本、同一个部署提交号和部署时间再登记一次（网络断了重试），返回已有的那次；这些相同而 GPU、引擎等不一样就拒绝。
+- `--model` 只写名称时，先定下是哪个版本再登记，重试也不会换成期间新登记的版本。
+- 现场和产线只能用汉字、英文字母、数字、`_` 和 `.`（见 `fw model create`）。
+- 只有部署账号和管理员能登记发布；算法工程师能看。
+
 ## 在训练脚本里用
 
 ```python
@@ -263,6 +398,23 @@ print(v['id'], v['path'])
 ```
 
 和 `fw get` 一样用缓存、逐个核对；进度和结果打印到 stderr。要先在这台机器上 `fw login`，或者设好 `FW_SERVER`、`FW_TOKEN`。
+
+训练完登记模型版本：
+
+```python
+mv = fw.register_model('SES-TX-detr', onnx='runs/best.onnx', trainset=ts, metrics='runs/val.json',
+                       files=['runs/best.pt'], code_commit='<训练代码提交号>')
+print(mv['ref'])   # SES-TX-detr@3
+```
+
+`trainset` 可以是 `fw.get_trainset` 返回的记录、它的 `id`，或者 `'SES-TX-det@2'`。参数和 `fw model register` 一样；不写 `code_commit` 时用当前目录 git 仓库的 HEAD（脚本从别的目录运行时最好写上）。同样的东西再登记一次返回已有的版本，`mv['existing']` 为 `True`。
+
+部署脚本取模型版本：
+
+```python
+m = fw.get_model('SES-TX-detr@3', '/opt/deploy/models/SES-TX-detr@3')
+print(m['path'], m['onnx_sha256'], m['classes'])
+```
 
 `fw.get_trainset(ref, dest, fmt='yolo')`：`fmt` 和 `fw get --format` 一样。返回的记录里另有 `format`、`data_yaml`（YOLO 时，给 ultralytics 的 `data=`）、`classes`（类别名列表）、`counts`（每个划分的张数和每类框数）、`formats`（快照里有的格式）、`sources`（来源版本）、`based_on`（接着哪个快照）和 `rule`（划分规则）；不是快照的名称会报错（`fw.ApiError`，`.status` 是 400）。
 
@@ -308,12 +460,12 @@ fw-server user disable zhangsan        # 立即吊销这个账号的全部凭据
 fw-server user enable zhangsan         # 恢复账号；旧凭据仍然作废，要重新发
 ```
 
-| 角色 | 第一步能做的 |
+| 角色 | 能做的 |
 |---|---|
-| `admin` 管理员 | 和算法工程师一样 |
-| `algo` 算法工程师 | 建数据集、导入、取回、对比、导出 |
-| `field` 现场实施 | 第一步还不能碰数据集 |
-| `deploy` 部署 | 第一步还不能碰数据集 |
+| `admin` 管理员 | 算法工程师和部署能做的都能做 |
+| `algo` 算法工程师 | 建数据集、导入、取回、对比、导出；建训练集快照；建模型、登记模型版本和评估报告、打标签；看发布和追溯链 |
+| `field` 现场实施 | 现在还不能用平台的数据和模型（以后用网页做复核） |
+| `deploy` 部署 | 看模型、评估和发布，取模型版本的文件（取不了数据集）；登记发布；看追溯链 |
 
 ### 凭据
 
@@ -328,7 +480,7 @@ fw-server token revoke 3                          # 按 list 里的编号吊销
 ### verify：核对文件库
 
 ```
-fw-server verify                                    # 快：每个版本的清单能对上，用到的文件都在、大小对
+fw-server verify                                    # 快：每个版本（包括模型版本、评估报告）的清单能对上，用到的文件都在、大小对
 fw-server verify --rehash                           # 慢：把文件库里每个文件从盘上读出来重算哈希
 ```
 

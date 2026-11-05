@@ -101,6 +101,46 @@ wait $pid || { cat "$W/v2.log"; exit 1; }
 tail -n 3 "$W/v2.log"
 "$FW" dataset diff DRILL@2
 
+step 'A：建训练集快照，登记模型版本、评估和发布（恢复后追溯链要一样完整）'
+python3 - "$W/m" <<'PY'
+import json, os, struct, sys, zlib
+root = sys.argv[1]
+
+
+def png(w, h, seed):
+    raw = b''.join(b'\x00' + bytes((seed + x + y) % 256 for x in range(w)) for y in range(h))
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 0, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+os.makedirs(f'{root}/pool/2026-10')
+for i in range(10):
+    with open(f'{root}/pool/2026-10/{i:03}.png', 'wb') as f:
+        f.write(png(32, 32, i))
+    label = {'version': '3.1', 'flags': {}, 'imagePath': f'{i:03}.png', 'imageData': None, 'imageWidth': 32,
+             'imageHeight': 32, 'shapes': [{'label': 'defect', 'points': [[2, 2], [10, 10]], 'shape_type': 'rectangle'}]}
+    with open(f'{root}/pool/2026-10/{i:03}.json', 'w') as f:
+        json.dump(label, f)
+with open(f'{root}/classes.txt', 'w') as f:
+    f.write('defect\n')
+with open(f'{root}/best.onnx', 'wb') as f:
+    f.write(b'\x08\x07\x12\x05drill')  # starts like an ONNX file (ir_version); nothing runs it
+with open(f'{root}/val.json', 'w') as f:
+    json.dump({'mAP50': 0.5}, f)
+PY
+"$FW" dataset create DRILL-M --site drill --line L1
+"$FW" dataset import DRILL-M "$W/m/pool" --yes
+"$FW" trainset create DRILL-det --from DRILL-M@1 --classes "$W/m/classes.txt" --yes
+"$FW" model create DRILL-detr --site drill --line L1
+"$FW" model register DRILL-detr --onnx "$W/m/best.onnx" --trainset DRILL-det@1 --metrics "$W/m/val.json" \
+  --code-commit 0123456789abcdef0123456789abcdef01234567
+"$FW" eval register DRILL-detr@1 --testset DRILL-det@1:val --metrics "$W/m/val.json"
+"$FW" release register --model DRILL-detr@1 --deploy-repo git@git.example.com:deploy/trt.git \
+  --deploy-commit 89abcdef --deployed-at 2026-01-01T08:00+08:00 --gpu RTX3070 --trt 10.3 --precision fp16
+"$FW" model chain drill-L1-r1 --check
+
 step 'A：导入完成后再备份一次，全部重算哈希核对'
 sleep 1   # 两次备份的文件名精确到秒
 time bash backup.sh "$W/backup"
@@ -151,6 +191,11 @@ for n in 1 2; do
   diff -r "$W/v$n" "$W/outB$n"
   echo "DRILL@$n 从 B 取回：和源目录完全一致"
 done
+FW_SERVER=http://127.0.0.1:18001 "$FW" model chain drill-L1-r1 --check | tee "$W/chain-b.log"
+grep -q '都在文件库里' "$W/chain-b.log"
+FW_SERVER=http://127.0.0.1:18001 "$FW" model get DRILL-detr@1 --to "$W/modelB"
+cmp "$W/m/best.onnx" "$W/modelB/model.onnx"
+echo 'DRILL-detr@1 从 B 取回：ONNX 一致，追溯链完整'
 docker compose exec -T server fw-server verify --rehash
 
 step '内存占用'

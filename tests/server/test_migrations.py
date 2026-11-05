@@ -19,7 +19,7 @@ def empty_db():
 
 
 def test_migrate_once_then_nothing(empty_db):
-    assert db.migrate(empty_db) == ['0001_init.sql', '0002_trainsets.sql']
+    assert db.migrate(empty_db) == ['0001_init.sql', '0002_trainsets.sql', '0003_models.sql']
     assert db.migrate(empty_db) == []
     with db.connect(empty_db) as c:
         assert db.schema_problems(c) == []

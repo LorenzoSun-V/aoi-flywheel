@@ -239,10 +239,14 @@ def diff(conn, old_id: int, new_id: int) -> dict:
     return result
 
 
-def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=print) -> List[str]:
-    """Check that every version can be laid out exactly as frozen. Returns the problems left.
+def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=print, *, more) -> List[str]:
+    """Check that every version (and, through `more`, every model version and evaluation report) can be laid
+    out exactly as frozen. Returns the problems left.
 
     - each version's rows rebuild its manifest hash, and the manifest object is in the store and intact;
+    - more(conn) -> (problems, {digest: (size or None, where it is used)}, count): what the records of the
+      modules above hold, checked the same way. Always pass models.verify_inputs (it is required so that no
+      caller forgets it: with rehash, an object nothing here knows about counts as left over by an import);
     - every referenced object is in the store with the right size, and with rehash, the right content;
     - with rehash, also every object no version uses yet (left by an import that failed or is still
       running): the next import of the same files reuses whatever the store holds, so a damaged one is
@@ -264,6 +268,9 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
     for v in versions:
         if v['m'] != v['rebuilt']:
             problems.append(f'{v["ref"]}：清单项和登记的清单哈希对不上')
+    # objects other records hold (the file sets of model versions and evaluation reports, models.verify_inputs)
+    more_problems, more_wanted, sets = more(conn)
+    problems += more_problems
     wanted = {v['m']: (None, v['ref']) for v in versions}  # digest -> (size if known, a version using it)
     rows = conn.execute(
         "SELECT encode(f.sha256, 'hex') AS d, f.size, min(d.name || '@' || v.number) AS ref "
@@ -271,6 +278,9 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
         'GROUP BY f.sha256, f.size').fetchall()
     for r in rows:
         wanted[r['d']] = (r['size'], r['ref'])
+    for digest, (size, ref) in more_wanted.items():
+        if wanted.get(digest, (None,))[0] is None:
+            wanted[digest] = (size, ref)
     checked = repaired = 0
     for digest, (size, ref) in sorted(wanted.items()):
         checked += 1
@@ -313,7 +323,8 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
             problems.append(str(e))
     if repaired or loose_damaged:
         store.sync()  # a repair (or a damaged file moved aside) counts only once it is on the disk
-    echo(f'核对了 {len(versions)} 个版本、{checked} 个文件{"（重算了哈希）" if rehash else ""}；'
+    echo(f'核对了 {len(versions)} 个版本、{sets} 个模型版本和评估报告、{checked} 个文件'
+         f'{"（重算了哈希）" if rehash else ""}；'
          f'从备份修复 {repaired} 个；问题 {len(problems)} 个')
     if rehash:
         echo(f'另外核对了还没有版本用到的文件 {loose} 个（中断的导入留下的）；'
