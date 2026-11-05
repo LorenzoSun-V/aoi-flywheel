@@ -146,7 +146,8 @@ def cmd_trainset_create(args, api: Api) -> int:
     test_dirs = [d for item in args.test_dirs for d in item.split(',') if d.strip()]
     result = ops.create_trainset(api, args.name, args.sources, classes, val=args.val, seed=args.seed,
                                  test_dirs=test_dirs, merge_test=args.merge_test, new_to=args.new_to, split=split,
-                                 fresh=args.fresh, note=args.note, dry_run=args.dry_run,
+                                 fresh=args.fresh, note=args.note, require_labels=args.require_labels,
+                                 dry_run=args.dry_run,
                                  confirm=None if args.yes else _ask)
     return 0 if result is not None or args.dry_run else 1
 
@@ -248,6 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='接着上一版时，新样本去哪：test（默认）或 trainval')
     s.add_argument('--split-file', help='用自己的划分清单：每行「<现场>/<产线>/<图片路径> train|val|test」')
     s.add_argument('--fresh', action='store_true', help='不接着上一版的划分，全部重新分')
+    s.add_argument('--require-labels', action='store_true',
+                   help='每张图都要有标注，有没标注的图就不建（默认没标注的图当负样本收进来）')
     s.add_argument('--note', default='', help='备注')
     s.add_argument('--dry-run', action='store_true', help='只预览划分和统计，不建快照')
     s.add_argument('--yes', action='store_true', help='不问确认，直接建快照')

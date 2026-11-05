@@ -72,11 +72,12 @@ class TrainsetBody(BaseModel):
     split: Optional[Dict[str, str]] = None  # key (<site>/<line>/<image path>) -> train, val or test
     fresh: bool = False
     note: str = ''
+    require_labels: bool = False  # refuse images without a label (default: they are negative samples)
     expect_latest_id: Optional[int] = None  # create only: the newest snapshot seen in the preview
 
     def options(self) -> trainsets.Options:
         return trainsets.Options(self.sources, self.classes, self.val, self.seed, self.test_dirs, self.merge_test,
-                                 self.new_to, self.split, self.fresh, self.note)
+                                 self.new_to, self.split, self.fresh, self.note, self.require_labels)
 
 
 def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None) -> FastAPI:

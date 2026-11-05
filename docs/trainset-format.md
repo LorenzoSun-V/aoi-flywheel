@@ -27,12 +27,13 @@ coco/<划分>.json                              这个划分的 COCO 检测标�
 
 | 格式 | 摆出来的目录 | 给谁用 |
 |---|---|---|
-| `yolo`（默认） | `images/<划分>/…`、`labels/<划分>/….txt`，另生成 `data.yaml` | ultralytics：`yolo train data=<目录>/data.yaml`。它把图片路径里的 `images/` 换成 `labels/` 找标注 |
+| `yolo`（默认） | `images/<划分>/…`、`labels/<划分>/….txt`，另生成 `data.yaml` | ultralytics：`yolo train data=<目录>/data.yaml`。它把图片路径里**最后一个** `images/` 换成 `labels/` 找标注（aoi-deteval 也一样），所以原路径里叫 `images` 的目录在这个格式里改名成 `images_`（原来就叫 `images_`、`images__` 的再多加一个 `_`），例如 `images/val/SES/TX/batch/images_/1.png` 和 `labels/val/SES/TX/batch/images_/1.txt`；别的格式不改名 |
 | `coco` | `train/`、`valid/`、`test/` 下放图片，每个目录里一个 `_annotations.coco.json` | RF-DETR 等读 Roboflow 式 COCO 目录的训练代码；别的 COCO 代码分别指图片目录和标注文件即可 |
 | `json` | `train/`、`val/`、`test/` 下图片和同名 `.json` 放在一起 | 用 LiteAnno 或 X-AnyLabeling 打开看图、核对标注 |
 | `all` | 和快照里存的一样 | `fw export` 导出时用的就是这个 |
 
 - `data.yaml` 是取回后按 `classes.txt` 生成的，**不在快照里**：`path` 是取回目录的绝对路径，`train` / `val` / `test` 只写快照里有的划分，`names` 是类别名。目录挪了位置，改一下 `path` 或重新取回即可。
+- 快照没有 train 或 val 时（例如只有几张图，或者整版都是测试集），`data.yaml` 照样生成，但 ultralytics 训练要 train 和 val 都有：建快照的预览和 `fw get` 都会说缺哪个，`fw.get_trainset()` 返回的 `missing_splits` 列出来。
 - 某种格式没有生成时（见下文），取那种格式会报错并说明原因。
 
 ## 标注怎么转
@@ -46,7 +47,7 @@ LiteAnno / X-AnyLabeling JSON：
 - 图片尺寸用标注里的 `imageWidth`、`imageHeight`；没有时读图片的文件头（PNG、JPEG、BMP、GIF、TIFF、WebP），也读不出来就不建。
 - 超出图片的框裁到图片内，个数在预览里列出来；完全在图片外的框不建快照。
 
-数据池里本来就是 YOLO txt 的，原样放进 `labels/`：每行必须是 `类别 中心x 中心y 宽 高` 5 个数，坐标在 0 到 1 之间（分割、旋转框、关键点格式的行不建快照）。
+数据池里本来就是 YOLO txt 的，原样放进 `labels/`（文件开头有 UTF-8 BOM 的去掉 BOM，别的字节不变）：每行必须是 `类别 中心x 中心y 宽 高` 5 个数，坐标在 0 到 1 之间（分割、旋转框、关键点格式的行不建快照）。
 
 **YOLO**（`labels/…/*.txt`）：每个框一行 `类别编号 中心x 中心y 宽 高`，按图片宽高归一化，保留 6 位小数，换行是 LF。标注里一个框也没有的图片是空文件；没有标注文件的图片（负样本）没有 txt，ultralytics 都当作背景图。
 

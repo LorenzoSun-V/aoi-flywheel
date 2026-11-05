@@ -76,17 +76,17 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ## 一次建训练集快照在代码里怎么走
 
-`fw trainset create`（`ops.create_trainset`）先调预览接口，确认后再调建快照接口，两次的参数一样。服务端两次都走 `trainsets.plan`，建快照时 `trainsets.create` 再按同样的参数重算一遍，所以冻结的就是预览给人看的：
+`fw trainset create`（`ops.create_trainset`）先调预览接口，确认后再调建快照接口，两次的参数一样，只是来源换成预览解析出的具体版本（`SES-TX` → `SES-TX@4`；建快照接口不收没有序号的来源）。服务端两次都走 `trainsets.plan`，建快照时 `trainsets.create` 再按同样的参数重算一遍，所以冻结的就是预览给人看的：
 
 1. `_sources`：解析来源版本，拒绝快照做来源、没填现场或产线的数据集。
-2. `_samples`：按同目录同名配对图片和标注，样本标识是 `<现场>/<产线>/<图片路径>`。
+2. `_samples`：按同目录同名配对图片和标注，样本标识是 `<现场>/<产线>/<图片路径>`；两个来源里去掉扩展名后相同的图片拒绝（标注路径会一样）。
 3. `_read_labels`：从文件库读每个标注（同一内容只读一次，`formats.parse_json` / `parse_txt`），核对类别、形状和尺寸，把框裁到图片内。
-4. `_latest_trainset`、`_previous_splits`：同名快照的最新版，从它的目录结构读回每个样本的划分。
+4. `_latest_trainset`、`_previous_splits`：同名快照的最新版，从它的目录结构读回每个样本的划分（按带扩展名的完整标识，标注按同划分同名找）。用划分清单或 `--fresh` 时不接着它。
 5. `_assign`：划分清单、接着上一版、或重新划分；train/val 用 `_cut` 按 `sha256(种子\n标识)` 排序后按比例切。
 6. `_formats`、`_tree`：看能生成哪些格式（COCO 要每张图的尺寸），摆出 `images/`、`labels/`、`json/`、`coco/`，加上 `classes.txt`、`trainset.json`；核对路径规则，并用 `contract.trainset_layout` 核对每种取回格式摆出来都不冲突。转出来的 YOLO 和 COCO 文件放在 `Plan.blobs` 里，建快照时写进文件库。
-7. `create`：先看最新版还是不是预览时那个（不是就 409），把 `classes.txt`、`trainset.json`、清单写进文件库，再调 `datasets.create_version(trainset=True, record=…)`：在建版本的同一个事务里、冻结之前写 `trainset_versions` 和 `trainset_sources` 两张表。
+7. `create`：先看最新版还是不是预览时那个（不是就 409），把 `classes.txt`、`trainset.json`、清单写进文件库，再调 `datasets.create_version(trainset=True, record=…, new_dataset=…)`：第一版时在同一个事务里先插入数据集那一行（`ON CONFLICT DO NOTHING`，别人同时建了就 409），再在冻结之前写 `trainset_versions` 和 `trainset_sources` 两张表。所以第一版失败不留下空名称。
 
-快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径（YOLO 时再写 `data.yaml`）。
+快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径（YOLO 时再写 `data.yaml`，并用 `yolo_safe` 把原路径里叫 `images` 的目录改名，因为 ultralytics 和 aoi-deteval 把最后一个 `images/` 换成 `labels/` 找标注）。
 
 ## 绝不能破的规则
 
@@ -107,7 +107,8 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | Ctrl+C 立即生效，不等还在排队的上传、下载（Windows 上无超时的等待接不到 Ctrl+C） | `pool.run_all`（单个任务也在线程里跑）、`cli._on_sigint` 不做清理直接 `os._exit(130)`、`Cache.close` 不等别的线程 | `test_pool.py`、`test_cache.py`、`test_ctrl_c_*` |
 | 同一数据集同时导入，后提交的被拒，不悄悄覆盖 | `datasets.create_version` | `test_concurrent_import_into_same_dataset_is_refused`、`test_someone_else_added_a_version_meanwhile` |
 | 训练集快照的记录（类别、规则、统计、来源）冻结后不能改、不能删；只有快照有这份记录，快照都有；有版本的数据集不能改类型 | 数据库触发器（`0002_trainsets.sql`） | `test_snapshot_record_cannot_change`、`test_only_trainset_versions_have_a_record` |
-| 快照只能用 `fw trainset create` 建；标注里的类别都在类别表里；冻结的就是预览的；预览后有人建了新版就不建 | `datasets.create_version` 的 `trainset` 参数、`trainsets.create` | `test_trainsets_are_made_only_by_trainset_create`、`test_bad_labels_are_refused`、`test_someone_else_made_one_meanwhile` |
+| 快照只能用 `fw trainset create` 建；标注里的类别都在类别表里；冻结的就是预览的（包括来源版本）；预览后有人建了新版就不建；同时建同名第一版只成一个，另一个 409 | `datasets.create_version` 的 `trainset`、`new_dataset` 参数、`trainsets.create` | `test_trainsets_are_made_only_by_trainset_create`、`test_bad_labels_are_refused`、`test_someone_else_made_one_meanwhile`、`test_what_was_previewed_is_what_is_frozen`、`test_two_first_versions_at_once` |
+| YOLO 格式里每张图的标注就在 ultralytics 找的位置 | `contract.yolo_safe`、`trainsets._tree`（去掉 BOM） | `test_images_folders_inside_the_pool_path`、`test_yolo_label_with_a_bom`、`test_yolo_layout_renames_images_folders` |
 | 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split` |
 | 转好的 YOLO / COCO 标注随快照冻结，取回只改路径不改内容；转不了的形状、图外的框不悄悄丢掉，直接不建 | `formats.py`、`trainsets._tree`、`contract.trainset_layout` | `test_formats.py`、`test_first_snapshot_layout_and_formats`、`test_labels_that_cannot_be_detection_boxes` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |

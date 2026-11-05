@@ -101,11 +101,16 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
     if kind not in KINDS and not (internal and kind == 'trainset'):
         raise DatasetError(400, f'类型只能是 {"、".join(KINDS)}')
     with conn.transaction():
-        if conn.execute('SELECT 1 FROM datasets WHERE lower(name) = lower(%s)', (name,)).fetchone():
+        if not _insert_dataset(conn, user_id, name, site, line, kind, note):
             raise DatasetError(409, f'{name} 已经存在（数据集和训练集快照共用名称，不分大小写）')
-        conn.execute('INSERT INTO datasets (name, site, line, kind, note, created_by) VALUES (%s, %s, %s, %s, %s, %s)',
-                     (name, site, line, kind, note, user_id))
     return get_dataset(conn, name)
+
+
+def _insert_dataset(conn, user_id: int, name: str, site: str, line: str, kind: str, note: str) -> bool:
+    """False when the name is taken (also by someone committing it meanwhile: never a unique-key error)."""
+    return conn.execute('INSERT INTO datasets (name, site, line, kind, note, created_by) '
+                        'VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id',
+                        (name, site, line, kind, note, user_id)).fetchone() is not None
 
 
 def list_versions(conn, name: str) -> List[dict]:
@@ -139,9 +144,11 @@ def get_version_by_id(conn, version_id: int) -> dict:
 def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256: str, parent_id: Optional[int],
                    expect_latest_id: Optional[int], source: str = '', note: str = '',
                    before_freeze: Optional[Callable[[], None]] = None, trainset: bool = False,
-                   record: Optional[Callable[[Any, int], None]] = None) -> dict:
+                   record: Optional[Callable[[Any, int], None]] = None, new_dataset: Optional[dict] = None) -> dict:
     """trainset: the dataset must be a trainset (and only then may it be one); record(conn, version_id) writes
-    the trainset's own rows inside the transaction, before the version is frozen."""
+    the trainset's own rows inside the transaction, before the version is frozen. new_dataset (site, line,
+    kind, note): create the dataset in the same transaction, so a failed first version leaves no name behind;
+    if the name was taken meanwhile, nothing is created (409)."""
     check_digest(manifest_sha256)
     data = store.read(manifest_sha256)
     if data is None:
@@ -162,6 +169,11 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
         raise DatasetError(503, str(e)) from None
     total = sum(s for _, _, s in entries)
     with conn.transaction():
+        if new_dataset is not None and not _insert_dataset(conn, user_id, name, new_dataset['site'],
+                                                           new_dataset['line'], new_dataset['kind'],
+                                                           new_dataset['note']):
+            again = '请重新运行 fw trainset create' if trainset else '请重新运行导入'
+            raise DatasetError(409, f'{name} 在这期间被别人建了；{again}')
         dataset = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
                                (name,)).fetchone()
         if dataset is None:

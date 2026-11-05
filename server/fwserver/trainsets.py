@@ -49,6 +49,7 @@ SPLITS = ('train', 'val', 'test')
 NEW_TO = ('test', 'trainval')
 MAX_CLASSES = 1000
 EXAMPLES = 5
+BOM = b'\xef\xbb\xbf'
 
 File = Tuple[str, str, int]  # (path in its pool version, sha256, size)
 
@@ -78,6 +79,7 @@ class Options:
     split: Optional[Dict[str, str]] = None  # key -> split, from a split file
     fresh: bool = False  # do not continue the previous snapshot
     note: str = ''
+    require_labels: bool = False  # refuse images without a label instead of keeping them as negatives
 
 
 def _examples(items, n: int = EXAMPLES) -> str:
@@ -150,6 +152,7 @@ def _files(conn, version_id: int) -> List[File]:
 
 def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
     samples: Dict[str, Sample] = {}
+    stems: Dict[str, str] = {}  # <site>/<line>/<image path without extension> -> key: their labels share a path
     problems = []
     for version, dataset in sources:
         site, line = dataset['site'], dataset['line']
@@ -181,6 +184,10 @@ def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
             if key in samples:
                 problems.append(f'两个来源都有 {key}（同一现场和产线的两个数据集里有同一路径）')
                 continue
+            twin = stems.setdefault(f'{site}/{line}/{stem}', key)
+            if twin != key:
+                problems.append(f'两个来源有同名不同扩展名的图片 {twin} 和 {key}，YOLO 标注会是同一个文件')
+                continue
             label = labels[stem][0] if stem in labels else None
             samples[key] = Sample(key, site, line, image, label)
     return samples, problems
@@ -204,7 +211,10 @@ def _parse(store: Store, label: File, classes: List[str]):
         return '不是 UTF-8'
     if label[0].lower().endswith('.json'):
         return formats.parse_json(text)
-    return formats.parse_txt(text, classes)
+    parsed = formats.parse_txt(text, classes)
+    if not isinstance(parsed, str) and data.startswith(BOM):
+        parsed.data = data[len(BOM):]  # YOLO readers take the BOM for part of the first class id
+    return parsed
 
 
 def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -> Tuple[List[str], List[str]]:
@@ -303,8 +313,9 @@ def _latest_trainset(conn, name: str) -> Optional[dict]:
 
 def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]]]:
     """key -> (split, sha256 of the pool's label) of every sample in a snapshot, read back from its tree: the
-    label is the one under json/ when there is one (labels/ then holds the converted copy), else labels/."""
-    images: Dict[str, Tuple[str, str]] = {}
+    label is the one under json/ when there is one (labels/ then holds the converted copy), else labels/. Each
+    image is matched with the label of its own split and stem; the key keeps the image's extension."""
+    images: Dict[str, str] = {}
     found: Dict[str, Dict[str, str]] = {'json': {}, 'labels': {}}
     for path, digest, _ in _files(conn, previous['id']):
         top, _, rest = path.partition('/')
@@ -312,11 +323,14 @@ def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]
         if not sep or split not in SPLITS:
             continue
         if top == 'images':
-            images[_stem(key)] = (split, key)
+            images[key] = split
         elif top in found:
-            found[top][_stem(key)] = digest
-    return {key: (split, found['json'].get(stem) or found['labels'].get(stem))
-            for stem, (split, key) in images.items()}
+            found[top][f'{split}/{_stem(key)}'] = digest
+    out = {}
+    for key, split in images.items():
+        where = f'{split}/{_stem(key)}'
+        out[key] = (split, found['json'].get(where) or found['labels'].get(where))
+    return out
 
 
 def _order(seed: int, key: str) -> bytes:
@@ -424,7 +438,9 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         stem = _stem(s.image[0])
         entries.append(('images/' + rest + s.image[0], s.image[1], s.image[2]))
         if s.parsed is not None:
-            if s.parsed.kind == 'txt':  # already a YOLO detection label: as it is
+            if s.parsed.kind == 'txt' and s.parsed.data is not None:  # the same label without its BOM
+                entries.append(made('labels/' + rest + stem + '.txt', s.parsed.data))
+            elif s.parsed.kind == 'txt':  # already a YOLO detection label: as it is
                 entries.append(('labels/' + rest + stem + '.txt', s.label[1], s.label[2]))
             else:
                 entries.append(made('labels/' + rest + stem + '.txt', formats.yolo_bytes(s.parsed, classes, s.size)))
@@ -460,6 +476,7 @@ class Plan:
     def summary(self) -> dict:
         return {'name': self.name, 'sources': [v['ref'] for v, _ in self.sources],
                 'based_on': self.previous['ref'] if self.previous else None,
+                'latest': self.latest['ref'] if self.latest else None,
                 'expect_latest_id': self.latest['id'] if self.latest else None,
                 'rule': self.rule, 'counts': self.counts, 'changes': self.changes, 'problems': self.problems,
                 'notices': self.notices, 'task': formats.TASK,
@@ -475,7 +492,7 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     check_options(o)
     sources = _sources(conn, o.sources)
     latest = _latest_trainset(conn, name)
-    previous = None if o.fresh else latest
+    previous = None if o.fresh or o.split is not None else latest  # a split file continues nothing
     samples, problems = _samples(conn, sources)
     label_problems, notices = _read_labels(store, samples, o.classes)
     problems += label_problems
@@ -484,11 +501,18 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     problems += more
     if not samples:
         problems.append('来源版本里没有图片')
+    if o.require_labels:
+        bare = sorted(k for k, s in samples.items() if s.label is None)
+        if bare:
+            problems.append(f'要求每张图都有标注（--require-labels），有 {len(bare)} 张没有：{_examples(bare, 3)}')
     counts = _counts(samples, o.classes)
     p = Plan(name, sources, latest, previous, samples, rule, counts, _changes(samples, prev_splits), problems,
              notices)
     if previous is not None and _previous_classes(conn, previous) != o.classes:
         p.notices.append(f'类别表和 {previous["ref"]} 不一样，类别编号可能变了')
+    empty = [split for split in ('train', 'val') if samples and not counts[split]['samples']]
+    if empty:
+        p.notices.append(f'没有 {"、".join(empty)} 样本：只能当测试集用，不能直接训练（ultralytics 要 train 和 val）')
     if problems:
         return p
     p.formats = _formats(store, samples)
@@ -521,6 +545,9 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
            before_freeze=None) -> dict:
     """Build the snapshot again exactly as planned and freeze it. expect_latest_id is the newest snapshot of
     this name the person saw in the preview: if another one was made meanwhile, nothing is created (409)."""
+    loose = [ref for ref in o.sources if not _parse_ref(ref)[1].isdigit()]
+    if loose:
+        raise DatasetError(400, f'建快照时来源要写成具体版本（预览时定下的那个），例如 名称@3：{_examples(loose)}')
     p = plan(conn, store, name, o)
     if (p.latest['id'] if p.latest else None) != expect_latest_id:  # the preview was based on another snapshot
         now = p.latest['ref'] if p.latest else '没有版本'
@@ -531,14 +558,12 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
         store.put_bytes(data)
     manifest = manifest_bytes(p.entries)
     digest, _ = store.put_bytes(manifest)
-    if p.latest is None:
+    new = None
+    taken = conn.execute('SELECT 1 FROM datasets WHERE lower(name) = lower(%s)', (name,)).fetchone()
+    if taken is None:  # the name is taken together with the first version, or not at all
         sites = {(d['site'], d['line']) for _, d in p.sources}
         site, line = next(iter(sites)) if len(sites) == 1 else ('', '')
-        try:
-            datasets.create_dataset(conn, user_id, name, site, line, 'trainset', note=o.note, internal=True)
-        except DatasetError as e:
-            if e.status != 409:  # made by someone else meanwhile: create_version below finds out what they did
-                raise
+        new = {'site': site, 'line': line, 'kind': 'trainset', 'note': o.note}
 
     def record(c, version_id):
         summary = p.summary()
@@ -553,7 +578,7 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
 
     version = datasets.create_version(conn, store, user_id, name, digest, p.latest['id'] if p.latest else None,
                                       expect_latest_id, source='fw trainset create', note=o.note,
-                                      before_freeze=before_freeze, trainset=True, record=record)
+                                      before_freeze=before_freeze, trainset=True, record=record, new_dataset=new)
     version.update(info(conn, version['id']))
     version['summary'] = p.summary()
     return version

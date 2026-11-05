@@ -295,10 +295,23 @@ def batches(objects: Iterable[Tuple[str, int]], max_count: int, max_bytes: int) 
     return out
 
 
+_IMAGES_DIR = re.compile(r'images_*\Z')
+
+
+def yolo_safe(sub: str) -> str:
+    """A path inside images/<split>/ or labels/<split>/ with every folder named images (or images_, images__…)
+    given one more underscore. ultralytics and aoi-deteval find a label by replacing the LAST /images/ of the
+    image path with /labels/; an images folder in the pool's own path would send them to the wrong place. One
+    more underscore keeps different paths different."""
+    parts = sub.split('/')
+    return '/'.join([p + '_' if _IMAGES_DIR.match(p) else p for p in parts[:-1]] + parts[-1:])
+
+
 def trainset_layout(entries: Iterable[Entry], fmt: str) -> List[Entry]:
     """The files of a training-set snapshot as fw get lays them out in one format (docs/trainset-format.md):
 
-    yolo  images/<split>/..., labels/<split>/...txt (ultralytics finds a label by images/ -> labels/)
+    yolo  images/<split>/..., labels/<split>/...txt (ultralytics finds a label by images/ -> labels/; folders
+          named images inside are renamed, see yolo_safe)
     coco  train|valid|test/... images, with <folder>/_annotations.coco.json (Roboflow / RF-DETR layout)
     json  train|val|test/... images with the LiteAnno JSON next to each (open the folder in LiteAnno)
     all   the snapshot as it is stored
@@ -313,9 +326,9 @@ def trainset_layout(entries: Iterable[Entry], fmt: str) -> List[Entry]:
         if not rest or fmt == 'all':
             new = path
         elif top == 'images' and split in TRAINSET_SPLITS and sub:
-            new = {'yolo': path, 'coco': f'{COCO_DIRS[split]}/{sub}', 'json': rest}[fmt]
+            new = {'yolo': f'images/{split}/{yolo_safe(sub)}', 'coco': f'{COCO_DIRS[split]}/{sub}', 'json': rest}[fmt]
         elif top == 'labels':
-            new = path if fmt == 'yolo' else None
+            new = f'labels/{split}/{yolo_safe(sub)}' if fmt == 'yolo' and sub else (path if fmt == 'yolo' else None)
         elif top == 'json':
             new = rest if fmt == 'json' else None
         elif top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS:

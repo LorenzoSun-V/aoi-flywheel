@@ -327,6 +327,11 @@ def test_split_file(api, cache, tmp_path):
     v = make(api, name, [f'{src}@1'], split=split)
     assert splits_of(fetch(api, cache, v['ref'], tmp_path / 'g')) == split
     assert v['trainset']['rule'] == {'mode': 'split-file', 'split_count': 4}
+    lines = []
+    v2 = ops.create_trainset(api, name, [f'{src}@1'], CLASSES, split=dict(split, **{keys[3]: 'val'}),
+                             echo=lines.append)
+    assert v2['trainset']['based_on'] is None and v2['parent']['ref'] == v['ref']  # a split file continues nothing
+    assert any(f'用划分清单（不接着 {v["ref"]}）' in line for line in lines)
 
 
 @pytest.mark.parametrize('files, message', [
@@ -424,6 +429,8 @@ def test_failure_before_freeze_leaves_nothing(api, service, sql, tmp_path):
         service.hooks.pop('before_freeze')
     assert sql.execute('SELECT count(*) AS n FROM versions v JOIN datasets d ON d.id = v.dataset_id '
                        'WHERE d.name = %s', (name,)).fetchone()['n'] == 0
+    assert not any(d['name'] == name for d in api.datasets())  # the name was not taken either
+    assert not any(d['name'] == name for d in api.trainsets())
     assert make(api, name, [f'{src}@1'])['number'] == 1
 
 
@@ -439,6 +446,126 @@ def test_roles(make_api, tmp_path):
         assert status_of(lambda: api.trainset(name)) == 403
         assert status_of(lambda: api.preview_trainset(name, body)) == 403
         assert status_of(lambda: api.create_trainset(name, body)) == 403
+
+
+# --- found in review (2026-11-05): each reproduced first ---------------------------------------------------
+def test_what_was_previewed_is_what_is_frozen(api, tmp_path):
+    """A bare name in --from is resolved at the preview; a pool version imported before the confirmation is
+    not what gets frozen."""
+    files = sample_files('a', 3)
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+
+    def import_meanwhile(_prompt):
+        add_version(api, tmp_path, src, {**files, **sample_files('b', 1)})
+        return True
+
+    v = ops.create_trainset(api, name, [src], CLASSES, confirm=import_meanwhile, echo=quiet)
+    assert v['summary']['samples'] == 3 and v['trainset']['sources'] == [f'{src}@1']
+    with pytest.raises(ApiError, match='具体版本') as e:
+        api.create_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [src], 'classes': CLASSES})
+    assert e.value.status == 400
+
+
+def test_previous_splits_keep_the_extension(monkeypatch):
+    """Two images with the same stem in different splits: each keeps its own split and label."""
+    rows = [('images/train/SES/TX/same/a.png', 'i1', 1), ('labels/train/SES/TX/same/a.txt', 'l1', 1),
+            ('json/train/SES/TX/same/a.json', 'j1', 1),
+            ('images/val/SES/TX/same/a.jpg', 'i2', 1), ('labels/val/SES/TX/same/a.txt', 'l2', 1),
+            ('images/test/SES/TX/b.png', 'i3', 1), ('classes.txt', 'c', 1)]
+    monkeypatch.setattr(trainsets, '_files', lambda conn, version_id: rows)
+    assert trainsets._previous_splits(None, {'id': 1}) == {
+        'SES/TX/same/a.png': ('train', 'j1'), 'SES/TX/same/a.jpg': ('val', 'l2'), 'SES/TX/b.png': ('test', None)}
+
+
+def test_same_stem_in_two_sources_is_refused(api, tmp_path):
+    one = pool(api, tmp_path, {'same/a.png': png(uuid.uuid4().hex), 'same/a.json': label('scratch')})
+    two = pool(api, tmp_path, {'same/a.jpg': png(uuid.uuid4().hex), 'same/a.json': label('dent')})
+    with pytest.raises(ops.FwError, match='同名不同扩展名的图片 SES/TX/same/a.png 和 SES/TX/same/a.jpg'):
+        make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{one}@1', f'{two}@1'])
+
+
+def ultralytics_label(image: str) -> str:
+    """ultralytics.data.utils.img2label_paths (8.x): the last /images/ becomes /labels/, the suffix .txt."""
+    sa, sb = '/images/', '/labels/'
+    return sb.join(image.rsplit(sa, 1)).rsplit('.', 1)[0] + '.txt'
+
+
+def test_images_folders_inside_the_pool_path(api, cache, tmp_path):
+    files = {'batch/images/one.png': png(uuid.uuid4().hex), 'batch/images/one.json': label('scratch'),
+             'images_/two.png': png(uuid.uuid4().hex), 'images_/two.json': label('dent')}
+    src = pool(api, tmp_path, files, line='images')
+    v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
+    dest = tmp_path / 'g'
+    tree = fetch(api, cache, v['ref'], dest)
+    images = sorted(p for p in tree if p.startswith('images/'))
+    assert images == ['images/train/SES/images_/batch/images_/one.png', 'images/train/SES/images_/images__/two.png']
+    for image in images:  # where ultralytics (and aoi-deteval) look for the label is where it is
+        assert ultralytics_label('/data/' + image)[len('/data/'):] in tree
+    assert tree['labels/train/SES/images_/batch/images_/one.txt'].startswith(b'0 ')
+    json_tree = fetch(api, cache, v['ref'], tmp_path / 'j', fmt='json')  # only the YOLO layout renames
+    assert 'train/SES/images/batch/images/one.json' in json_tree
+
+
+def test_require_labels(api, tmp_path):
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': label('scratch'),
+                               'neg.png': png(uuid.uuid4().hex)})
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    preview = api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES, 'require_labels': True})
+    assert any('--require-labels' in p and 'SES/TX/neg.png' in p for p in preview['problems'])
+    with pytest.raises(ops.FwError, match='没有建训练集快照'):
+        make(api, name, [f'{src}@1'], require_labels=True)
+    assert make(api, name, [f'{src}@1'])['trainset']['counts']['train']['negatives'] + \
+        api.trainset(name)['trainset']['counts']['val']['negatives'] == 1
+
+
+def test_a_snapshot_without_val_says_it_cannot_train(api, cache, tmp_path):
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': label('scratch')})
+    lines = []
+    v = ops.create_trainset(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], CLASSES, echo=lines.append)
+    assert any('没有 val 样本' in line for line in lines)
+    lines.clear()
+    out = ops.get(api, cache, v['ref'], tmp_path / 'g', echo=lines.append)
+    assert out['missing_splits'] == ['val'] and any('不能直接 yolo train' in line for line in lines)
+    assert not any('yolo train data=' in line for line in lines)
+
+
+def test_yolo_label_with_a_bom(api, cache, tmp_path):
+    text = yolo_line(1)
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.txt': b'\xef\xbb\xbf' + text.encode()})
+    v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g')
+    assert tree['labels/train/SES/TX/a.txt'] == text.encode()
+    assert int(tree['labels/train/SES/TX/a.txt'].split()[0]) == 1
+
+
+def test_two_first_versions_at_once(api, make_api, service, tmp_path):
+    """The name is taken together with the first version: the second request gets 409, not 500."""
+    import threading
+    import time
+    src = pool(api, tmp_path, sample_files('a', 3))
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    other = make_api('algo')
+    body = {'sources': [f'{src}@1'], 'classes': CLASSES, 'seed': 1}
+    result = {}
+
+    def second():
+        result['status'] = status_of(lambda: other.create_trainset(name, body))
+
+    t = threading.Thread(target=second)
+
+    def start_the_other_and_wait():
+        t.start()
+        time.sleep(1.5)  # it plans, then waits on the name this transaction has not committed yet
+
+    service.hooks['before_freeze'] = start_the_other_and_wait
+    try:
+        v = make(api, name, [f'{src}@1'])
+    finally:
+        service.hooks.pop('before_freeze')
+    t.join(30)
+    assert v['number'] == 1 and result['status'] == 409
+    assert [x['number'] for x in api.versions(name)] == [1]
 
 
 # --- what the database keeps ----------------------------------------------------------------------------

@@ -223,8 +223,9 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 | `--test-dirs` | 这些目录下的新样本进 test，例如 `2026-10`，或带上现场和产线 `SES/TX/2026-10`；逗号分隔或写多次 |
 | `--merge-test` | 上一版 test 里的样本重新分到 train/val（比如上一版的 test 已经测完了，要并进来训练） |
 | `--new-to` | 接着上一版时新样本去哪：`test`（默认）或 `trainval` |
-| `--split-file` | 用自己的划分清单：每行一个样本「`<现场>/<产线>/<图片路径>` 制表符或空格 `train`、`val` 或 `test`」，`#` 开头的行不算。清单要正好包括来源里的全部图片 |
+| `--split-file` | 用自己的划分清单：每行一个样本「`<现场>/<产线>/<图片路径>` 制表符或空格 `train`、`val` 或 `test`」，`#` 开头的行不算。清单要正好包括来源里的全部图片。用清单时不算接着上一版（`based_on` 是空的） |
 | `--fresh` | 不接着上一版，全部重新划分 |
+| `--require-labels` | 每张图都要有标注：有没标注的图就不建，预览里列出来。默认没有标注的图当负样本收进来 |
 | `--note` | 备注 |
 | `--dry-run` | 只预览，不建 |
 | `--yes` | 不问确认 |
@@ -234,7 +235,10 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 - 和最新版完全一样（样本、划分、标注、类别表都没变）时不建。
 - 这一版只做检测：`point`、`line`、`circle` 这类形状不能当检测框，有就不建；`polygon`、`rotation` 按外接矩形当检测框。
 - 有图片读不出尺寸时（不是 PNG、JPEG、BMP、GIF、TIFF、WebP，又没有 JSON 标注）不生成 COCO；快照里有 YOLO txt 标注时不生成 JSON 格式。预览里写着原因。
-- 预览之后有人建了同名快照的新版本，就不建，重新运行一次即可。
+- `--from` 只写名称（或 `@latest`）时，预览时定下是哪个版本，确认后冻结的就是那个版本；预览和确认之间有人导入了新版本也不影响。
+- 预览之后有人建了同名快照的新版本（或者同时有人建同名的第一版），就不建，重新运行一次即可。第一版没建成时名称也不会被占住。
+- 同一现场和产线的两个来源里有同名不同扩展名的图片（例如 `same/a.png` 和 `same/a.jpg`）时不建：它们的 YOLO 标注会是同一个文件。
+- 没有 train 或 val 样本时预览会提醒：这样的快照只能当测试集，不能直接训练。
 - 服务器要读每个标注文件核对类别，几十万张图时预览和建快照各要一些时间。
 
 ### fw trainset list 和 fw trainset show

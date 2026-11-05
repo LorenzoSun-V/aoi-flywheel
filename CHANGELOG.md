@@ -8,7 +8,9 @@
 - 建快照时服务器把标注转成 YOLO 和 COCO 检测框，和图片、原始 LiteAnno JSON 一起冻结；`fw get <快照>` 默认摆成 YOLO 的目录并生成 `data.yaml`，`--format coco` 摆成 RF-DETR 读的 COCO 目录，`--format json` 摆成 LiteAnno 能直接打开的目录。类别编号都是 classes.txt 的行号。
 - `fw trainset list`、`fw trainset show`；快照用 `fw get`、`fw export`、`fw verify`、`fw dataset diff` 取回、导出、核对和对比，和数据集版本一样。训练脚本用 `fw.get_trainset()` 取快照，返回 id、目录、类别表和 `data_yaml`。
 - `fw dataset list` 里快照的类型显示为「训练集快照」；往快照里 `fw dataset import` 会被拒绝。
+- `--require-labels`：要求每张图都有标注，有没标注的图就不建（默认当负样本）。
 - 数据库迁移 `0002_trainsets.sql`：服务启动时自动应用，不用手动操作；升级前照常备份。
+- 审查后修正（合并前）：确认后冻结的是预览时定下的来源版本；`--split-file` 建的版本 `based_on` 为空；YOLO 目录里原路径中叫 `images` 的目录改名为 `images_`，ultralytics 和 aoi-deteval 才找得到标注；YOLO txt 的 UTF-8 BOM 冻结时去掉；同一现场和产线的两个来源有同名不同扩展名的图片时不建；没有 train 或 val 时预览和 `fw get` 明确提醒；名称和第一版一起建，失败不留空名称，同时建同名第一版返回 409 而不是 500；`fw dataset create` 同时建同名数据集也返回 409。
 
 ## 0.1.0（未发布）
 
