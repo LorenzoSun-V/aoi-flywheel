@@ -654,9 +654,15 @@ def git_info(folder) -> Optional[dict]:
             'dirty': bool(status)}
 
 
-def _read_json_object(path, what: str) -> dict:
+def _read_json_object(path, what: str, undefined: Optional[list] = None) -> dict:
+    """undefined: read NaN and ±Infinity as null and append each to it (the platform keeps only standard JSON)."""
+    def constant(name):
+        if undefined is None:
+            raise ValueError(f'有 {name}，不是标准 JSON')
+        undefined.append(name)
+        return None
     try:
-        doc = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+        doc = json.loads(Path(path).read_text(encoding='utf-8-sig'), parse_constant=constant)
     except OSError as e:
         raise FwError(f'读不了{what} {path}（{e.strerror or e}）') from None
     except ValueError as e:
@@ -819,7 +825,8 @@ def register_eval(api: Api, model_ref: str, testset: str, metrics=None, deteval=
     rows: List[list] = []
     if deteval is not None:
         folder = Path(deteval)
-        summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果')
+        undefined: List[str] = []
+        summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果', undefined)
         names = sorted(summary)
         if deteval_model is None:
             if len(names) != 1:
@@ -828,7 +835,9 @@ def register_eval(api: Api, model_ref: str, testset: str, metrics=None, deteval=
             deteval_model = names[0]
         if not isinstance(summary.get(deteval_model), dict):
             raise FwError(f'{folder / "summary.json"} 里没有模型 {deteval_model}（有 {"、".join(names)}）')
-        data = json.dumps(summary[deteval_model], ensure_ascii=False, indent=2).encode('utf-8')
+        data = json.dumps(summary[deteval_model], ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
+        if undefined:  # e.g. a class with no ground truth in this test set: its AP is not defined
+            echo(f'  summary.json 里有 {len(undefined)} 项没有定义的指标（NaN），登记为 null；原文件照样保存在 files/')
         rows.append(['metrics.json', api.put_bytes(data), len(data)])
         items += _folder_files(folder, 'files/')
         if tool is None:

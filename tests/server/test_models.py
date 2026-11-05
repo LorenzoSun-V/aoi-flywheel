@@ -230,6 +230,18 @@ def test_eval_reports(api, model, snapshot, tmp_path):
         ops.register_eval(api, f'{model}@1', f'{test_pool}@1', echo=quiet)
     assert [x['id'] for x in api.evals(model)] == [e['id'], e2['id'], e3['id']]
 
+    # aoi-deteval writes a bare NaN for a metric with nothing to measure (e.g. no ground truth of a class)
+    nan = deteval_out(tmp_path)
+    (nan / 'summary.json').write_text('{"model_s0": {"test": {"mAP50": 0.5, "AP_dent": NaN, "x": -Infinity}}}',
+                                      encoding='utf-8')
+    lines = []
+    e4 = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:val', deteval=nan, echo=lines.append)
+    assert e4['metrics'] == {'test': {'mAP50': 0.5, 'AP_dent': None, 'x': None}}
+    assert any('2 项没有定义的指标' in line for line in lines)
+    bad = write(tmp_path, 'nan.json', b'{"recall": NaN}')
+    with pytest.raises(ops.FwError, match='NaN'):  # other metrics files: standard JSON only
+        ops.register_eval(api, f'{model}@1', f'{test_pool}@1', metrics=bad, echo=quiet)
+
 
 def test_compare(api, model, snapshot, tmp_path, monkeypatch, service, tokens, capsys):
     register(api, model, snapshot, files_in(tmp_path, 'a', {'mAP50': 0.8, 'recall': 0.7}))

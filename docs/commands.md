@@ -343,15 +343,15 @@ fw eval show 12
 | 选项 | 说明 |
 |---|---|
 | `--testset` | 必填，测试集版本。训练集快照要写明划分，例如 `SES-TX-det@2:test`；别的数据集版本（例如测试集 `SES-TX-test@1`）不写划分 |
-| `--deteval` | aoi-deteval `evaluate` 的输出目录：指标取自 `summary.json` 里这个模型的那一项，工具版本取自 `run_info.json`，整个目录（`metrics.csv`、`per_image.csv`、`report.txt` 等）都登记在 `files/` 下 |
+| `--deteval` | aoi-deteval `evaluate` 的输出目录：指标取自 `summary.json` 里这个模型的那一项，工具版本取自 `run_info.json`，整个目录（`metrics.csv`、`per_image.csv`、`report.txt` 等）都登记在 `files/` 下。`summary.json` 里没有定义的指标（aoi-deteval 写成 `NaN`，例如测试集里没有某个类别）登记为 `null`，原文件不改 |
 | `--deteval-model` | `summary.json` 里有几个模型时，这个模型版本对应哪一个（记在备注里） |
-| `--metrics` | 不用 aoi-deteval 时，指标 JSON（一个 JSON 对象）；和 `--deteval` 二选一 |
+| `--metrics` | 不用 aoi-deteval 时，指标 JSON（一个 JSON 对象，标准 JSON：没有定义的值写 `null`，不能写 `NaN`）；和 `--deteval` 二选一 |
 | `--file` | 另外附带的报告文件或目录；可写多次 |
 | `--tool`、`--tool-version` | 评估工具和版本；用 `--deteval` 时自动填 |
 | `--note` | 备注 |
 
 - 同样的模型版本、测试集和文件再登记一次，返回已有的那份报告。
-- 平台不核对 aoi-deteval 评的图是不是正好是那个划分：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），快照的图片按现场、产线、原路径分了几层，要等 aoi-deteval 改成递归读取，或者先把图片摆成一层再评。
+- 平台不核对 aoi-deteval 评的图是不是正好是那个划分：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按现场、产线、原路径分了几层，要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
 
 ### fw release register、list、current、show
 

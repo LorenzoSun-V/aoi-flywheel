@@ -13,7 +13,7 @@
 - 审查后修正（合并前）：确认后冻结的是预览时定下的来源版本；`--split-file` 建的版本 `based_on` 为空；YOLO 目录里原路径中叫 `images` 的目录改名为 `images_`，ultralytics 和 aoi-deteval 才找得到标注；YOLO txt 的 UTF-8 BOM 冻结时去掉；同一现场和产线的两个来源有同名不同扩展名的图片时不建；没有 train 或 val 时预览和 `fw get` 明确提醒；名称和第一版一起建，失败不留空名称，同时建同名第一版返回 409 而不是 500；`fw dataset create` 同时建同名数据集也返回 409。
 - 新增模型和模型版本：`fw model create` 建模型（现场、产线、任务类型），`fw model register` 或训练脚本里的 `fw.register_model()` 把 ONNX、指标、附件和训练集快照登记成下一个版本。文件先传到服务器再登记，`classes.txt` 从快照复制；训练代码的提交号默认从当前目录的 git 读，并记下有没有没提交的改动，仓库地址里的账号和令牌不记。同一个 ONNX 再登记返回已有的版本，内容不一样就拒绝。`fw model list/versions/show`，`fw model get` 和 `fw.get_model()` 把模型版本取到本地（和 `fw get` 共用缓存）。
 - 标签：`fw model tag` 标候选、弃用，只追加，历史都在；`fw model compare` 并排对比几个版本的指标。
-- 评估报告：`fw eval register` 登记一个模型版本在测试集（快照的某个划分或数据集版本）上的指标和报告文件，`--deteval` 直接读 aoi-deteval 的输出目录；`fw eval list/show`。
+- 评估报告：`fw eval register` 登记一个模型版本在测试集（快照的某个划分或数据集版本）上的指标和报告文件，`--deteval` 直接读 aoi-deteval 的输出目录（没有定义的指标 `NaN` 登记为 `null`）；`fw eval list/show`。
 - 发布：`fw release register` 由部署仓库在部署成功后登记，发布 ID 是「现场-产线-r序号」；不上传引擎，记下现场构建引擎用的 GPU、TensorRT 版本、精度和可选的引擎哈希。`fw release current` 按部署成功时间最晚的发布回答产线现在用的模型，补登旧发布不会顶掉新的。`fw release list/show`。
 - 追溯链：`fw model chain <发布或模型版本>` 从发布一路显示到模型版本、评估、训练集快照和数据池版本，`--check` 核对链上每个文件都在文件库里。
 - 部署账号现在能读模型、登记发布、下载模型版本的文件（取不了数据集和快照的文件）；现场实施账号仍然什么都碰不到。
