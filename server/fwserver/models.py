@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -71,10 +72,21 @@ def _repo(value: str, what: str, required: bool) -> str:
 
 
 def _name(value: str, what: str) -> str:
+    """A site or a line: release refs are <site>-<line>-r<n>, so neither may hold '-' (A-B/C and A/B-C would
+    both be A-B-C-r1)."""
     value = _text(value, what, 64, line=True)
     if not value:
         raise DatasetError(400, f'要写{what}')
+    if '-' in value:
+        raise DatasetError(400, f'{what}里不能有 -（发布编号是 <现场>-<产线>-r<序号>）：{value}')
     return value
+
+
+def _pinned(name: str, number: str) -> str:
+    """Registering on a model version needs its number: a retry must not land on a version made meanwhile."""
+    if not str(number).isdigit():
+        raise DatasetError(400, f'登记评估或发布要写具体的模型版本，例如 {name}@3，不能用 latest')
+    return number
 
 
 # --- file sets ---------------------------------------------------------------------------------------------
@@ -124,6 +136,9 @@ def _reject_constant(name: str):
 
 
 def _no_nul(value: Any) -> bool:
+    """No \\u0000 and no infinite number (1e309 parses as inf): PostgreSQL jsonb takes neither."""
+    if isinstance(value, float):
+        return math.isfinite(value)
     if isinstance(value, str):
         return '\x00' not in value
     if isinstance(value, dict):
@@ -151,7 +166,7 @@ def _metrics(store: Store, entries: List[Entry]) -> dict:
     if not isinstance(doc, dict):
         raise DatasetError(400, '指标文件应该是一个 JSON 对象（{…}）')
     if not _no_nul(doc):
-        raise DatasetError(400, '指标文件里有 \\u0000 字符')
+        raise DatasetError(400, '指标文件里有 \\u0000 字符，或者有超出范围的数（例如 1e309）')
     return doc
 
 
@@ -228,11 +243,10 @@ def create_model(conn, user_id: int, name: str, site: str, line: str, task: str 
     if task not in TASKS:
         raise DatasetError(400, f'任务类型只能是 {"、".join(TASKS)}（{"、".join(TASKS.values())}）')
     note = _text(note, '备注')
-    with conn.transaction():
-        if conn.execute('SELECT 1 FROM models WHERE lower(name) = lower(%s)', (name,)).fetchone():
+    with conn.transaction():  # ON CONFLICT: someone creating the same name meanwhile also gets 409, not 500
+        if conn.execute('INSERT INTO models (name, site, line, task, note, created_by) VALUES (%s, %s, %s, %s, %s, %s) '
+                        'ON CONFLICT DO NOTHING RETURNING id', (name, site, line, task, note, user_id)).fetchone() is None:
             raise DatasetError(409, f'模型 {name} 已经存在（名称不分大小写）')
-        conn.execute('INSERT INTO models (name, site, line, task, note, created_by) VALUES (%s, %s, %s, %s, %s, %s)',
-                     (name, site, line, task, note, user_id))
     return get_model(conn, name)
 
 
@@ -432,7 +446,7 @@ def get_eval(conn, eval_id: int) -> dict:
 def register_eval(conn, store: Store, user_id: int, name: str, number: str, testset_id: int, split: str,
                   files: Sequence, tool: str = '', tool_version: str = '', note: str = '') -> dict:
     """files: metrics.json and optionally files/... (for aoi-deteval its output folder)."""
-    mv = get_model_version(conn, name, number)
+    mv = get_model_version(conn, name, _pinned(name, number))
     testset = datasets.get_version_by_id(conn, testset_id)
     split = split or ''
     if testset['kind'] == 'trainset':
@@ -541,7 +555,7 @@ def register_release(conn, user_id: int, name: str, number: str, site: str, line
                      deploy_commit: str, deployed_at: str, gpu: str = '', trt_version: str = '', precision: str = '',
                      engine_sha256: Optional[str] = None, engine_size: Optional[int] = None,
                      note: str = '') -> dict:
-    mv = get_model_version(conn, name, number)
+    mv = get_model_version(conn, name, _pinned(name, number))
     site = _name(site or mv['site'], '现场')
     line = _name(line or mv['line'], '产线')
     repo = _repo(deploy_repo, '部署仓库地址', required=True)
@@ -621,7 +635,8 @@ def _check_chain(conn, store: Store, mv: dict, evals: List[dict], trainset: dict
         wanted.setdefault(manifest, (None, f'{ref} 的清单'))
         for f in fileset_files(conn, fid):
             wanted.setdefault(f['sha256'], (f['size'], f'{ref}：{f["path"]}'))
-    for v in [trainset] + sources:
+    testsets = [datasets.get_version_by_id(conn, i) for i in sorted({e['testset']['id'] for e in evals})]
+    for v in [trainset] + sources + testsets:  # the test sets of the reports too: a report is only as good as them
         wanted.setdefault(v['manifest_sha256'], (None, f'{v["ref"]} 的清单'))
         for r in conn.execute("SELECT path, encode(sha256, 'hex') AS d, size FROM version_files WHERE version_id = %s",
                               (v['id'],)):

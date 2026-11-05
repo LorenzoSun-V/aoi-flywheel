@@ -317,8 +317,9 @@ def cmd_model_chain(args, api: Api) -> int:
 
 
 def cmd_eval_register(args, api: Api) -> None:
-    ops.register_eval(api, args.model, args.testset, args.metrics, args.deteval, args.deteval_model, args.file,
-                      args.tool, args.tool_version, args.note, workers=args.workers)
+    ops.register_eval(api, args.model, args.testset, metrics=args.metrics, deteval=args.deteval,
+                      deteval_model=args.deteval_model, deteval_set=args.deteval_set, files=args.file, tool=args.tool,
+                      tool_version=args.tool_version, note=args.note, workers=args.workers)
 
 
 def cmd_eval_list(args, api: Api) -> None:
@@ -512,6 +513,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument('--deteval', metavar='目录', help='aoi-deteval evaluate 的输出目录（summary.json、run_info.json 等，整个目录都登记）')
     g.add_argument('--metrics', help='别的评估工具的指标 JSON（一个 JSON 对象）')
     s.add_argument('--deteval-model', help='summary.json 里有几个模型时，这个模型版本对应哪一个')
+    s.add_argument('--deteval-set', help='aoi-deteval 结果里哪个集合是这个测试集（默认是和划分同名的那个）；'
+                                         '评的图片数要和测试集一样')
     s.add_argument('--file', action='append', default=[], metavar='文件或目录', help='附带的报告文件；可写多次')
     s.add_argument('--tool', help='评估工具名（用 --deteval 时是 aoi-deteval）')
     s.add_argument('--tool-version', help='评估工具版本（用 --deteval 时从 run_info.json 读）')

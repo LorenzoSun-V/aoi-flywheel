@@ -271,7 +271,7 @@ fw model versions SES-TX-detr                        # 每个版本的快照、O
 fw model show SES-TX-detr@3                          # 文件、类别、训练代码、验证指标、评估报告、发布
 ```
 
-模型名称和数据集一样只能用字母、数字和 `. _ -`，不分大小写，不能重名。
+模型名称和数据集一样只能用字母、数字和 `. _ -`，不分大小写，不能重名。现场和产线里不能有 `-`（发布编号是 `<现场>-<产线>-r<序号>`，`A-B`/`C` 和 `A`/`B-C` 会撞号）。
 
 ### fw model register
 
@@ -343,15 +343,17 @@ fw eval show 12
 | 选项 | 说明 |
 |---|---|
 | `--testset` | 必填，测试集版本。训练集快照要写明划分，例如 `SES-TX-det@2:test`；别的数据集版本（例如测试集 `SES-TX-test@1`）不写划分 |
-| `--deteval` | aoi-deteval `evaluate` 的输出目录：指标取自 `summary.json` 里这个模型的那一项，工具版本取自 `run_info.json`，整个目录（`metrics.csv`、`per_image.csv`、`report.txt` 等）都登记在 `files/` 下。`summary.json` 里没有定义的指标（aoi-deteval 写成 `NaN`，例如测试集里没有某个类别）登记为 `null`，原文件不改 |
+| `--deteval` | aoi-deteval `evaluate` 的输出目录：指标取自 `summary.json` 里这个模型在**这个测试集**上的那一行（加上阈值等），工具版本取自 `run_info.json`，整个目录（`metrics.csv`、`per_image.csv`、`report.txt` 等）都登记在 `files/` 下。`summary.json` 里没有定义的指标（aoi-deteval 写成 `NaN`，例如测试集里没有某个类别）登记为 `null`，原文件不改 |
 | `--deteval-model` | `summary.json` 里有几个模型时，这个模型版本对应哪一个（记在备注里） |
+| `--deteval-set` | aoi-deteval 结果里哪个集合就是这个测试集（记在备注里）。不写时：快照取和划分同名的集合（`:test` 就是 `test`）；数据集版本取结果里唯一的那个集合 |
 | `--metrics` | 不用 aoi-deteval 时，指标 JSON（一个 JSON 对象，标准 JSON：没有定义的值写 `null`，不能写 `NaN`）；和 `--deteval` 二选一 |
 | `--file` | 另外附带的报告文件或目录；可写多次 |
 | `--tool`、`--tool-version` | 评估工具和版本；用 `--deteval` 时自动填 |
 | `--note` | 备注 |
 
 - 同样的模型版本、测试集和文件再登记一次，返回已有的那份报告。
-- 平台不核对 aoi-deteval 评的图是不是正好是那个划分：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按现场、产线、原路径分了几层，要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
+- 模型版本只写名称时，先定下是哪个版本（例如 `SES-TX-detr@3`）再登记；网络断了重试，也还是登记在这个版本上。
+- 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按现场、产线、原路径分了几层，要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
 
 ### fw release register、list、current、show
 
@@ -378,6 +380,8 @@ fw release show SES-TX-r3                  # 这次发布和它的追溯链
 
 - 「产线现在用哪个模型」是**部署时间最晚**的那次发布，不是最后登记的那次：补登一次以前的发布，不会顶掉后来真正部署的那次。
 - 同一条产线、同一个模型版本、同一个部署提交号和部署时间再登记一次（网络断了重试），返回已有的那次；这些相同而 GPU、引擎等不一样就拒绝。
+- `--model` 只写名称时，先定下是哪个版本再登记，重试也不会换成期间新登记的版本。
+- 现场和产线里不能有 `-`。
 - 只有部署账号和管理员能登记发布；算法工程师能看。
 
 ## 在训练脚本里用

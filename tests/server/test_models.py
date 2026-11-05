@@ -184,10 +184,15 @@ def test_tags(api, model, snapshot, tmp_path, sql):
 
 
 # --- evaluation reports ---------------------------------------------------------------------------------------
-def deteval_out(tmp_path, models=('model_s0',)):
+def deteval_out(tmp_path, models=('model_s0',), sets=(('test', 3),)):
+    """An aoi-deteval evaluate output folder; the fixture snapshot has 3 test images and 2 val images."""
     d = tmp_path / f'deteval-{uuid.uuid4().hex[:6]}'
-    write(d, 'summary.json', json.dumps({m: {'f1': {'conf': 0.31}, 'test': {'mAP50': [0.7, 0.8][i], 'lf1': 0.8}}
-                                         for i, m in enumerate(models)}).encode())
+    summary = {}
+    for i, m in enumerate(models):
+        summary[m] = {'weights': None, 'thresholds': {'f1': 0.31}, 'reached': {}}
+        for name, images in sets:
+            summary[m][name] = {'model': m, 'set': name, 'images': images, 'mAP50': [0.7, 0.8][i], 'lf1_F1': 0.8}
+    write(d, 'summary.json', json.dumps(summary).encode())
     write(d, 'run_info.json', json.dumps({'deteval_version': '0.2.0', 'metric_version': 3}).encode())
     write(d, 'metrics.csv', b'model,set,mAP50\n')
     write(d, 'report.txt', '对比表\n'.encode())
@@ -200,8 +205,9 @@ def test_eval_reports(api, model, snapshot, tmp_path):
     e = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=out, echo=quiet)
     assert e['testset']['ref'] == f'{snapshot["ref"]}:test' and e['split'] == 'test'
     assert e['tool'] == 'aoi-deteval' and e['tool_version'] == '0.2.0'
-    assert e['metrics'] == {'f1': {'conf': 0.31}, 'test': {'mAP50': 0.7, 'lf1': 0.8}}
-    assert 'model_s0' in e['note']
+    assert e['metrics'] == {'weights': None, 'thresholds': {'f1': 0.31}, 'reached': {}, 'model': 'model_s0',
+                            'set': 'test', 'images': 3, 'mAP50': 0.7, 'lf1_F1': 0.8}
+    assert 'model_s0' in e['note'] and '集合 test' in e['note']
     shown = api.eval(e['id'])
     assert [f['path'] for f in shown['files']] == ['files/metrics.csv', 'files/report.txt', 'files/run_info.json',
                                                    'files/summary.json', 'metrics.json']
@@ -212,14 +218,15 @@ def test_eval_reports(api, model, snapshot, tmp_path):
         ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=two, echo=quiet)
     e2 = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=two, deteval_model='model_s1',
                            echo=quiet)
-    assert e2['metrics']['test']['mAP50'] == 0.8
+    assert e2['metrics']['mAP50'] == 0.8
 
     with pytest.raises(ops.FwError, match=':test'):
         ops.register_eval(api, f'{model}@1', snapshot['ref'], deteval=out, echo=quiet)
     with pytest.raises(ApiError, match='没有 val'):
         empty = make(api, f'T-{uuid.uuid4().hex[:8]}',
                      [f'{pool(api, tmp_path, sample_files("x", 1))}@1'], val=0.0)
-        ops.register_eval(api, f'{model}@1', f'{empty["ref"]}:val', deteval=out, echo=quiet)
+        ops.register_eval(api, f'{model}@1', f'{empty["ref"]}:val', metrics=write(tmp_path, 'v.json', b'{}'),
+                          echo=quiet)
     test_pool = pool(api, tmp_path, sample_files('t', 2))
     metrics = write(tmp_path, 'm.json', b'{"recall": 0.9}')
     e3 = ops.register_eval(api, f'{model}@1', f'{test_pool}@1', metrics=metrics, tool='other', echo=quiet)
@@ -232,12 +239,13 @@ def test_eval_reports(api, model, snapshot, tmp_path):
 
     # aoi-deteval writes a bare NaN for a metric with nothing to measure (e.g. no ground truth of a class)
     nan = deteval_out(tmp_path)
-    (nan / 'summary.json').write_text('{"model_s0": {"test": {"mAP50": 0.5, "AP_dent": NaN, "x": -Infinity}}}',
-                                      encoding='utf-8')
+    (nan / 'summary.json').write_text('{"model_s0": {"thresholds": {}, "val": {"set": "val", "images": 2, '
+                                      '"mAP50": 0.5, "AP_dent": NaN, "x": -Infinity, "y": 1e309}}}', encoding='utf-8')
     lines = []
     e4 = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:val', deteval=nan, echo=lines.append)
-    assert e4['metrics'] == {'test': {'mAP50': 0.5, 'AP_dent': None, 'x': None}}
-    assert any('2 项没有定义的指标' in line for line in lines)
+    assert e4['metrics'] == {'thresholds': {}, 'set': 'val', 'images': 2, 'mAP50': 0.5, 'AP_dent': None, 'x': None,
+                             'y': None}
+    assert any('3 项没有定义的指标' in line for line in lines)
     bad = write(tmp_path, 'nan.json', b'{"recall": NaN}')
     with pytest.raises(ops.FwError, match='NaN'):  # other metrics files: standard JSON only
         ops.register_eval(api, f'{model}@1', f'{test_pool}@1', metrics=bad, echo=quiet)
@@ -256,6 +264,173 @@ def test_compare(api, model, snapshot, tmp_path, monkeypatch, service, tokens, c
     assert '+0.05' in out and 'precision' in out
     assert fw_cli.main(['model', 'compare', f'{model}@1', f'{model}@2', '--testset', f'{snapshot["ref"]}:test']) == 1
     assert '没有在' in capsys.readouterr().err
+
+
+# --- found in the review of 2026-11-05 13:12: each reproduced first --------------------------------------------
+def test_a_retry_stays_on_the_version_it_meant(api, make_api, model, snapshot, tmp_path, monkeypatch):
+    """The first request succeeds, its answer is lost, a new version is registered, then the retry goes out:
+    both must land on the version the call meant, not on the newest one."""
+    register(api, model, snapshot, files_in(tmp_path, 'one'))
+    out = deteval_out(tmp_path)
+    deploy = make_api('deploy')
+    calls = []
+
+    def lose_the_first_answer(real):
+        return lambda url, **kw: lose(real, url, **kw)
+
+    def lose(real, url, **kw):
+        r = real(url, **kw)
+        if not calls and ('/evals' in url or url.endswith('/releases')):
+            calls.append(url)
+            register(api, model, snapshot, files_in(tmp_path, f'meanwhile-{len(calls)}-{uuid.uuid4().hex[:4]}'))
+            import httpx
+            raise httpx.ReadTimeout('the answer was lost', request=r.request)
+        return r
+
+    monkeypatch.setattr(api.http, 'post', lose_the_first_answer(api.http.post))
+    monkeypatch.setattr(deploy.http, 'post', lose_the_first_answer(deploy.http.post))
+    e = ops.register_eval(api, model, f'{snapshot["ref"]}:test', deteval=out, echo=quiet)
+    assert e['model_version']['ref'] == f'{model}@1' and e['existing']
+    assert api.model_version(model, 2)['evals'] == []
+    calls.clear()
+    site = f'S{uuid.uuid4().hex[:6]}'
+    r = release(deploy, model, '2026-10-20T10:00+08:00', site=site)
+    assert r['model_version']['ref'] == f'{model}@2' and r['existing']
+    assert api.current_release(site, 'TX')['model_version']['ref'] == f'{model}@2'
+    assert api.model_version(model, 3)['releases'] == []
+    for path, body in ((f'/models/{model}/versions/latest/evals', {'testset_id': snapshot['id'], 'split': 'test',
+                                                                    'files': []}),
+                       ('/releases', {'model': model, 'number': 'latest', 'deploy_repo': 'x', 'deploy_commit': 'abcdef1',
+                                      'deployed_at': '2026-10-20T10:00+08:00'})):
+        with pytest.raises(ApiError, match='具体的模型版本'):
+            (deploy if path == '/releases' else api).post(path, body)
+
+
+def test_a_deteval_report_must_be_the_test_set(api, model, snapshot, tmp_path):
+    register(api, model, snapshot, files_in(tmp_path))
+    val_report = deteval_out(tmp_path, sets=(('val', 2),))
+    with pytest.raises(ops.FwError, match='--deteval-set'):  # a val report is not a test result
+        ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=val_report, echo=quiet)
+    with pytest.raises(ops.FwError, match='评了 2 张图.*有 3 张'):
+        ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=val_report, deteval_set='val',
+                          echo=quiet)
+    with pytest.raises(ops.FwError, match='没有集合 nope'):
+        ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=val_report, deteval_set='nope',
+                          echo=quiet)
+    renamed = deteval_out(tmp_path, sets=(('TX_v2_test', 3), ('val', 2)))
+    e = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=renamed, deteval_set='TX_v2_test',
+                          echo=quiet)
+    assert e['metrics']['set'] == 'TX_v2_test' and e['metrics']['images'] == 3
+    test_pool = pool(api, tmp_path, sample_files('t', 2))  # a plain dataset version: its only set, same count
+    assert ops.register_eval(api, f'{model}@1', f'{test_pool}@1', deteval=deteval_out(tmp_path, sets=(('x', 2),)),
+                             echo=quiet)['metrics']['set'] == 'x'
+    with pytest.raises(ops.FwError, match='评了 3 张图'):
+        ops.register_eval(api, f'{model}@1', f'{test_pool}@1', deteval=deteval_out(tmp_path), echo=quiet)
+
+
+def test_a_token_in_the_repository_is_never_printed(api, model, snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(ops, 'git_info', lambda folder: {'commit': COMMIT, 'repo': '', 'dirty': False})
+    run = files_in(tmp_path)
+    lines = []
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'],
+                            code_repo='https://bot:ghp_SECRET123@git.example.com/train.git', echo=lines.append)
+    assert mv['code_repo'] == 'https://git.example.com/train.git'
+    assert lines and not any('SECRET' in line for line in lines)
+
+
+def test_two_lines_never_share_a_release_ref(api, make_api, snapshot, tmp_path):
+    name = f'M-{uuid.uuid4().hex[:8]}'
+    with pytest.raises(ApiError, match='不能有 -'):
+        api.create_model(name, 'A-B', 'C', 'det', '')
+    api.create_model(name, 'A', 'B', 'det', '')
+    register(api, name, snapshot, files_in(tmp_path))
+    for site, line in (('A-B', 'C'), ('A', 'B-C')):
+        with pytest.raises(ApiError, match='不能有 -'):
+            release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site=site, line=line)
+
+
+def test_the_chain_check_covers_the_test_sets(api, model, snapshot, tmp_path, service):
+    register(api, model, snapshot, files_in(tmp_path))
+    unique = f'only-here-{uuid.uuid4().hex}'
+    test_pool = pool(api, tmp_path, {'t/a.png': unique.encode(), 't/b.png': b'b' + unique.encode()})
+    ops.register_eval(api, f'{model}@1', f'{test_pool}@1', deteval=deteval_out(tmp_path, sets=(('t', 2),)),
+                      echo=quiet)
+    digest = sha256_file(write(tmp_path, 'x.png', unique.encode()))[0]
+    path = service.app.state.store.path(digest)
+    moved = tmp_path / 'aside'
+    path.rename(moved)
+    try:
+        c = api.chain(f'{model}@1', check=True)
+        assert c['check']['problem_count'] == 1 and f'{test_pool}@1：t/a.png' in c['check']['problems'][0]
+    finally:
+        moved.rename(path)
+
+
+def test_a_file_set_has_one_owner(sql, api, model, snapshot, tmp_path):
+    mv = register(api, model, snapshot, files_in(tmp_path))
+    row = sql.execute('SELECT fileset_id, created_by FROM model_versions WHERE id = %s', (mv['id'],)).fetchone()
+    with pytest.raises(psycopg.Error, match='belongs to a model version'):
+        with sql.transaction():
+            sql.execute("INSERT INTO eval_reports (model_version_id, testset_id, split, fileset_id, metrics, created_by) "
+                        "VALUES (%s, %s, 'test', %s, '{}', %s)",
+                        (mv['id'], snapshot['id'], row['fileset_id'], row['created_by']))
+
+
+def test_an_unreadable_folder_is_never_left_out(api, model, snapshot, tmp_path, monkeypatch):
+    run = files_in(tmp_path)
+    att = tmp_path / 'att'
+    write(att, 'ok.txt', b'ok')
+    write(att, 'locked/secret.txt', b'x')
+    real = ops.os.scandir
+
+    def scandir(path='.'):
+        if str(path).endswith('locked'):
+            raise PermissionError(13, 'Permission denied', str(path))
+        return real(path)
+
+    monkeypatch.setattr(ops.os, 'scandir', scandir)
+    with pytest.raises(ops.FwError, match='读不了目录 .*locked'):
+        ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], files=[att], code_commit=COMMIT,
+                           echo=quiet)
+    register(api, model, snapshot, run)
+    att2 = deteval_out(tmp_path)
+    write(att2, 'locked/per_image.csv', b'x')
+    with pytest.raises(ops.FwError, match='读不了目录'):  # --deteval keeps its whole folder the same way
+        ops.register_eval(api, model, f'{snapshot["ref"]}:test', deteval=att2, echo=quiet)
+
+
+def test_numbers_out_of_range(api, model, snapshot, tmp_path):
+    run = files_in(tmp_path, metrics={'recall': 0.5})
+    (run / 'val.json').write_text('{"recall": 1e309}', encoding='utf-8')
+    with pytest.raises(ops.FwError, match='inf'):
+        register(api, model, snapshot, run)
+    data = b'{"recall": 1e309}'  # straight to the server: 400, not 500
+    digest = api.put_bytes(data)
+    onnx = onnx_bytes(uuid.uuid4().hex)
+    body = {'files': [['model.onnx', api.put_bytes(onnx), len(onnx)], ['metrics.json', digest, len(data)]],
+            'trainset_id': snapshot['id'], 'code_commit': COMMIT, 'code_repo': '', 'code_dirty': False, 'note': ''}
+    with pytest.raises(ApiError, match='超出范围') as e:
+        api.register_model_version(model, body)
+    assert e.value.status == 400
+
+
+def test_creating_the_same_model_at_once(api, make_api, sql):
+    """Both requests pass the look-up and wait at the INSERT; the second gets 409, not 500."""
+    import threading
+    import time
+    name = f'M-{uuid.uuid4().hex[:8]}'
+    results = []
+    clients = [make_api('algo'), make_api('algo')]
+    with sql.transaction():
+        sql.execute('LOCK TABLE models IN SHARE ROW EXCLUSIVE MODE')
+        threads = [threading.Thread(target=lambda c=c: results.append(
+            status_of(lambda: c.create_model(name, 'SES', 'TX', 'det', ''))), daemon=True) for c in clients]
+        for t in threads:
+            t.start()
+        time.sleep(1.5)
+    for t in threads:
+        t.join(30)
+    assert sorted(results) == [200, 409]
 
 
 # --- releases ---------------------------------------------------------------------------------------------

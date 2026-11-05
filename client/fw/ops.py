@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import os
 import re
 import socket
@@ -661,8 +662,16 @@ def _read_json_object(path, what: str, undefined: Optional[list] = None) -> dict
             raise ValueError(f'有 {name}，不是标准 JSON')
         undefined.append(name)
         return None
+    def finite(v):  # 1e309 is not NaN to the parser but becomes inf
+        if isinstance(v, float) and not math.isfinite(v):
+            return constant(repr(v))
+        if isinstance(v, dict):
+            return {k: finite(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [finite(x) for x in v]
+        return v
     try:
-        doc = json.loads(Path(path).read_text(encoding='utf-8-sig'), parse_constant=constant)
+        doc = finite(json.loads(Path(path).read_text(encoding='utf-8-sig'), parse_constant=constant))
     except OSError as e:
         raise FwError(f'读不了{what} {path}（{e.strerror or e}）') from None
     except ValueError as e:
@@ -674,7 +683,11 @@ def _read_json_object(path, what: str, undefined: Optional[list] = None) -> dict
 
 def _folder_files(folder: Path, prefix: str) -> List[Tuple[str, Path]]:
     out = []
-    for root, dirs, names in os.walk(folder, followlinks=False):
+
+    def unreadable(e: OSError):  # never leave out a folder that cannot be listed
+        raise FwError(f'读不了目录 {e.filename}（{e.strerror or e}），附件不完整，没有登记')
+
+    for root, dirs, names in os.walk(folder, onerror=unreadable, followlinks=False):
         dirs.sort()
         for d in dirs:
             if os.path.islink(os.path.join(root, d)):
@@ -763,18 +776,20 @@ def register_model(api: Api, name: str, onnx, trainset, metrics=None, files: Seq
         items.append(('metrics.json', Path(metrics)))
     items += _attachments(files)
     dirty = False
-    if code_commit is None:
+    from_git = code_commit is None
+    if from_git:
         info = git_info(Path.cwd())
         if info is None:
             raise FwError('要写训练代码的提交号：加 --code-commit，或者在训练代码的 git 目录里运行')
         code_commit, dirty = info['commit'], info['dirty']
         code_repo = info['repo'] if code_repo is None else code_repo
+    code_repo = strip_credentials(code_repo or '')  # before it is shown or sent: a token is never printed
+    if from_git:
         echo(f'训练代码：{code_repo or "（没有 origin 地址）"} @ {code_commit[:12]}'
              + ('；有没提交的改动，会记在这个版本上' if dirty else ''))
     rows = _send_files(api, items, workers, echo)
     mv = api.register_model_version(name, {'files': rows, 'trainset_id': version['id'], 'code_commit': code_commit,
-                                           'code_repo': strip_credentials(code_repo or ''), 'code_dirty': dirty,
-                                           'note': note})
+                                           'code_repo': code_repo, 'code_dirty': dirty, 'note': note})
     if mv['existing']:
         echo(f'{mv["ref"]} 已经登记过（同一个 ONNX、快照、代码和文件），没有重复登记')
     else:
@@ -811,48 +826,97 @@ def _testset(api: Api, testset: str) -> Tuple[dict, str]:
     return version, split
 
 
+DETEVAL_META = ('weights', 'framework', 'iomin', 'agnostic', 'thresholds', 'reached')  # summary.json, per model
+
+
+def _pin(api: Api, model_ref: str) -> dict:
+    """The model version a reference names now (SES-TX-detr -> SES-TX-detr@3): registrations send its number,
+    so a retry can never land on a version registered meanwhile."""
+    name, number = parse_model_ref(model_ref)
+    return api.model_version(name, number)
+
+
+def _image_count(api: Api, version: dict, split: str) -> int:
+    """How many images the test set has: under images/<split>/ of a snapshot, else every image of the version."""
+    entries = parse_manifest(api.read_object(version['manifest_sha256']))
+    top = f'images/{split}/' if split else ''
+    return sum(1 for path, _, _ in entries if path.startswith(top) and Path(path).suffix.lower() in IMAGE_EXTS)
+
+
+def _deteval_metrics(api: Api, folder: Path, model: Optional[str], set_name: Optional[str], version: dict,
+                     split: str, echo: Echo) -> Tuple[dict, str, str]:
+    """(metrics, model, set) from an aoi-deteval output folder: the set of the report that IS this test set.
+    It must be named (the split's name, or set_name) and must have evaluated as many images as the test set
+    has, or nothing is registered: a val report must never become a test result."""
+    undefined: List[str] = []
+    summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果', undefined)
+    names = sorted(summary)
+    if model is None:
+        if len(names) != 1:
+            raise FwError(f'{folder / "summary.json"} 里有 {len(names)} 个模型（{"、".join(names)}），'
+                          '用 --deteval-model 指定是哪一个')
+        model = names[0]
+    if not isinstance(summary.get(model), dict):
+        raise FwError(f'{folder / "summary.json"} 里没有模型 {model}（有 {"、".join(names)}）')
+    result = summary[model]
+    sets = sorted(k for k, v in result.items() if k not in DETEVAL_META and isinstance(v, dict) and 'images' in v)
+    if set_name is None:
+        if split and split in sets:
+            set_name = split
+        elif not split and len(sets) == 1:
+            set_name = sets[0]
+        else:
+            raise FwError(f'aoi-deteval 的结果里评了 {"、".join(sets) or "（没有）"}，不知道哪个是 '
+                          f'{version["ref"]}{":" + split if split else ""}；用 --deteval-set 指明')
+    if set_name not in sets:
+        raise FwError(f'aoi-deteval 的结果里没有集合 {set_name}（有 {"、".join(sets) or "（没有）"}）')
+    row = result[set_name]
+    want = _image_count(api, version, split)
+    if row['images'] != want:
+        raise FwError(f'aoi-deteval 的 {set_name} 评了 {row["images"]} 张图，'
+                      f'{version["ref"]}{":" + split if split else ""} 有 {want} 张：评的不是这个测试集，没有登记')
+    if undefined:  # e.g. a class with no ground truth in this test set: its AP is not defined
+        echo(f'  summary.json 里有 {len(undefined)} 项没有定义的指标（NaN），登记为 null；原文件照样保存在 files/')
+    metrics = {k: result[k] for k in DETEVAL_META if k in result}
+    metrics.update(row)
+    return metrics, model, set_name
+
+
 def register_eval(api: Api, model_ref: str, testset: str, metrics=None, deteval=None,
-                  deteval_model: Optional[str] = None, files: Sequence = (), tool: Optional[str] = None,
-                  tool_version: Optional[str] = None, note: str = '', workers: int = 8, echo: Echo = print) -> dict:
+                  deteval_model: Optional[str] = None, deteval_set: Optional[str] = None, files: Sequence = (),
+                  tool: Optional[str] = None, tool_version: Optional[str] = None, note: str = '', workers: int = 8,
+                  echo: Echo = print) -> dict:
     """Register an evaluation of a model version on a test set (a dataset version, or a split of a snapshot
     such as SES-TX-det@2:test). Either metrics (any JSON object) or deteval (an aoi-deteval evaluate output
-    folder: its summary.json gives the metrics of deteval_model, the whole folder is kept)."""
-    name, number = parse_model_ref(model_ref)
+    folder: the metrics are its result for deteval_model on the set that is this test set, see
+    _deteval_metrics; the whole folder is kept)."""
     if (metrics is None) == (deteval is None):
         raise FwError('--metrics 和 --deteval 要写一个，只写一个')
+    mv = _pin(api, model_ref)
     version, split = _testset(api, testset)
     items: List[Tuple[str, Path]] = []
     rows: List[list] = []
     if deteval is not None:
         folder = Path(deteval)
-        undefined: List[str] = []
-        summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果', undefined)
-        names = sorted(summary)
-        if deteval_model is None:
-            if len(names) != 1:
-                raise FwError(f'{folder / "summary.json"} 里有 {len(names)} 个模型（{"、".join(names)}），'
-                              '用 --deteval-model 指定是哪一个')
-            deteval_model = names[0]
-        if not isinstance(summary.get(deteval_model), dict):
-            raise FwError(f'{folder / "summary.json"} 里没有模型 {deteval_model}（有 {"、".join(names)}）')
-        data = json.dumps(summary[deteval_model], ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
-        if undefined:  # e.g. a class with no ground truth in this test set: its AP is not defined
-            echo(f'  summary.json 里有 {len(undefined)} 项没有定义的指标（NaN），登记为 null；原文件照样保存在 files/')
+        doc, deteval_model, deteval_set = _deteval_metrics(api, folder, deteval_model, deteval_set, version, split,
+                                                           echo)
+        data = json.dumps(doc, ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
         rows.append(['metrics.json', api.put_bytes(data), len(data)])
         items += _folder_files(folder, 'files/')
         if tool is None:
             tool = 'aoi-deteval'
         if tool_version is None and (folder / 'run_info.json').is_file():
-            tool_version = str(_read_json_object(folder / 'run_info.json', 'aoi-deteval 的 run_info').get(
+            tool_version = str(_read_json_object(folder / 'run_info.json', 'aoi-deteval 的 run_info', []).get(
                 'deteval_version', ''))
-        note = '；'.join(t for t in (note, f'aoi-deteval 结果里的模型名：{deteval_model}') if t)
+        note = '；'.join(t for t in (note, f'aoi-deteval 结果里的模型 {deteval_model}、集合 {deteval_set}') if t)
     else:
         _read_json_object(metrics, '指标文件')
         items.append(('metrics.json', Path(metrics)))
     items += _attachments(files)
     rows += _send_files(api, items, workers, echo) if items else []
-    e = api.register_eval(name, number, {'testset_id': version['id'], 'split': split, 'files': rows,
-                                         'tool': tool or '', 'tool_version': tool_version or '', 'note': note})
+    e = api.register_eval(mv['model'], mv['number'], {
+        'testset_id': version['id'], 'split': split, 'files': rows, 'tool': tool or '',
+        'tool_version': tool_version or '', 'note': note})
     if e['existing']:
         echo(f'评估报告 #{e["id"]} 已经登记过（同一个模型版本、测试集和文件），没有重复登记')
     else:
@@ -881,9 +945,9 @@ def register_release(api: Api, model_ref: str, deploy_repo: str, deploy_commit: 
                      echo: Echo = print) -> dict:
     """Register that a model version was deployed to a production line. The engine the site built from the
     ONNX stays there; with engine_file only its hash and size are recorded."""
-    name, number = parse_model_ref(model_ref)
+    mv = _pin(api, model_ref)
     when = parse_time(deployed_at)
-    body = {'model': name, 'number': number, 'site': site, 'line': line, 'deploy_repo': strip_credentials(deploy_repo),
+    body = {'model': mv['model'], 'number': str(mv['number']), 'site': site, 'line': line, 'deploy_repo': strip_credentials(deploy_repo),
             'deploy_commit': deploy_commit, 'deployed_at': when.isoformat(timespec='seconds'), 'gpu': gpu,
             'trt_version': trt_version, 'precision': precision, 'note': note}
     if engine_file is not None:

@@ -109,8 +109,8 @@ CREATE TRIGGER fileset_files_delete AFTER DELETE ON fileset_files
 CREATE TABLE models (
   id          bigserial PRIMARY KEY,
   name        text NOT NULL CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  site        text NOT NULL CHECK (site <> ''),
-  line        text NOT NULL CHECK (line <> ''),
+  site        text NOT NULL CHECK (site <> '' AND site !~ '-'),  -- no '-': release refs are <site>-<line>-r<n>
+  line        text NOT NULL CHECK (line <> '' AND line !~ '-'),
   task        text NOT NULL CHECK (task IN ('det')),
   note        text NOT NULL DEFAULT '',
   created_by  bigint NOT NULL REFERENCES users(id),
@@ -147,6 +147,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM filesets s JOIN fileset_files f ON f.fileset_id = s.id
                  WHERE s.id = NEW.fileset_id AND s.frozen AND f.path = 'model.onnx' AND f.sha256 = NEW.onnx_sha256) THEN
     RAISE EXCEPTION 'model version: its file set must be frozen and hold model.onnx with the recorded hash';
+  END IF;
+  IF EXISTS (SELECT 1 FROM eval_reports WHERE fileset_id = NEW.fileset_id) THEN
+    RAISE EXCEPTION 'model version: file set % belongs to an evaluation report', NEW.fileset_id;
   END IF;
   RETURN NEW;
 END $$;
@@ -196,6 +199,9 @@ BEGIN
                  WHERE s.id = NEW.fileset_id AND s.frozen AND f.path = 'metrics.json') THEN
     RAISE EXCEPTION 'evaluation report: its file set must be frozen and hold metrics.json';
   END IF;
+  IF EXISTS (SELECT 1 FROM model_versions WHERE fileset_id = NEW.fileset_id) THEN
+    RAISE EXCEPTION 'evaluation report: file set % belongs to a model version', NEW.fileset_id;
+  END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER eval_reports_check BEFORE INSERT ON eval_reports
@@ -208,8 +214,8 @@ CREATE TRIGGER eval_reports_check BEFORE INSERT ON eval_reports
 -- late with an earlier deployed_at never displaces the one actually deployed after it.
 CREATE TABLE releases (
   id                bigserial PRIMARY KEY,
-  site              text NOT NULL CHECK (site <> ''),
-  line              text NOT NULL CHECK (line <> ''),
+  site              text NOT NULL CHECK (site <> '' AND site !~ '-'),  -- so that a ref names one line
+  line              text NOT NULL CHECK (line <> '' AND line !~ '-'),
   number            int NOT NULL CHECK (number > 0),
   model_version_id  bigint NOT NULL REFERENCES model_versions(id),
   deploy_repo       text NOT NULL CHECK (deploy_repo <> '' AND deploy_repo !~* '^https?://[^/]*@'),
