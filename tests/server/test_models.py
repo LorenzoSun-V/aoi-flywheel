@@ -346,15 +346,40 @@ def test_a_token_in_the_repository_is_never_printed(api, model, snapshot, tmp_pa
 
 def test_two_lines_never_share_a_release_ref(api, make_api, snapshot, tmp_path):
     name = f'M-{uuid.uuid4().hex[:8]}'
-    with pytest.raises(ApiError, match='不能有 -'):
+    with pytest.raises(ApiError, match='只能用英文字母'):
         api.create_model(name, 'A-B', 'C', 'det', '')
     api.create_model(name, 'A', 'B', 'det', '')
     register(api, name, snapshot, files_in(tmp_path))
-    for site, line in (('A-B', 'C'), ('A', 'B-C'), ('SES/A', 'TX'), ('SES', 'T X'), ('S%2F', 'TX'), ('S?', 'TX')):
-        with pytest.raises(ApiError, match='只能用字母、数字'):
+    for site, line in (('A-B', 'C'), ('A', 'B-C'), ('SES/A', 'TX'), ('SES', 'T X'), ('S%2F', 'TX'), ('S?', 'TX'),
+                       ('SES@A', 'TX'), ('现场1', 'TX')):
+        with pytest.raises(ApiError, match='只能用英文字母、数字'):
             release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site=site, line=line)
-    r = release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site='现场1', line='L_2.a')
-    assert api.release(r['ref'])['ref'] == r['ref'] == '现场1-L_2.a-r1'
+    r = release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site='S1', line='L_2.a')
+    assert api.release(r['ref'])['ref'] == r['ref'] == 'S1-L_2.a-r1'
+    assert api.chain(r['ref'])['release']['ref'] == r['ref']
+
+
+@pytest.mark.parametrize('value', ['SES', 'L_2.a', 'SES@A', 'A-B', 'a/b', ' a', 'a\tb', '现场', 'x%2F', 'a#b', ''])
+def test_the_database_takes_the_names_the_server_takes(sql, api, model, snapshot, tmp_path, value):
+    """Re-review 14:05: one rule for sites and lines, in models.SITE_LINE and in the CHECKs of 0003."""
+    mv = api.model_version(model, 1) if api.model_versions(model) else register(api, model, snapshot, files_in(tmp_path))
+    user = sql.execute('SELECT created_by FROM model_versions WHERE id = %s', (mv['id'],)).fetchone()['created_by']
+    server_takes = bool(models.SITE_LINE.match(value))
+    for statement in ("INSERT INTO releases (site, line, number, model_version_id, deploy_repo, deploy_commit, "
+                      "deployed_at, created_by) VALUES (%(v)s, 'TX', 1, %(mv)s, 'x', 'abcdef1', now(), %(u)s)",
+                      "INSERT INTO releases (site, line, number, model_version_id, deploy_repo, deploy_commit, "
+                      "deployed_at, created_by) VALUES ('SES', %(v)s, 1, %(mv)s, 'x', 'abcdef1', now(), %(u)s)",
+                      "INSERT INTO models (name, site, line, task, created_by) VALUES ('db-' || md5(random()::text), "
+                      "%(v)s, 'TX', 'det', %(u)s)"):
+        try:
+            with sql.transaction():
+                sql.execute(statement, {'v': value, 'mv': mv['id'], 'u': user})
+                raise RuntimeError('roll back')
+        except RuntimeError:
+            database_takes = True
+        except psycopg.Error:
+            database_takes = False
+        assert database_takes == server_takes, (statement, value)
 
 
 def test_the_chain_check_covers_the_test_sets(api, model, snapshot, tmp_path, service):
@@ -374,26 +399,37 @@ def test_the_chain_check_covers_the_test_sets(api, model, snapshot, tmp_path, se
         moved.rename(path)
 
 
-def test_a_report_rewritten_while_it_is_registered(api, model, snapshot, tmp_path, monkeypatch):
-    """summary.json is replaced (same image count) after the metrics were read and before the folder is
-    archived: nothing is registered, so the metrics never disagree with the archived report."""
+@pytest.mark.parametrize('change', ['rewrite', 'delete', 'appear'])
+def test_a_report_changed_while_it_is_registered(api, cache, model, snapshot, tmp_path, monkeypatch, change):
+    """The report folder changes after the metrics were read (summary.json rewritten or deleted, run_info.json
+    appearing late): the metrics and the archive still come from one copy of the folder, taken first."""
     register(api, model, snapshot, files_in(tmp_path))
     out = deteval_out(tmp_path)
+    if change == 'appear':
+        (out / 'run_info.json').unlink()
     real = ops._send_files
 
-    def rewrite_first(api_, items, workers, echo):
-        doc = json.loads((out / 'summary.json').read_text(encoding='utf-8'))
-        doc['model_s0']['test']['mAP50'] = 0.95
-        (out / 'summary.json').write_text(json.dumps(doc), encoding='utf-8')
+    def meanwhile(api_, items, workers, echo):
+        if change == 'rewrite':
+            doc = json.loads((out / 'summary.json').read_text(encoding='utf-8'))
+            doc['model_s0']['test']['mAP50'] = 0.95
+            (out / 'summary.json').write_text(json.dumps(doc), encoding='utf-8')
+        elif change == 'delete':
+            (out / 'summary.json').unlink()
+        else:
+            write(out, 'run_info.json', json.dumps({'deteval_version': '9.9'}).encode())
         return real(api_, items, workers, echo)
 
-    monkeypatch.setattr(ops, '_send_files', rewrite_first)
-    with pytest.raises(ops.FwError, match='登记途中被改了'):
-        ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=out, echo=quiet)
-    assert api.model_version(model, 1)['evals'] == []
-    monkeypatch.setattr(ops, '_send_files', real)
+    monkeypatch.setattr(ops, '_send_files', meanwhile)
     e = ops.register_eval(api, f'{model}@1', f'{snapshot["ref"]}:test', deteval=out, echo=quiet)
-    assert e['metrics']['mAP50'] == 0.95
+    assert e['metrics']['mAP50'] == 0.7
+    archived = {f['path']: f for f in api.eval(e['id'])['files']}
+    summary = json.loads(api.read_object(archived['files/summary.json']['sha256']))
+    assert summary['model_s0']['test']['mAP50'] == 0.7
+    if change == 'appear':  # not there when the copy was taken: neither archived nor used for the version
+        assert 'files/run_info.json' not in archived and e['tool_version'] == ''
+    else:
+        assert 'files/run_info.json' in archived and e['tool_version'] == '0.2.0'
 
 
 def test_a_file_set_has_one_owner(sql, api, model, snapshot, tmp_path):
