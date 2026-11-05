@@ -228,9 +228,11 @@ def diff(conn, old_id: int, new_id: int) -> dict:
 
 
 def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=print) -> List[str]:
-    """Check that every version can be laid out exactly as frozen. Returns the problems left.
+    """Check that every version, model version and evaluation report can be laid out exactly as frozen.
+    Returns the problems left.
 
-    - each version's rows rebuild its manifest hash, and the manifest object is in the store and intact;
+    - each version's (and file set's) rows rebuild its manifest hash, and the manifest object is in the store
+      and intact;
     - every referenced object is in the store with the right size, and with rehash, the right content;
     - with rehash, also every object no version uses yet (left by an import that failed or is still
       running): the next import of the same files reuses whatever the store holds, so a damaged one is
@@ -252,13 +254,30 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
     for v in versions:
         if v['m'] != v['rebuilt']:
             problems.append(f'{v["ref"]}：清单项和登记的清单哈希对不上')
+    # the file sets of model versions and evaluation reports (0003) are checked the same way
+    filesets = conn.execute(
+        "SELECT s.id, encode(s.manifest_sha256, 'hex') AS m, encode(fileset_manifest_sha256(s.id), 'hex') AS rebuilt, "
+        "coalesce((SELECT m.name || '@' || mv.number FROM model_versions mv JOIN models m ON m.id = mv.model_id "
+        "          WHERE mv.fileset_id = s.id), "
+        "         (SELECT '评估 #' || e.id FROM eval_reports e WHERE e.fileset_id = s.id)) AS ref "
+        'FROM filesets s ORDER BY s.id').fetchall()
+    for s in filesets:
+        if s['m'] != s['rebuilt']:
+            problems.append(f'{s["ref"]}：文件清单和登记的清单哈希对不上')
     wanted = {v['m']: (None, v['ref']) for v in versions}  # digest -> (size if known, a version using it)
+    for s in filesets:
+        wanted.setdefault(s['m'], (None, s['ref']))
     rows = conn.execute(
         "SELECT encode(f.sha256, 'hex') AS d, f.size, min(d.name || '@' || v.number) AS ref "
         'FROM version_files f JOIN versions v ON v.id = f.version_id JOIN datasets d ON d.id = v.dataset_id '
         'GROUP BY f.sha256, f.size').fetchall()
     for r in rows:
         wanted[r['d']] = (r['size'], r['ref'])
+    fileset_ref = {s['id']: s['ref'] for s in filesets}
+    for r in conn.execute("SELECT encode(sha256, 'hex') AS d, size, min(fileset_id) AS fid FROM fileset_files "
+                          'GROUP BY sha256, size').fetchall():
+        if wanted.get(r['d'], (None,))[0] is None:
+            wanted[r['d']] = (r['size'], fileset_ref[r['fid']])
     checked = repaired = 0
     for digest, (size, ref) in sorted(wanted.items()):
         checked += 1
@@ -301,7 +320,8 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
             problems.append(str(e))
     if repaired or loose_damaged:
         store.sync()  # a repair (or a damaged file moved aside) counts only once it is on the disk
-    echo(f'核对了 {len(versions)} 个版本、{checked} 个文件{"（重算了哈希）" if rehash else ""}；'
+    echo(f'核对了 {len(versions)} 个版本、{len(filesets)} 个模型版本和评估报告、{checked} 个文件'
+         f'{"（重算了哈希）" if rehash else ""}；'
          f'从备份修复 {repaired} 个；问题 {len(problems)} 个')
     if rehash:
         echo(f'另外核对了还没有版本用到的文件 {loose} 个（中断的导入留下的）；'

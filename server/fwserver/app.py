@@ -15,13 +15,16 @@ from starlette.concurrency import run_in_threadpool
 from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
                          frame_header)
 
-from . import __version__, auth, datasets, db, trainsets
+from . import __version__, auth, datasets, db, models, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
 
 log = logging.getLogger('fwserver')
-DATA_ROLES = ('admin', 'algo')  # step 1: only these roles see or change datasets (design doc, roles table)
+DATA_ROLES = ('admin', 'algo')  # only these roles see or change datasets (design doc, roles table)
+MODEL_READERS = ('admin', 'algo', 'deploy')  # see models, evaluations, releases and the trace chain
+MODEL_WRITERS = ('admin', 'algo')            # register models, model versions, evaluations; set tags
+RELEASE_WRITERS = ('admin', 'deploy')        # register releases
 MISSING_LIMIT = 20000
 BUFFER = 1 << 20
 BATCH_BODY_MAX = 512 << 20   # one batch upload request
@@ -77,6 +80,57 @@ class TrainsetBody(BaseModel):
     def options(self) -> trainsets.Options:
         return trainsets.Options(self.sources, self.classes, self.val, self.seed, self.test_dirs, self.merge_test,
                                  self.new_to, self.split, self.fresh, self.note)
+
+
+class ModelBody(BaseModel):
+    name: str
+    site: str
+    line: str
+    task: str = 'det'
+    note: str = ''
+
+
+FileRow = Tuple[str, str, int]  # (path, sha256, size)
+
+
+class ModelVersionBody(BaseModel):
+    files: List[FileRow] = Field(max_length=models.MAX_FILES)
+    trainset_id: int
+    code_commit: str
+    code_repo: str = ''
+    code_dirty: bool = False
+    note: str = ''
+
+
+class TagBody(BaseModel):
+    tag: str
+    added: bool = True
+    note: str = ''
+
+
+class EvalBody(BaseModel):
+    testset_id: int
+    split: str = ''
+    files: List[FileRow] = Field(max_length=models.MAX_FILES)
+    tool: str = ''
+    tool_version: str = ''
+    note: str = ''
+
+
+class ReleaseBody(BaseModel):
+    model: str            # model name
+    number: str           # its version number
+    site: str = ''        # default: the model's
+    line: str = ''
+    deploy_repo: str
+    deploy_commit: str
+    deployed_at: str      # ISO 8601 with a time zone
+    gpu: str = ''
+    trt_version: str = ''
+    precision: str = ''
+    engine_sha256: Optional[str] = None  # the engine the site built from the ONNX (the file stays there)
+    engine_size: Optional[int] = None
+    note: str = ''
 
 
 def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None) -> FastAPI:
@@ -139,6 +193,32 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         if user['role'] not in DATA_ROLES:
             raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看或修改数据集')
         return user
+
+    def model_reader(user: dict = Depends(current_user)) -> dict:
+        if user['role'] not in MODEL_READERS:
+            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看模型、评估和发布')
+        return user
+
+    def model_writer(user: dict = Depends(current_user)) -> dict:
+        if user['role'] not in MODEL_WRITERS:
+            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能登记模型和评估')
+        return user
+
+    def release_writer(user: dict = Depends(current_user)) -> dict:
+        if user['role'] not in RELEASE_WRITERS:
+            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能登记发布；发布由部署账号在部署成功后登记')
+        return user
+
+    def may_download(user: dict, digests: List[str]) -> None:
+        """Datasets roles download anything; the deploy role only the files of model versions."""
+        if user['role'] in DATA_ROLES:
+            return
+        if user['role'] == 'deploy':
+            with conn() as c:
+                if models.model_objects_only(c, digests):
+                    return
+            raise HTTPException(403, '部署账号只能下载模型版本的文件')
+        raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能下载文件')
 
     # --- service --------------------------------------------------------------------------------
     @app.get('/api/v1/health')
@@ -238,9 +318,10 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return {'stored': stored, 'created': created}
 
     @app.post('/api/v1/objects/fetch')
-    def fetch_objects(body: FetchBody, user: dict = Depends(data_user)):
+    def fetch_objects(body: FetchBody, user: dict = Depends(current_user)):
         """Many small objects in one streamed fw-objects body, in the order asked for."""
         digests = [check_digest(d) for d in body.objects]
+        may_download(user, digests)
         sizes = [store.size(d) for d in digests]
         missing = [d for d, s in zip(digests, sizes) if s is None]
         if missing:
@@ -270,8 +351,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return StreamingResponse(stream(), media_type=OBJECTS_TYPE, headers={'Content-Length': str(length)})
 
     @app.get('/api/v1/objects/{digest}')
-    def get_object(digest: str, user: dict = Depends(data_user)):
-        path = store.path(check_digest(digest))
+    def get_object(digest: str, user: dict = Depends(current_user)):
+        may_download(user, [check_digest(digest)])
+        path = store.path(digest)
         if not path.is_file():
             raise HTTPException(404, f'服务器上没有文件 {digest[:12]}')
         return FileResponse(path, media_type='application/octet-stream',
@@ -344,6 +426,98 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def get_trainset(name: str, number: str, user: dict = Depends(data_user)):
         with conn() as c:
             return trainsets.get(c, name, number)
+
+    # --- models, evaluations, releases -------------------------------------------------------------
+    @app.get('/api/v1/models')
+    def list_models(user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.list_models(c)
+
+    @app.post('/api/v1/models', status_code=201)
+    def create_model(body: ModelBody, user: dict = Depends(model_writer)):
+        with conn() as c:
+            m = models.create_model(c, user['user_id'], body.name, body.site, body.line, body.task, body.note)
+        log.info('model %s created by %s', m['name'], user['name'])
+        return m
+
+    @app.get('/api/v1/models/{name}')
+    def get_model(name: str, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.get_model(c, name)
+
+    @app.get('/api/v1/models/{name}/versions')
+    def list_model_versions(name: str, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.list_model_versions(c, name)
+
+    @app.post('/api/v1/models/{name}/versions', status_code=201)
+    def register_model_version(name: str, body: ModelVersionBody, user: dict = Depends(model_writer)):
+        with conn() as c:
+            mv = models.register_model_version(c, store, user['user_id'], name, body.files, body.trainset_id,
+                                               body.code_repo, body.code_commit, body.code_dirty, body.note)
+        if not mv['existing']:
+            log.info('model version %s registered by %s: onnx %s', mv['ref'], user['name'], mv['onnx_sha256'][:12])
+        return mv
+
+    @app.get('/api/v1/models/{name}/versions/{number}')
+    def get_model_version(name: str, number: str, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.model_version_detail(c, name, number)
+
+    @app.post('/api/v1/models/{name}/versions/{number}/tags')
+    def set_tag(name: str, number: str, body: TagBody, user: dict = Depends(model_writer)):
+        with conn() as c:
+            return models.set_tag(c, user['user_id'], name, number, body.tag, body.added, body.note)
+
+    @app.post('/api/v1/models/{name}/versions/{number}/evals', status_code=201)
+    def register_eval(name: str, number: str, body: EvalBody, user: dict = Depends(model_writer)):
+        with conn() as c:
+            e = models.register_eval(c, store, user['user_id'], name, number, body.testset_id, body.split,
+                                     body.files, body.tool, body.tool_version, body.note)
+        if not e['existing']:
+            log.info('evaluation #%s of %s registered by %s', e['id'], e['model_version']['ref'], user['name'])
+        return e
+
+    @app.get('/api/v1/evals')
+    def list_evals(model: str = '', user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.list_evals(c, model=model or None)
+
+    @app.get('/api/v1/evals/{eval_id}')
+    def get_eval(eval_id: int, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.get_eval(c, eval_id)
+
+    @app.get('/api/v1/releases')
+    def list_releases(site: str = '', line: str = '', user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.list_releases(c, site, line)
+
+    @app.post('/api/v1/releases', status_code=201)
+    def register_release(body: ReleaseBody, user: dict = Depends(release_writer)):
+        with conn() as c:
+            r = models.register_release(c, user['user_id'], body.model, body.number, body.site, body.line,
+                                        body.deploy_repo, body.deploy_commit, body.deployed_at, body.gpu,
+                                        body.trt_version, body.precision, body.engine_sha256, body.engine_size,
+                                        body.note)
+        if not r['existing']:
+            log.info('release %s (%s) registered by %s', r['ref'], r['model_version']['ref'], user['name'])
+        return r
+
+    @app.get('/api/v1/releases/current')
+    def current_release(site: str, line: str, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.current_release(c, site, line)
+
+    @app.get('/api/v1/releases/{ref}')
+    def get_release(ref: str, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.get_release(c, ref)
+
+    @app.get('/api/v1/chain')
+    def chain(ref: str, check: bool = False, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.chain(c, store, ref, check)
 
     @app.get('/api/v1/diff')
     def diff(old: int, new: int, user: dict = Depends(data_user)):

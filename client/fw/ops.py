@@ -4,20 +4,22 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
 import threading
 import time
 import unicodedata
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import config
 from .api import Api
 from .cache import Cache, remove_file
 from .checks import IMAGE_EXTS, scan_folder
-from .contract import (BATCH_OBJECT_MAX, TRAINSET_FORMATS, Entry, batches, diff_entries, manifest_bytes, manifest_hash,
-                       parse_manifest, sha256_file, trainset_layout)
+from .contract import (BATCH_OBJECT_MAX, TRAINSET_FORMATS, Entry, batches, collisions, diff_entries, manifest_bytes,
+                       manifest_hash, parse_manifest, path_problem, sha256_file, trainset_layout)
 from .layout import Layout
 from .pool import run_all
 
@@ -266,39 +268,16 @@ def _empty_dest(dest: Path) -> None:
         raise FwError(f'{dest} 已存在且不是空目录')
 
 
-def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Optional[str] = None,
-        workers: int = 8, echo: Echo = print, fmt: Optional[str] = None) -> dict:
-    """Lay out one version in an empty folder, downloading only what the local cache lacks.
-
-    link: 'auto' (reflink where the file system can, else copy), 'copy', or 'hardlink' (read-only files
-    shared with the cache; only when asked for). Every placed file is hashed and must match the manifest;
-    on a mismatch the cache object is downloaded again, and a second mismatch is an error.
-    fmt: for a training-set snapshot, the layout (yolo by default, coco, json or all; see trainset_layout).
-    """
+def _check_link(link: str) -> None:
     if link == 'hardlink' and os.name == 'nt':
         raise FwError('Windows 上不能用 --hardlink：Windows 的只读属性由一个文件的所有硬链接共用，'
                       '清缓存时取出的文件会一起变成可写；用默认方式或 --copy')
-    if fmt is not None and fmt not in TRAINSET_FORMATS:
-        raise FwError(f'--format 只能是 {"、".join(TRAINSET_FORMATS)}')
-    name, number = parse_ref(ref)
-    version = api.version(name, number)
-    entries = parse_manifest(api.read_object(version['manifest_sha256']))
-    if version.get('kind') == 'trainset':
-        fmt = fmt or 'yolo'
-        if fmt != 'all':
-            held = api.trainset(name, version['number'])['trainset']['formats']
-            if fmt not in held:
-                raise FwError(f'{version["ref"]} 里没有 {fmt} 格式（有 {"、".join(held)}）；'
-                              f'为什么没有，见建快照时的提示或 trainset.json 的 missing_formats')
-        entries = trainset_layout(entries, fmt)
-    elif fmt not in (None, 'all'):
-        raise FwError(f'{version["ref"]} 不是训练集快照，--format 只用于训练集快照')
-    if subpath:
-        sp = subpath.strip('/')
-        entries = [e for e in entries if e[0] == sp or e[0].startswith(sp + '/')]
-        if not entries:
-            raise FwError(f'{version["ref"]} 里没有 {sp}')
-    dest = Path(dest)
+
+
+def _lay_out(api: Api, cache: Cache, label: str, entries: List[Entry], dest: Path, link: str, workers: int,
+             echo: Echo) -> None:
+    """Lay these files out in `dest` (empty or missing), downloading only what the cache lacks; each placed
+    file is hashed and must match its entry (see get)."""
     _empty_dest(dest)
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -344,12 +323,46 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
 
     _parallel(place, entries, _file_workers([size for _, _, size in entries], workers), '摆放并核对')
     t2 = time.perf_counter()
-    echo(f'{version["ref"]} 已放到 {dest}：{len(entries)} 个文件，每个都按清单核对过；'
+    echo(f'{label} 已放到 {dest}：{len(entries)} 个文件，每个都按清单核对过；'
          f'缓存命中 {len(cached - refetched)} 个，下载 {cache.downloaded_files - before} 个，'
          f'方式：{layout.describe()}；'
          f'用时 下载 {t1 - t0:.1f} 秒，摆放和核对 {t2 - t1:.1f} 秒')
     if refetched:
         echo(f'  本机缓存里有 {len(refetched)} 个文件和哈希对不上，已重新下载')
+
+
+def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Optional[str] = None,
+        workers: int = 8, echo: Echo = print, fmt: Optional[str] = None) -> dict:
+    """Lay out one version in an empty folder, downloading only what the local cache lacks.
+
+    link: 'auto' (reflink where the file system can, else copy), 'copy', or 'hardlink' (read-only files
+    shared with the cache; only when asked for). Every placed file is hashed and must match the manifest;
+    on a mismatch the cache object is downloaded again, and a second mismatch is an error.
+    fmt: for a training-set snapshot, the layout (yolo by default, coco, json or all; see trainset_layout).
+    """
+    _check_link(link)
+    if fmt is not None and fmt not in TRAINSET_FORMATS:
+        raise FwError(f'--format 只能是 {"、".join(TRAINSET_FORMATS)}')
+    name, number = parse_ref(ref)
+    version = api.version(name, number)
+    entries = parse_manifest(api.read_object(version['manifest_sha256']))
+    if version.get('kind') == 'trainset':
+        fmt = fmt or 'yolo'
+        if fmt != 'all':
+            held = api.trainset(name, version['number'])['trainset']['formats']
+            if fmt not in held:
+                raise FwError(f'{version["ref"]} 里没有 {fmt} 格式（有 {"、".join(held)}）；'
+                              f'为什么没有，见建快照时的提示或 trainset.json 的 missing_formats')
+        entries = trainset_layout(entries, fmt)
+    elif fmt not in (None, 'all'):
+        raise FwError(f'{version["ref"]} 不是训练集快照，--format 只用于训练集快照')
+    if subpath:
+        sp = subpath.strip('/')
+        entries = [e for e in entries if e[0] == sp or e[0].startswith(sp + '/')]
+        if not entries:
+            raise FwError(f'{version["ref"]} 里没有 {sp}')
+    dest = Path(dest)
+    _lay_out(api, cache, version['ref'], entries, dest, link, workers, echo)
     out = dict(version, path=str(dest), files=len(entries))
     if version.get('kind') == 'trainset':
         out['format'] = fmt
@@ -587,3 +600,392 @@ def get_trainset(ref: str, dest, fmt: str = 'yolo', link: str = 'auto') -> dict:
     ts = info['trainset']
     return dict(version, task=ts['task'], classes=ts['classes'], counts=ts['counts'], sources=ts['sources'],
                 based_on=ts['based_on'], rule=ts['rule'], formats=ts['formats'])
+
+
+# --- models, evaluations, releases -----------------------------------------------------------------------
+TAG_NAMES = {'candidate': '候选', 'deprecated': '弃用'}
+MODEL_INFO = 'fw-model.json'  # written by get_model next to the files; not part of the model version
+
+
+def parse_model_ref(ref: str) -> Tuple[str, str]:
+    """'SES-TX-detr' -> latest version, 'SES-TX-detr@3' -> version 3."""
+    name, _, number = (ref or '').partition('@')
+    number = number or 'latest'
+    if not name or not (number == 'latest' or number.isdigit()):
+        raise FwError(f'模型版本写成 模型名@序号，例如 SES-TX-detr@3（不写 @序号 就是最新版）：{ref}')
+    return name, number
+
+
+def strip_credentials(url: str) -> str:
+    """https://user:token@host/x -> https://host/x: a token in a repository URL must never be recorded."""
+    m = re.match(r'(https?://)[^/]*@(.*)\Z', url or '', re.I | re.S)
+    return m.group(1) + m.group(2) if m else (url or '')
+
+
+def _git(folder, *args) -> Optional[str]:
+    try:
+        r = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def git_info(folder) -> Optional[dict]:
+    """The commit checked out in `folder`, its origin URL (without credentials) and whether tracked files
+    have changes not committed; None when it is not a git working copy (or git is not installed)."""
+    commit = _git(folder, 'rev-parse', 'HEAD')
+    if not commit:
+        return None
+    status = _git(folder, 'status', '--porcelain', '--untracked-files=no')
+    return {'commit': commit.lower(), 'repo': strip_credentials(_git(folder, 'config', '--get', 'remote.origin.url')
+                                                                or ''),
+            'dirty': bool(status)}
+
+
+def _read_json_object(path, what: str) -> dict:
+    try:
+        doc = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+    except OSError as e:
+        raise FwError(f'读不了{what} {path}（{e.strerror or e}）') from None
+    except ValueError as e:
+        raise FwError(f'{what} {path} 不是合法的 UTF-8 JSON（{e}）') from None
+    if not isinstance(doc, dict):
+        raise FwError(f'{what} {path} 应该是一个 JSON 对象（{{…}}）')
+    return doc
+
+
+def _folder_files(folder: Path, prefix: str) -> List[Tuple[str, Path]]:
+    out = []
+    for root, dirs, names in os.walk(folder, followlinks=False):
+        dirs.sort()
+        for d in dirs:
+            if os.path.islink(os.path.join(root, d)):
+                raise FwError(f'{os.path.join(root, d)} 是链接，不能作为附件；把真正的文件放进来')
+        for n in sorted(names):
+            path = Path(root) / n
+            if path.is_symlink() or not path.is_file():
+                raise FwError(f'{path} 不是普通文件，不能作为附件')
+            out.append((prefix + path.relative_to(folder).as_posix(), path))
+    return out
+
+
+def _attachments(paths: Sequence, prefix: str = 'files/') -> List[Tuple[str, Path]]:
+    """files/<name> for a file, files/<folder name>/<path inside it> for a folder."""
+    out = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            out += _folder_files(p, f'{prefix}{p.resolve().name}/')
+        elif p.is_file():
+            out.append((prefix + p.name, p))
+        else:
+            raise FwError(f'附件 {p} 不存在')
+    return out
+
+
+def _check_names(items: List[Tuple[str, Path]]) -> None:
+    seen = {}
+    for rel, path in items:
+        problem = path_problem(rel)
+        if problem:
+            raise FwError(f'{path} 不能登记：{problem}')
+        if rel in seen:
+            raise FwError(f'{seen[rel]} 和 {path} 登记后同名（{rel}），改一个名字')
+        seen[rel] = path
+    problems = collisions(seen)
+    if problems:
+        raise FwError('附件里有放不进同一个目录的文件：' + '；'.join(problems[:5]))
+
+
+def _send_files(api: Api, items: List[Tuple[str, Path]], workers: int, echo: Echo) -> List[list]:
+    """Hash these files, upload the ones the server lacks, and return them as [path, sha256, size]."""
+    _check_names(items)
+    hashed = _parallel(_hash_local, items, _file_workers([os.path.getsize(p) for _, p in items], workers),
+                       '计算哈希')
+    sizes = {d: size for _, d, size in hashed}
+    sources = {d: path for (_, path), (_, d, _) in zip(items, hashed)}
+    missing = api.missing(list(sizes.items()))
+    if missing:
+        sent = _upload(api, missing, sources, sizes, workers, '上传')
+        echo(f'上传了 {len(missing)} 个文件，{size_text(sent)}')
+    return [[rel, d, size] for rel, d, size in hashed]
+
+
+def _trainset(api: Api, trainset) -> dict:
+    """A training-set snapshot given as its id (from get_trainset) or as a reference such as SES-TX-det@2."""
+    if isinstance(trainset, dict):
+        trainset = trainset.get('id')
+    if isinstance(trainset, int) and not isinstance(trainset, bool):
+        version = api.get(f'/versions/{trainset}')
+    else:
+        version = api.version(*parse_ref(str(trainset)))
+    if version.get('kind') != 'trainset':
+        raise FwError(f'{version["ref"]} 不是训练集快照；模型版本要引用训练用的快照（fw trainset create 建的）')
+    return version
+
+
+def register_model(api: Api, name: str, onnx, trainset, metrics=None, files: Sequence = (),
+                   code_commit: Optional[str] = None, code_repo: Optional[str] = None, note: str = '',
+                   workers: int = 8, echo: Echo = print) -> dict:
+    """Upload the ONNX (and the metrics file and attachments) and register them as the model's next version.
+    Without code_commit the commit checked out in the current folder is used. Registering the same ONNX
+    with the same snapshot, code and files again returns the version that exists (existing: True)."""
+    onnx = Path(onnx)
+    try:
+        with open(onnx, 'rb') as f:
+            head = f.read(1)
+    except OSError as e:
+        raise FwError(f'读不了 ONNX 文件 {onnx}（{e.strerror or e}）') from None
+    if head != b'\x08':
+        raise FwError(f'{onnx} 不像 ONNX 文件；权重（.pt 等）可以用 --file 作为附件一起登记')
+    version = _trainset(api, trainset)
+    items = [('model.onnx', onnx)]
+    if metrics is not None:
+        _read_json_object(metrics, '验证指标文件')
+        items.append(('metrics.json', Path(metrics)))
+    items += _attachments(files)
+    dirty = False
+    if code_commit is None:
+        info = git_info(Path.cwd())
+        if info is None:
+            raise FwError('要写训练代码的提交号：加 --code-commit，或者在训练代码的 git 目录里运行')
+        code_commit, dirty = info['commit'], info['dirty']
+        code_repo = info['repo'] if code_repo is None else code_repo
+        echo(f'训练代码：{code_repo or "（没有 origin 地址）"} @ {code_commit[:12]}'
+             + ('；有没提交的改动，会记在这个版本上' if dirty else ''))
+    rows = _send_files(api, items, workers, echo)
+    mv = api.register_model_version(name, {'files': rows, 'trainset_id': version['id'], 'code_commit': code_commit,
+                                           'code_repo': strip_credentials(code_repo or ''), 'code_dirty': dirty,
+                                           'note': note})
+    if mv['existing']:
+        echo(f'{mv["ref"]} 已经登记过（同一个 ONNX、快照、代码和文件），没有重复登记')
+    else:
+        echo(f'已登记 {mv["ref"]}：ONNX {mv["onnx_sha256"][:12]}（{size_text(mv["onnx_size"])}），'
+             f'训练集快照 {mv["trainset"]["ref"]}，{len(mv["classes"])} 个类别；'
+             f'取到部署机器：fw model get {mv["ref"]} --to <目录>')
+    return mv
+
+
+def get_model(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', workers: int = 8,
+              echo: Echo = print) -> dict:
+    """Lay out a model version's files (model.onnx, classes.txt, metrics.json, files/...) in an empty folder and
+    write fw-model.json next to them (which version, snapshot, classes, hashes)."""
+    _check_link(link)
+    name, number = parse_model_ref(ref)
+    mv = api.model_version(name, number)
+    entries = parse_manifest(api.read_object(mv['manifest_sha256']))
+    dest = Path(dest)
+    _lay_out(api, cache, mv['ref'], entries, dest, link, workers, echo)
+    info = {k: mv[k] for k in ('ref', 'id', 'model', 'number', 'site', 'line', 'task', 'onnx_sha256', 'manifest_sha256',
+                               'trainset', 'classes', 'code_repo', 'code_commit', 'code_dirty', 'tags', 'created_by',
+                               'created_at')}
+    info['fetched_at'] = datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+    (dest / MODEL_INFO).write_text(json.dumps(info, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    echo(f'  已生成 {dest / MODEL_INFO}（不在模型版本里）：版本、快照、类别表和哈希')
+    return dict(mv, path=str(dest), files=len(entries))
+
+
+def _testset(api: Api, testset: str) -> Tuple[dict, str]:
+    ref, _, split = (testset or '').partition(':')
+    version = api.version(*parse_ref(ref))
+    if version.get('kind') == 'trainset' and not split:
+        raise FwError(f'{version["ref"]} 是训练集快照，要写明评的是哪个划分，例如 {version["ref"]}:test')
+    return version, split
+
+
+def register_eval(api: Api, model_ref: str, testset: str, metrics=None, deteval=None,
+                  deteval_model: Optional[str] = None, files: Sequence = (), tool: Optional[str] = None,
+                  tool_version: Optional[str] = None, note: str = '', workers: int = 8, echo: Echo = print) -> dict:
+    """Register an evaluation of a model version on a test set (a dataset version, or a split of a snapshot
+    such as SES-TX-det@2:test). Either metrics (any JSON object) or deteval (an aoi-deteval evaluate output
+    folder: its summary.json gives the metrics of deteval_model, the whole folder is kept)."""
+    name, number = parse_model_ref(model_ref)
+    if (metrics is None) == (deteval is None):
+        raise FwError('--metrics 和 --deteval 要写一个，只写一个')
+    version, split = _testset(api, testset)
+    items: List[Tuple[str, Path]] = []
+    rows: List[list] = []
+    if deteval is not None:
+        folder = Path(deteval)
+        summary = _read_json_object(folder / 'summary.json', 'aoi-deteval 的结果')
+        names = sorted(summary)
+        if deteval_model is None:
+            if len(names) != 1:
+                raise FwError(f'{folder / "summary.json"} 里有 {len(names)} 个模型（{"、".join(names)}），'
+                              '用 --deteval-model 指定是哪一个')
+            deteval_model = names[0]
+        if not isinstance(summary.get(deteval_model), dict):
+            raise FwError(f'{folder / "summary.json"} 里没有模型 {deteval_model}（有 {"、".join(names)}）')
+        data = json.dumps(summary[deteval_model], ensure_ascii=False, indent=2).encode('utf-8')
+        rows.append(['metrics.json', api.put_bytes(data), len(data)])
+        items += _folder_files(folder, 'files/')
+        if tool is None:
+            tool = 'aoi-deteval'
+        if tool_version is None and (folder / 'run_info.json').is_file():
+            tool_version = str(_read_json_object(folder / 'run_info.json', 'aoi-deteval 的 run_info').get(
+                'deteval_version', ''))
+        note = '；'.join(t for t in (note, f'aoi-deteval 结果里的模型名：{deteval_model}') if t)
+    else:
+        _read_json_object(metrics, '指标文件')
+        items.append(('metrics.json', Path(metrics)))
+    items += _attachments(files)
+    rows += _send_files(api, items, workers, echo) if items else []
+    e = api.register_eval(name, number, {'testset_id': version['id'], 'split': split, 'files': rows,
+                                         'tool': tool or '', 'tool_version': tool_version or '', 'note': note})
+    if e['existing']:
+        echo(f'评估报告 #{e["id"]} 已经登记过（同一个模型版本、测试集和文件），没有重复登记')
+    else:
+        echo(f'已登记评估报告 #{e["id"]}：{e["model_version"]["ref"]} 在 {e["testset"]["ref"]} 上，'
+             f'{e["file_count"]} 个文件')
+    return e
+
+
+def parse_time(value: Optional[str]) -> datetime.datetime:
+    """An ISO 8601 time; without a time zone it is this machine's local time; None is now."""
+    if value is None or value == 'now':
+        return datetime.datetime.now().astimezone()
+    text = value.strip()
+    if text.endswith(('Z', 'z')):
+        text = text[:-1] + '+00:00'
+    try:
+        t = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        raise FwError(f'时间写成 2026-11-20T10:30+08:00 这样（不写时区就按这台机器的时区）：{value}') from None
+    return t if t.tzinfo is not None else t.astimezone()
+
+
+def register_release(api: Api, model_ref: str, deploy_repo: str, deploy_commit: str,
+                     deployed_at: Optional[str] = None, site: str = '', line: str = '', gpu: str = '',
+                     trt_version: str = '', precision: str = '', engine_file=None, note: str = '',
+                     echo: Echo = print) -> dict:
+    """Register that a model version was deployed to a production line. The engine the site built from the
+    ONNX stays there; with engine_file only its hash and size are recorded."""
+    name, number = parse_model_ref(model_ref)
+    when = parse_time(deployed_at)
+    body = {'model': name, 'number': number, 'site': site, 'line': line, 'deploy_repo': strip_credentials(deploy_repo),
+            'deploy_commit': deploy_commit, 'deployed_at': when.isoformat(timespec='seconds'), 'gpu': gpu,
+            'trt_version': trt_version, 'precision': precision, 'note': note}
+    if engine_file is not None:
+        try:
+            body['engine_sha256'], body['engine_size'] = sha256_file(engine_file)
+        except OSError as e:
+            raise FwError(f'读不了引擎文件 {engine_file}（{e.strerror or e}）') from None
+    r = api.register_release(body)
+    if r['existing']:
+        echo(f'{r["ref"]} 已经登记过（同一条产线、模型版本、部署提交号和部署时间），没有重复登记')
+    else:
+        echo(f'已登记发布 {r["ref"]}：{r["site"]}/{r["line"]} 部署了 {r["model_version"]["ref"]}，'
+             f'部署时间 {r["deployed_at"]}')
+    current = r['current']
+    if current['ref'] == r['ref']:
+        echo(f'{r["site"]}/{r["line"]} 现在用的模型就是 {r["model_version"]["ref"]}')
+    else:
+        echo(f'它的部署时间早于 {current["ref"]}（{current["deployed_at"]}），'
+             f'{r["site"]}/{r["line"]} 现在用的仍是 {current["model_version"]["ref"]}')
+    return r
+
+
+def flatten_metrics(doc: dict, prefix: str = '') -> List[Tuple[str, float]]:
+    """The numbers in a metrics JSON as (dotted key, value), in file order; lists and text are left out."""
+    out: List[Tuple[str, float]] = []
+    for k, v in doc.items():
+        key = f'{prefix}{k}'
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            out.append((key, v))
+        elif isinstance(v, dict):
+            out += flatten_metrics(v, key + '.')
+    return out
+
+
+def compare_metrics(old: dict, new: dict) -> List[Tuple[str, Optional[float], Optional[float]]]:
+    a, b = dict(flatten_metrics(old)), dict(flatten_metrics(new))
+    keys = list(a) + [k for k in b if k not in a]
+    return [(k, a.get(k), b.get(k)) for k in keys]
+
+
+def latest_eval(mv: dict, testset: str) -> Optional[dict]:
+    found = [e for e in mv['evals'] if e['testset']['ref'].lower() == testset.lower()]
+    return found[-1] if found else None
+
+
+def show_chain(echo: Echo, c: dict) -> None:
+    """The trace chain, one level after another, from the release down to the pool versions."""
+    r = c['release']
+    mv = c['model_version']
+    if r:
+        echo(f'发布 {r["ref"]}：{r["site"]}/{r["line"]}，部署于 {r["deployed_at"]}，'
+             f'{r["created_by"]} 登记于 {r["created_at"]}')
+        echo(f'  部署仓库 {r["deploy_repo"]} @ {r["deploy_commit"]}')
+        built = [x for x in (r['gpu'], f'TensorRT {r["trt_version"]}' if r['trt_version'] else '',
+                             r['precision'].upper()) if x]
+        engine = f'；引擎 sha256 {r["engine_sha256"][:12]}（{size_text(r["engine_size"])}，文件在现场）' \
+            if r['engine_sha256'] else ''
+        echo(f'  现场从 ONNX 构建引擎：{"，".join(built) or "没有登记 GPU、TensorRT 和精度"}{engine}')
+        if r['note']:
+            echo(f'  备注：{r["note"]}')
+    elif c['releases']:
+        echo(f'发布过 {len(c["releases"])} 次：' + '、'.join(f'{x["ref"]}（{x["deployed_at"]}）' for x in c['releases']))
+    else:
+        echo('还没有发布过')
+    echo(f'模型版本 {mv["ref"]}：ONNX {mv["onnx_sha256"][:12]}（{size_text(mv["onnx_size"])}），'
+         f'文件清单 {mv["manifest_sha256"][:12]}，{mv["created_by"]} 登记于 {mv["created_at"]}')
+    echo(f'  训练代码 {mv["code_repo"] or "（没有登记仓库地址）"} @ {mv["code_commit"]}'
+         + ('，训练时有没提交的改动' if mv['code_dirty'] else ''))
+    if mv['tags']:
+        echo('  标签：' + '、'.join(TAG_NAMES.get(t, t) for t in mv['tags']))
+    for e in c['evals']:
+        tool = f'，{e["tool"]} {e["tool_version"]}'.rstrip() if e['tool'] else ''
+        echo(f'  评估报告 #{e["id"]}：{e["testset"]["ref"]}{tool}，{e["created_by"]} 登记于 {e["created_at"]}')
+    t = c['trainset']
+    ts = t['trainset']
+    counts = '，'.join(f'{s} {ts["counts"][s]["samples"]}' for s in SPLITS if ts['counts'].get(s, {}).get('samples'))
+    echo(f'训练集快照 {t["ref"]}：清单 {t["manifest_sha256"][:12]}，{len(ts["classes"])} 个类别，{counts}；'
+         f'{t["created_by"]} 建于 {t["created_at"]}' + (f'，接着 {ts["based_on"]} 的划分' if ts['based_on'] else ''))
+    for v in c['sources']:
+        parent = f'，父版本 {v["parent"]["ref"]}' if v.get('parent') else ''
+        echo(f'数据池版本 {v["ref"]}：清单 {v["manifest_sha256"][:12]}，{v["file_count"]} 个文件{parent}；'
+             f'{v["created_by"]} 导入于 {v["created_at"]}')
+        if v['source']:
+            echo(f'  来源：{v["source"]}')
+        if v['note']:
+            echo(f'  备注：{v["note"]}')
+    check = c.get('check')
+    if check is not None:
+        if check['problem_count']:
+            echo(f'核对：{check["objects"]} 个文件里有 {check["problem_count"]} 个问题')
+            for p in check['problems']:
+                echo(f'  {p}')
+        else:
+            echo(f'核对：链上 {check["objects"]} 个文件都在文件库里，大小都对')
+
+
+def _connected(fn):
+    api = connect()
+    try:
+        return fn(api)
+    finally:
+        api.close()
+
+
+def script_register_model(name: str, onnx, trainset, metrics=None, files: Sequence = (),
+                          code_commit: Optional[str] = None, code_repo: Optional[str] = None,
+                          note: str = '') -> dict:
+    """fw.register_model, for training scripts: register the trained model as the next version of `name` (see
+    register_model).
+    trainset is what get_trainset returned, its id, or a reference such as 'SES-TX-det@2'. Returns the
+    version's record with 'ref' (e.g. SES-TX-detr@3). Progress goes to stderr."""
+    return _connected(lambda api: register_model(api, name, onnx, trainset, metrics, files, code_commit, code_repo,
+                                                 note, echo=lambda s: print(s, file=sys.stderr)))
+
+
+def script_get_model(ref: str, dest, link: str = 'auto') -> dict:
+    """fw.get_model, for deploy scripts: lay out a model version in `dest` (empty or missing) and return its
+    record with 'path', 'onnx_sha256' and 'classes'. Progress goes to stderr."""
+    cache = Cache()
+    try:
+        return _connected(lambda api: get_model(api, cache, ref, dest, link=link,
+                                                echo=lambda s: print(s, file=sys.stderr)))
+    finally:
+        cache.close()
