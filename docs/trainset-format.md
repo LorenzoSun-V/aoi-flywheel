@@ -13,7 +13,7 @@ classes.txt                                   类别表：一行一个类别名�
 trainset.json                                 这个快照怎么来的：来源、类别、划分规则、每类框数、格式
 images/<划分>/<现场>/<产线>/<原路径>            每张图片
 labels/<划分>/<现场>/<产线>/<原文件名>.txt      YOLO 检测标注
-json/<划分>/<现场>/<产线>/<原文件名>.json       数据池里的 LiteAnno / X-AnyLabeling 标注，原样
+json/<划分>/<现场>/<产线>/<原文件名>.json       数据池里的 LiteAnno / X-AnyLabeling 标注，原样；YOLO txt 标注的图是从框生成的
 coco/<划分>.json                              这个划分的 COCO 检测标注
 ```
 
@@ -58,7 +58,7 @@ LiteAnno / X-AnyLabeling JSON：
 - `categories` 的 `id` **就是 classes.txt 的行号，从 0 起**，和 YOLO 的类别编号一致，没有为背景留 0 号。
 - 要知道每张图的尺寸：没有 JSON 标注的图（负样本、YOLO txt 标注的）读文件头。有图读不出尺寸时不生成 COCO，其余照常。
 
-**JSON**（`json/…/*.json`）：数据池里的原文件。快照里有 YOLO txt 标注的图时，`json` 格式不生成（那些图没有 JSON）。
+**JSON**（`json/…/*.json`）：数据池里有 JSON 的，就是原文件。数据池里是 YOLO txt 的，建快照时从框生成一个，给 LiteAnno 打开看图用：每个框一个 `rectangle`（像素坐标，和 COCO 一样裁到图内，保留 4 位小数），`label` 是类别名，`imagePath` 是图片文件名，`imageWidth` / `imageHeight` 从图片文件头读，`version` 是 `"3.1"`。有 YOLO txt 标注的图读不出尺寸时，`json` 格式不生成。
 
 `trainset.json` 的 `formats` 列出这个快照有哪些格式，`missing_formats` 写着没生成的格式和原因。
 

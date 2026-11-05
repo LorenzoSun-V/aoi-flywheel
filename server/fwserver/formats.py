@@ -167,6 +167,20 @@ def pixel_boxes(label: Label, classes: List[str], size: Size) -> List[Tuple[int,
     return [(index[b.name], b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1) for b in label.boxes]
 
 
+def liteanno_bytes(label: Label, classes: List[str], size: Size, image_name: str) -> bytes:
+    """A LiteAnno / X-AnyLabeling JSON for a YOLO txt label, so that the snapshot can be opened in LiteAnno:
+    one rectangle per box, in pixels (clipped to the image like the COCO boxes)."""
+    w, h = size
+    shapes = []
+    for c, x, y, bw, bh in pixel_boxes(label, classes, size):
+        x1, y1, x2, y2 = (round(v, 4) for v in (x, y, x + bw, y + bh))
+        shapes.append({'label': classes[c], 'points': [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], 'group_id': None,
+                       'description': '', 'shape_type': 'rectangle', 'flags': {}})
+    doc = {'version': '3.1', 'flags': {}, 'shapes': shapes, 'imagePath': image_name, 'imageData': None,
+           'imageHeight': h, 'imageWidth': w}
+    return (json.dumps(doc, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+
+
 def coco_bytes(images: List[Tuple[str, Size, list]], classes: List[str]) -> bytes:
     """COCO detection annotations for one split. images: (file_name, size, pixel boxes), file_name relative to
     the folder that holds the split's images. Category ids are the class ids of classes.txt (from 0)."""

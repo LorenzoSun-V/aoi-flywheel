@@ -234,7 +234,7 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 - 快照只能用这条命令建，`fw dataset import` 往快照里导入会被拒绝。
 - 和最新版完全一样（样本、划分、标注、类别表都没变）时不建。
 - 这一版只做检测：`point`、`line`、`circle` 这类形状不能当检测框，有就不建；`polygon`、`rotation` 按外接矩形当检测框。
-- 有图片读不出尺寸时（不是 PNG、JPEG、BMP、GIF、TIFF、WebP，又没有 JSON 标注）不生成 COCO；快照里有 YOLO txt 标注时不生成 JSON 格式。预览里写着原因。
+- 有图片读不出尺寸时（不是 PNG、JPEG、BMP、GIF、TIFF、WebP，又没有 JSON 标注）不生成 COCO；数据池里是 YOLO txt 标注的图，建快照时从框生成 LiteAnno JSON，这些图读不出尺寸时不生成 JSON 格式。预览里写着原因。
 - `--from` 只写名称（或 `@latest`）时，预览时定下是哪个版本，确认后冻结的就是那个版本；预览和确认之间有人导入了新版本也不影响。
 - 预览之后有人建了同名快照的新版本（或者同时有人建同名的第一版），就不建，重新运行一次即可。第一版没建成时名称也不会被占住。
 - 同一现场和产线的两个来源里有同名不同扩展名的图片（例如 `same/a.png` 和 `same/a.jpg`）时不建：它们的 YOLO 标注会是同一个文件。
