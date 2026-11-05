@@ -36,7 +36,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -c deploy/constraints.txt ./client ./server pytest import-linter
+      - run: pip install -c deploy/constraints.txt ./client ./server pytest import-linter pillow  # pillow: checks the image header reader
       - name: 模块分层
         run: lint-imports
       - name: 测试

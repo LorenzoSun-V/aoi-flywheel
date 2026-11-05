@@ -26,6 +26,12 @@ MAX_PATH_BYTES = 1024
 
 Entry = Tuple[str, str, int]  # (path, sha256 hex, size in bytes)
 
+# Training-set snapshots (docs/trainset-format.md): the layouts fw get makes from a snapshot's files.
+TRAINSET_FORMATS = ('yolo', 'coco', 'json', 'all')
+TRAINSET_SPLITS = ('train', 'val', 'test')
+COCO_DIRS = {'train': 'train', 'val': 'valid', 'test': 'test'}  # the Roboflow / RF-DETR folder names
+COCO_FILE = '_annotations.coco.json'
+
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _SIZE = re.compile(r'(0|[1-9][0-9]{0,17})\Z')
 _BAD_CHARS = frozenset('<>:"|?*\\') | frozenset(chr(i) for i in range(32)) | {'\x7f'}
@@ -286,4 +292,36 @@ def batches(objects: Iterable[Tuple[str, int]], max_count: int, max_bytes: int) 
         total += size
     if current:
         out.append(current)
+    return out
+
+
+def trainset_layout(entries: Iterable[Entry], fmt: str) -> List[Entry]:
+    """The files of a training-set snapshot as fw get lays them out in one format (docs/trainset-format.md):
+
+    yolo  images/<split>/..., labels/<split>/...txt (ultralytics finds a label by images/ -> labels/)
+    coco  train|valid|test/... images, with <folder>/_annotations.coco.json (Roboflow / RF-DETR layout)
+    json  train|val|test/... images with the LiteAnno JSON next to each (open the folder in LiteAnno)
+    all   the snapshot as it is stored
+
+    classes.txt and trainset.json are in every layout. Only paths change; contents are the frozen ones."""
+    if fmt not in TRAINSET_FORMATS:
+        raise ContractError(f'格式只能是 {"、".join(TRAINSET_FORMATS)}，不是 {fmt!r}')
+    out = []
+    for path, digest, size in entries:
+        top, _, rest = path.partition('/')
+        split, _, sub = rest.partition('/')
+        if not rest or fmt == 'all':
+            new = path
+        elif top == 'images' and split in TRAINSET_SPLITS and sub:
+            new = {'yolo': path, 'coco': f'{COCO_DIRS[split]}/{sub}', 'json': rest}[fmt]
+        elif top == 'labels':
+            new = path if fmt == 'yolo' else None
+        elif top == 'json':
+            new = rest if fmt == 'json' else None
+        elif top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS:
+            new = f'{COCO_DIRS[rest[:-5]]}/{COCO_FILE}' if fmt == 'coco' else None
+        else:
+            raise ContractError(f'训练集快照里有不认识的路径 {path}')
+        if new is not None:
+            out.append((new, digest, size))
     return out

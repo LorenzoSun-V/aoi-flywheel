@@ -35,6 +35,7 @@ server/fwserver/     fw-server：只支持 Linux
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
+  formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
   datasets.py        数据集和版本：建版本、冻结、差异、核对（verify）
   auth.py            账号、角色、凭据（只存凭据的 sha256）
   store.py           文件库：写入、落盘（syncfs）、停写标记、核对时的读取和隔离
@@ -49,7 +50,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ### 分层（`lint-imports` 检查）
 
-- 服务端只能往下调：`cli`、`app` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`。
+- 服务端只能往下调：`cli`、`app` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
 - 客户端永远不 import 服务端。
 - `fw.contract` 不依赖 `fw` 里的任何其他模块：服务端也 import 它，它必须保持纯粹。
 
@@ -79,13 +80,13 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 1. `_sources`：解析来源版本，拒绝快照做来源、没填现场或产线的数据集。
 2. `_samples`：按同目录同名配对图片和标注，样本标识是 `<现场>/<产线>/<图片路径>`。
-3. `_read_labels`：从文件库读每个标注（同一内容只读一次），核对类别。
+3. `_read_labels`：从文件库读每个标注（同一内容只读一次，`formats.parse_json` / `parse_txt`），核对类别、形状和尺寸，把框裁到图片内。
 4. `_latest_trainset`、`_previous_splits`：同名快照的最新版，从它的目录结构读回每个样本的划分。
 5. `_assign`：划分清单、接着上一版、或重新划分；train/val 用 `_cut` 按 `sha256(种子\n标识)` 排序后按比例切。
-6. `_tree`：摆出 `train|val|test/<现场>/<产线>/<路径>`，加上 `classes.txt`、`trainset.json`，核对路径规则。
+6. `_formats`、`_tree`：看能生成哪些格式（COCO 要每张图的尺寸），摆出 `images/`、`labels/`、`json/`、`coco/`，加上 `classes.txt`、`trainset.json`；核对路径规则，并用 `contract.trainset_layout` 核对每种取回格式摆出来都不冲突。转出来的 YOLO 和 COCO 文件放在 `Plan.blobs` 里，建快照时写进文件库。
 7. `create`：先看最新版还是不是预览时那个（不是就 409），把 `classes.txt`、`trainset.json`、清单写进文件库，再调 `datasets.create_version(trainset=True, record=…)`：在建版本的同一个事务里、冻结之前写 `trainset_versions` 和 `trainset_sources` 两张表。
 
-快照就是一个普通版本，取回、导出、核对、对比都不需要专门的代码。
+快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径（YOLO 时再写 `data.yaml`）。
 
 ## 绝不能破的规则
 
@@ -108,6 +109,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 训练集快照的记录（类别、规则、统计、来源）冻结后不能改、不能删；只有快照有这份记录，快照都有；有版本的数据集不能改类型 | 数据库触发器（`0002_trainsets.sql`） | `test_snapshot_record_cannot_change`、`test_only_trainset_versions_have_a_record` |
 | 快照只能用 `fw trainset create` 建；标注里的类别都在类别表里；冻结的就是预览的；预览后有人建了新版就不建 | `datasets.create_version` 的 `trainset` 参数、`trainsets.create` | `test_trainsets_are_made_only_by_trainset_create`、`test_bad_labels_are_refused`、`test_someone_else_made_one_meanwhile` |
 | 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split` |
+| 转好的 YOLO / COCO 标注随快照冻结，取回只改路径不改内容；转不了的形状、图外的框不悄悄丢掉，直接不建 | `formats.py`、`trainsets._tree`、`contract.trainset_layout` | `test_formats.py`、`test_first_snapshot_layout_and_formats`、`test_labels_that_cannot_be_detection_boxes` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
 ## 数据库和迁移
@@ -123,7 +125,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 这些一旦有数据或有别的机器在用，就不能悄悄改：
 
 - **清单格式 1**（`docs/manifest-format.md`）：清单哈希就是版本内容的标识，改格式会让所有旧版本的哈希对不上。要改只能出「清单格式 2」，两种都能读。
-- **训练集快照格式 1**（`docs/trainset-format.md`，`trainset.json` 里的 `fw-trainset 1`）：训练代码按它读目录。可以往 `trainset.json` 加键；改目录结构或已有键的含义要出 `fw-trainset 2`。划分算法（`_cut`）改了不影响已有快照（它们冻结的是结果），但同样的参数会分得不一样，要在更新记录里写清楚。
+- **训练集快照格式 1**（`docs/trainset-format.md`，`trainset.json` 里的 `fw-trainset 1`）：训练代码按它读目录。可以往 `trainset.json` 加键、加新的格式目录；改目录结构、已有键的含义或 `trainset_layout` 摆出来的路径要出 `fw-trainset 2`。划分算法（`_cut`）和标注转换（`formats.py`）改了不影响已有快照（它们冻结的是结果），但同样的参数会得到不一样的新快照，要在更新记录里写清楚。
 - **fw-objects 1**（`contract.py` 的批量传输格式）：新旧 `fw` 和服务端要能互通；要改就出新的格式号，服务端同时支持一段时间。
 - **HTTP 接口 `/api/v1`**：只加字段、加接口；改含义或删字段要出 `/api/v2`。
 - **路径规则**（`contract.path_problem`、`collisions`）：放宽会让 Windows 上取不回；收紧会让旧版本在新规则下报错。改之前要想清楚旧数据。
@@ -132,7 +134,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ```
 python -m venv .venv && . .venv/bin/activate
-pip install -c deploy/constraints.txt -e ./client -e ./server pytest import-linter
+pip install -c deploy/constraints.txt -e ./client -e ./server pytest import-linter pillow   # pillow 只给测试用
 lint-imports
 pytest -q tests/client                                                  # 不需要数据库
 FW_TEST_ADMIN_DSN=postgresql://fw@127.0.0.1:5432/postgres pytest -q tests

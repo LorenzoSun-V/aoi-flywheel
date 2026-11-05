@@ -109,7 +109,8 @@ def cmd_get(args, api: Api) -> None:
     cache = Cache()
     try:
         link = 'copy' if args.copy else 'hardlink' if args.hardlink else 'auto'
-        ops.get(api, cache, args.ref, args.to, link=link, subpath=args.subpath, workers=args.workers)
+        ops.get(api, cache, args.ref, args.to, link=link, subpath=args.subpath, workers=args.workers,
+                fmt=args.format)
     finally:
         cache.close()
 
@@ -181,6 +182,7 @@ def cmd_trainset_show(args, api: Api) -> None:
         if rule.get('new_to') == 'trainval':
             how += '，新样本进 train/val'
     print(f'规则：{how}')
+    print(f'标注格式：{"、".join(ops.FORMAT_NAMES.get(f, f) for f in ts["formats"])}（检测框）')
     ops.show_trainset_plan(print, {'counts': ts['counts']}, ts['classes'])
 
 
@@ -264,6 +266,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument('--hardlink', action='store_true',
                    help='硬链接（只限 Linux）：不多占盘，但文件只读、和缓存共用同一份数据，取出后不能改')
     s.add_argument('--subpath', help='只取这个子目录')
+    s.add_argument('--format', choices=['yolo', 'coco', 'json', 'all'],
+                   help='训练集快照按哪种格式摆：yolo（默认，另生成 data.yaml）、coco、json（LiteAnno 能直接打开）、all（原样）')
     s.add_argument('--workers', type=int, default=8)
     s.set_defaults(func=cmd_get)
 

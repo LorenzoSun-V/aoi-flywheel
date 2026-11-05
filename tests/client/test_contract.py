@@ -135,3 +135,24 @@ def test_batches_split_by_count_and_bytes():
     assert [[size for _, size in b] for b in out] == [[10, 10, 10], [50], [5], [100], [1]]
     assert [o for b in out for o in b] == objs  # same order, nothing lost; a big object travels alone
     assert batches([], 3, 40) == []
+
+
+def test_trainset_layouts():
+    from fw.contract import trainset_layout
+    stored = [('classes.txt', 'c', 1), ('trainset.json', 't', 1),
+              ('images/train/SES/TX/a/1.png', 'i1', 1), ('labels/train/SES/TX/a/1.txt', 'l1', 1),
+              ('json/train/SES/TX/a/1.json', 'j1', 1), ('images/val/SES/TX/2.png', 'i2', 1),
+              ('coco/train.json', 'ct', 1), ('coco/val.json', 'cv', 1)]
+    paths = lambda fmt: {p: d for p, d, _ in trainset_layout(stored, fmt)}  # noqa: E731
+    assert paths('yolo') == {'classes.txt': 'c', 'trainset.json': 't', 'images/train/SES/TX/a/1.png': 'i1',
+                             'labels/train/SES/TX/a/1.txt': 'l1', 'images/val/SES/TX/2.png': 'i2'}
+    assert paths('coco') == {'classes.txt': 'c', 'trainset.json': 't', 'train/SES/TX/a/1.png': 'i1',
+                             'valid/SES/TX/2.png': 'i2', 'train/_annotations.coco.json': 'ct',
+                             'valid/_annotations.coco.json': 'cv'}
+    assert paths('json') == {'classes.txt': 'c', 'trainset.json': 't', 'train/SES/TX/a/1.png': 'i1',
+                             'train/SES/TX/a/1.json': 'j1', 'val/SES/TX/2.png': 'i2'}
+    assert paths('all') == {p: d for p, d, _ in stored}
+    with pytest.raises(ContractError):
+        trainset_layout(stored, 'voc')
+    with pytest.raises(ContractError, match='不认识的路径'):
+        trainset_layout([('other/x.png', 'x', 1)], 'yolo')

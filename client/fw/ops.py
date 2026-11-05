@@ -16,8 +16,8 @@ from . import config
 from .api import Api
 from .cache import Cache, remove_file
 from .checks import IMAGE_EXTS, scan_folder
-from .contract import (BATCH_OBJECT_MAX, Entry, batches, diff_entries, manifest_bytes, manifest_hash, parse_manifest,
-                       sha256_file)
+from .contract import (BATCH_OBJECT_MAX, TRAINSET_FORMATS, Entry, batches, diff_entries, manifest_bytes, manifest_hash,
+                       parse_manifest, sha256_file, trainset_layout)
 from .layout import Layout
 from .pool import run_all
 
@@ -267,19 +267,32 @@ def _empty_dest(dest: Path) -> None:
 
 
 def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Optional[str] = None,
-        workers: int = 8, echo: Echo = print) -> dict:
+        workers: int = 8, echo: Echo = print, fmt: Optional[str] = None) -> dict:
     """Lay out one version in an empty folder, downloading only what the local cache lacks.
 
     link: 'auto' (reflink where the file system can, else copy), 'copy', or 'hardlink' (read-only files
     shared with the cache; only when asked for). Every placed file is hashed and must match the manifest;
     on a mismatch the cache object is downloaded again, and a second mismatch is an error.
+    fmt: for a training-set snapshot, the layout (yolo by default, coco, json or all; see trainset_layout).
     """
     if link == 'hardlink' and os.name == 'nt':
         raise FwError('Windows 上不能用 --hardlink：Windows 的只读属性由一个文件的所有硬链接共用，'
                       '清缓存时取出的文件会一起变成可写；用默认方式或 --copy')
+    if fmt is not None and fmt not in TRAINSET_FORMATS:
+        raise FwError(f'--format 只能是 {"、".join(TRAINSET_FORMATS)}')
     name, number = parse_ref(ref)
     version = api.version(name, number)
     entries = parse_manifest(api.read_object(version['manifest_sha256']))
+    if version.get('kind') == 'trainset':
+        fmt = fmt or 'yolo'
+        if fmt != 'all':
+            held = api.trainset(name, version['number'])['trainset']['formats']
+            if fmt not in held:
+                raise FwError(f'{version["ref"]} 里没有 {fmt} 格式（有 {"、".join(held)}）；'
+                              f'为什么没有，见建快照时的提示或 trainset.json 的 missing_formats')
+        entries = trainset_layout(entries, fmt)
+    elif fmt not in (None, 'all'):
+        raise FwError(f'{version["ref"]} 不是训练集快照，--format 只用于训练集快照')
     if subpath:
         sp = subpath.strip('/')
         entries = [e for e in entries if e[0] == sp or e[0].startswith(sp + '/')]
@@ -337,7 +350,28 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
          f'用时 下载 {t1 - t0:.1f} 秒，摆放和核对 {t2 - t1:.1f} 秒')
     if refetched:
         echo(f'  本机缓存里有 {len(refetched)} 个文件和哈希对不上，已重新下载')
-    return dict(version, path=str(dest), files=len(entries))
+    out = dict(version, path=str(dest), files=len(entries))
+    if version.get('kind') == 'trainset':
+        out['format'] = fmt
+    if fmt == 'yolo' and not subpath:
+        out['data_yaml'] = str(_write_data_yaml(dest, [rel for rel, _, _ in entries]))
+        echo(f'  已生成 {out["data_yaml"]}（不在快照里）：yolo train data={out["data_yaml"]}')
+    return out
+
+
+def _write_data_yaml(dest: Path, paths: List[str]) -> Path:
+    """data.yaml for ultralytics, made from classes.txt: the folder's absolute path, the splits it has and
+    the class names. It is written after the snapshot is laid out and is not part of it."""
+    classes = (dest / 'classes.txt').read_text(encoding='utf-8').splitlines()
+    splits = [s for s in ('train', 'val', 'test') if any(p.startswith(f'images/{s}/') for p in paths)]
+    q = lambda v: json.dumps(v, ensure_ascii=False)  # noqa: E731  a JSON string is a valid YAML scalar
+    lines = ['# fw get 生成的，不在快照里；ultralytics：yolo train data=<这个文件>',
+             f'path: {q(dest.resolve().as_posix())}']
+    lines += [f'{s}: images/{s}' for s in splits]
+    lines += ['names:'] + [f'  {i}: {q(n)}' for i, n in enumerate(classes)]
+    path = dest / 'data.yaml'
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return path
 
 
 def export(api: Api, cache: Cache, ref: str, dest, workers: int = 8, echo: Echo = print) -> dict:
@@ -345,7 +379,7 @@ def export(api: Api, cache: Cache, ref: str, dest, workers: int = 8, echo: Echo 
     fw-version.json. `fw verify` checks it there without the platform."""
     dest = Path(dest)
     _empty_dest(dest)
-    version = get(api, cache, ref, dest / 'data', link='copy', workers=workers, echo=echo)
+    version = get(api, cache, ref, dest / 'data', link='copy', workers=workers, echo=echo, fmt='all')
     (dest / 'fw-manifest.txt').write_bytes(api.read_object(version['manifest_sha256']))
     info = {k: version[k] for k in ('ref', 'id', 'dataset', 'number', 'manifest_sha256', 'file_count', 'total_bytes',
                                     'created_at', 'created_by')}
@@ -425,6 +459,7 @@ def get_version(ref: str, dest, link: str = 'auto') -> dict:
 
 # --- training-set snapshots ------------------------------------------------------------------------
 SPLITS = ('train', 'val', 'test')
+FORMAT_NAMES = {'yolo': 'YOLO', 'coco': 'COCO', 'json': 'LiteAnno JSON'}
 
 
 def _width(text: str) -> int:
@@ -515,8 +550,13 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
         how = '第一版'
     echo(f'{name}：{how}；来源 {"、".join(preview["sources"])}；类别 {len(classes)} 个')
     show_trainset_plan(echo, preview, classes)
+    for notice in preview.get('notices', []):
+        echo(f'  注意：{notice}')
     if preview['problems']:
         raise FwError('没有建训练集快照：\n  ' + '\n  '.join(preview['problems']))
+    echo(f'标注格式：{"、".join(FORMAT_NAMES[f] for f in preview["formats"])}（检测框，类别编号即 classes.txt 的行号）')
+    for fmt, why in preview['missing_formats'].items():
+        echo(f'  没有 {FORMAT_NAMES[fmt]}：{why}')
     echo(f'新快照：{preview["samples"]} 个样本，{preview["file_count"]} 个文件，{size_text(preview["total_bytes"])}')
     if dry_run:
         return None
@@ -530,19 +570,20 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
     return version
 
 
-def get_trainset(ref: str, dest, link: str = 'auto') -> dict:
-    """For training scripts: lay out a training-set snapshot in `dest` (empty or missing) and return its record:
-    'id' (pass it when registering the model), 'ref', 'path', 'classes' (the index is the class id),
-    'counts' and 'sources'. Progress goes to stderr."""
+def get_trainset(ref: str, dest, fmt: str = 'yolo', link: str = 'auto') -> dict:
+    """For training scripts: lay out a training-set snapshot in `dest` (empty or missing) in one format (yolo,
+    coco, json or all; see docs/trainset-format.md) and return its record: 'id' (pass it when registering the
+    model), 'ref', 'path', 'format', 'classes' (the index is the class id), 'counts', 'sources', and for yolo
+    'data_yaml'. Progress goes to stderr."""
     name, number = parse_ref(ref)
     api = connect()
     cache = Cache()
     try:
         info = api.trainset(name, number)
-        version = get(api, cache, info['ref'], dest, link=link, echo=lambda s: print(s, file=sys.stderr))
+        version = get(api, cache, info['ref'], dest, link=link, echo=lambda s: print(s, file=sys.stderr), fmt=fmt)
     finally:
         cache.close()
         api.close()
     ts = info['trainset']
-    return dict(version, classes=ts['classes'], counts=ts['counts'], sources=ts['sources'],
-                based_on=ts['based_on'], rule=ts['rule'])
+    return dict(version, task=ts['task'], classes=ts['classes'], counts=ts['counts'], sources=ts['sources'],
+                based_on=ts['based_on'], rule=ts['rule'], formats=ts['formats'])

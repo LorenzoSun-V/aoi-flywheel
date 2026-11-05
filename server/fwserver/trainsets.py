@@ -1,25 +1,30 @@
 """Training-set snapshots: which samples a training run uses, which split each one is in, and the class table.
 
-A snapshot is a version of a dataset of kind 'trainset'. Its files are the tree a training machine gets:
+A snapshot is a version of a dataset of kind 'trainset'. Its files (docs/trainset-format.md):
 
-    train/<site>/<line>/<path in the pool>      image, and its label next to it (same stem)
-    val/...  test/...
-    classes.txt                                 one class name per line; the line number is the class id
-    trainset.json                               sources, classes, split rule and counts (docs/trainset-format.md)
+    classes.txt                                  one class name per line; the line number is the class id
+    trainset.json                                sources, classes, split rule, counts, formats
+    images/<split>/<site>/<line>/<path in pool>  every image
+    labels/<split>/<site>/<line>/<stem>.txt      YOLO detection label (made from the JSON, or the pool's txt)
+    json/<split>/<site>/<line>/<stem>.json       the pool's LiteAnno / X-AnyLabeling label, unchanged
+    coco/<split>.json                            COCO detection annotations of the split
 
-so it is frozen, fetched (fw get), exported and verified exactly like any other version, and its manifest hash
-identifies it. What is frozen is the RESULT of the split, never the rule: fetching a snapshot lays out the
-same files in the same splits every time, whatever code or seed reads it.
+so it is frozen, fetched, exported and verified exactly like any other version, and its manifest hash
+identifies it; fw get lays it out per format (fw.contract.trainset_layout). What is frozen is the RESULT: the
+split of every sample and the converted labels, never the rule: the same files come back every time, whatever
+code or seed reads them.
 
 Making one (plan, then create):
 1. resolve the source pool versions; every source needs a site and a line (they name its folder);
 2. pair every image with the label of the same stem in its folder; refuse orphan labels and ambiguous pairs;
-3. read every label and refuse class names that are not in the class table (or YOLO ids out of range);
+3. read every label; refuse class names that are not in the class table, YOLO ids out of range, shapes that
+   cannot be a detection box and boxes outside the image;
 4. assign splits: from a split file; or continuing the previous snapshot (old samples keep their split, new
    ones go to test unless told otherwise, optionally old test merged into train/val); or fresh (chosen test
    folders to test, the rest to train/val). train/val is cut by ratio in an order fixed by the seed;
-5. build the tree, store classes.txt, trainset.json and the manifest, then datasets.create_version with
-   trainset=True, which writes the trainset rows in the same transaction before the version is frozen.
+5. build the tree with the converted labels, store them, classes.txt, trainset.json and the manifest, then
+   datasets.create_version with trainset=True, which writes the trainset rows in the same transaction before
+   the version is frozen.
 """
 from __future__ import annotations
 
@@ -31,10 +36,12 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
-from fw.contract import IMAGE_EXTS, LABEL_EXTS, META_NAMES, collisions, manifest_bytes, path_problem
+from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, manifest_bytes,
+                         path_problem, trainset_layout)
 
-from . import datasets
+from . import datasets, formats
 from .datasets import DatasetError
+from .formats import Label, Size
 from .store import Store
 
 FORMAT = 'fw-trainset 1'
@@ -55,6 +62,8 @@ class Sample:
     label: Optional[File]  # None: a negative sample (an image with no label)
     names: List[str] = field(default_factory=list)  # class name of every shape in the label
     split: str = ''
+    parsed: Optional[Label] = None
+    size: Optional[Size] = None  # (width, height): from the JSON label, else from the image header
 
 
 @dataclass
@@ -177,34 +186,15 @@ def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
     return samples, problems
 
 
-def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -> List[str]:
-    """Fill each sample's class names; refuse labels that cannot be read and classes not in the table."""
-    known = set(classes)
-    parsed: Dict[str, object] = {}  # label sha256 -> list of names, or a problem string
-    unreadable, unknown = [], defaultdict(list)
-    for s in samples.values():
-        if s.label is None:
-            continue
-        digest = s.label[1]
-        if digest not in parsed:
-            parsed[digest] = _parse_label(store, s.label, classes)
-        result = parsed[digest]
-        if isinstance(result, str):
-            unreadable.append(f'{s.site}/{s.line}/{s.label[0]}：{result}')
-            continue
-        s.names = result
-        for n in result:
-            if n not in known:
-                unknown[n].append(f'{s.site}/{s.line}/{s.label[0]}')
-    problems = []
-    if unreadable:
-        problems.append(f'有 {len(unreadable)} 个标注读不了：{_examples(unreadable, 3)}')
-    for name, where in sorted(unknown.items()):
-        problems.append(f'类别 {name!r} 不在类别表里，{len(where)} 个标注用到，例如 {_examples(where, 3)}')
-    return problems
+def _header_size(store: Store, image: File) -> Optional[Size]:
+    try:
+        with open(store.path(image[1]), 'rb') as f:
+            return formats.image_size(f)
+    except OSError:
+        return None
 
 
-def _parse_label(store: Store, label: File, classes: List[str]):
+def _parse(store: Store, label: File, classes: List[str]):
     data = store.read(label[1])
     if data is None:
         return '服务器上没有这个文件，先运行 fw-server verify'
@@ -213,33 +203,90 @@ def _parse_label(store: Store, label: File, classes: List[str]):
     except UnicodeDecodeError:
         return '不是 UTF-8'
     if label[0].lower().endswith('.json'):
-        try:
-            doc = json.loads(text)
-        except ValueError as e:
-            return f'不是合法的 JSON（{e}）'
-        shapes = doc.get('shapes') if isinstance(doc, dict) else None
-        if not isinstance(shapes, list):
-            return '不是 LiteAnno / X-AnyLabeling 标注（没有 shapes 列表）'
-        names = []
-        for shape in shapes:
-            name = shape.get('label') if isinstance(shape, dict) else None
-            if not isinstance(name, str) or not name:
-                return '有形状没有类别名'
-            names.append(name)
-        return names
-    names = []
-    for n, row in enumerate(text.splitlines(), start=1):
-        fields = row.split()
-        if not fields:
+        return formats.parse_json(text)
+    return formats.parse_txt(text, classes)
+
+
+def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -> Tuple[List[str], List[str]]:
+    """Read every label (each content once) and check it can be a YOLO detection label: (problems, notices)."""
+    known = set(classes)
+    parsed: Dict[str, object] = {}  # label sha256 -> Label, or a problem string
+    clipped_by: Dict[Tuple[str, Size], Label] = {}  # one clipped copy per label content and image size
+    unreadable, no_size, outside = [], [], []
+    unknown, refused = defaultdict(list), defaultdict(list)
+    clipped, as_box = 0, Counter()
+    for s in samples.values():
+        if s.label is None:
             continue
-        try:
-            cid = int(fields[0])
-        except ValueError:
-            return f'第 {n} 行的类别编号不是整数'
-        if not 0 <= cid < len(classes):
-            return f'第 {n} 行的类别编号 {cid} 超出类别表（0 到 {len(classes) - 1}）'
-        names.append(classes[cid])
-    return names
+        where = f'{s.site}/{s.line}/{s.label[0]}'
+        digest = s.label[1]
+        if digest not in parsed:
+            parsed[digest] = _parse(store, s.label, classes)
+        label = parsed[digest]
+        if isinstance(label, str):
+            unreadable.append(f'{where}：{label}')
+            continue
+        if label.kind == 'json':
+            size = label.size or _header_size(store, s.image)
+            if size is None:
+                no_size.append(where)
+                continue
+            key = (digest, size)
+            if key not in clipped_by:
+                copy = Label('json', label.names, list(label.boxes), size=size, shapes=label.shapes,
+                             refused=label.refused)
+                formats.clip(copy, size)
+                clipped_by[key] = copy
+            label = clipped_by[key]
+            s.size = size
+            if label.outside:
+                outside.append(where)
+            clipped += label.clipped
+            as_box.update(label.shapes)
+            for kind, n in label.refused.items():
+                refused[kind].append(where)
+        s.parsed = label
+        s.names = label.names
+        for n in label.names:
+            if n not in known:
+                unknown[n].append(where)
+    problems = []
+    if unreadable:
+        problems.append(f'有 {len(unreadable)} 个标注读不了：{_examples(unreadable, 3)}')
+    if no_size:
+        problems.append(f'有 {len(no_size)} 个标注没有 imageWidth / imageHeight，图片尺寸也读不出来，'
+                        f'转不成 YOLO：{_examples(no_size, 3)}')
+    for name, where in sorted(unknown.items()):
+        problems.append(f'类别 {name!r} 不在类别表里，{len(where)} 个标注用到，例如 {_examples(where, 3)}')
+    for kind, where in sorted(refused.items()):
+        problems.append(f'{len(where)} 个标注里有 {kind} 形状，不能当检测框（只收 rectangle、polygon、rotation），'
+                        f'例如 {_examples(where, 3)}')
+    if outside:
+        problems.append(f'{len(outside)} 个标注里有框完全在图片外面：{_examples(outside, 3)}')
+    notices = []
+    if clipped:
+        notices.append(f'{clipped} 个框超出图片边界，已裁到图片内')
+    if as_box:
+        kinds = '、'.join(f'{k} {n} 个' for k, n in sorted(as_box.items()))
+        notices.append(f'这些形状按外接矩形当检测框：{kinds}')
+    return problems, notices
+
+
+def _formats(store: Store, samples: Dict[str, Sample]) -> Dict[str, Optional[str]]:
+    """Which formats the snapshot can hold: format -> None, or why it is left out."""
+    txt = [s.key for s in samples.values() if s.parsed is not None and s.parsed.kind == 'txt']
+    unsized = []
+    for s in samples.values():
+        if s.size is None:
+            s.size = _header_size(store, s.image)
+            if s.size is None:
+                unsized.append(s.key)
+    out: Dict[str, Optional[str]] = {'yolo': None, 'coco': None, 'json': None}
+    if unsized:
+        out['coco'] = f'{len(unsized)} 张图读不出尺寸（只认 PNG、JPEG、BMP、GIF、TIFF、WebP 的文件头）：{_examples(unsized, 3)}'
+    if txt:
+        out['json'] = f'{len(txt)} 张图的标注是 YOLO txt，没有 LiteAnno JSON：{_examples(txt, 3)}'
+    return out
 
 
 # --- the previous snapshot and the split ---------------------------------------------------------------
@@ -255,22 +302,21 @@ def _latest_trainset(conn, name: str) -> Optional[dict]:
 
 
 def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]]]:
-    """key -> (split, label sha256) of every sample in a snapshot, read back from its tree."""
-    out: Dict[str, Tuple[str, Optional[str]]] = {}
-    labels: Dict[str, str] = {}
+    """key -> (split, sha256 of the pool's label) of every sample in a snapshot, read back from its tree: the
+    label is the one under json/ when there is one (labels/ then holds the converted copy), else labels/."""
     images: Dict[str, Tuple[str, str]] = {}
+    found: Dict[str, Dict[str, str]] = {'json': {}, 'labels': {}}
     for path, digest, _ in _files(conn, previous['id']):
-        split, sep, rest = path.partition('/')
+        top, _, rest = path.partition('/')
+        split, sep, key = rest.partition('/')
         if not sep or split not in SPLITS:
             continue
-        ext = PurePosixPath(rest).suffix.lower()
-        if ext in IMAGE_EXTS:
-            images[_stem(rest)] = (split, rest)
-        elif ext in LABEL_EXTS:
-            labels[_stem(rest)] = digest
-    for stem, (split, rest) in images.items():
-        out[rest] = (split, labels.get(stem))
-    return out
+        if top == 'images':
+            images[_stem(key)] = (split, key)
+        elif top in found:
+            found[top][_stem(key)] = digest
+    return {key: (split, found['json'].get(stem) or found['labels'].get(stem))
+            for stem, (split, key) in images.items()}
 
 
 def _order(seed: int, key: str) -> bytes:
@@ -361,17 +407,38 @@ def _json_bytes(obj) -> bytes:
     return (json.dumps(obj, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 
 
-def _tree(samples: Dict[str, Sample], classes_data: bytes, info_data: bytes) -> Tuple[List[File], List[str]]:
-    entries: List[File] = [('classes.txt', hashlib.sha256(classes_data).hexdigest(), len(classes_data)),
-                           ('trainset.json', hashlib.sha256(info_data).hexdigest(), len(info_data))]
-    for s in samples.values():
-        base = f'{s.split}/{s.site}/{s.line}/'
-        entries.append((base + s.image[0], s.image[1], s.image[2]))
-        if s.label is not None:
-            entries.append((base + s.label[0], s.label[1], s.label[2]))
+def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, Optional[str]],
+          classes_data: bytes, info_data: bytes) -> Tuple[List[File], Dict[str, bytes], List[str]]:
+    """The snapshot's files (path, sha256, size), the converted contents to store (sha256 -> bytes), problems."""
+    blobs: Dict[str, bytes] = {}
+
+    def made(path: str, data: bytes) -> File:
+        digest = hashlib.sha256(data).hexdigest()
+        blobs[digest] = data
+        return path, digest, len(data)
+
+    entries: List[File] = [made('classes.txt', classes_data), made('trainset.json', info_data)]
+    coco = defaultdict(list)
+    for s in sorted(samples.values(), key=lambda s: s.key):
+        rest = f'{s.split}/{s.site}/{s.line}/'
+        stem = _stem(s.image[0])
+        entries.append(('images/' + rest + s.image[0], s.image[1], s.image[2]))
+        if s.parsed is not None:
+            if s.parsed.kind == 'txt':  # already a YOLO detection label: as it is
+                entries.append(('labels/' + rest + stem + '.txt', s.label[1], s.label[2]))
+            else:
+                entries.append(made('labels/' + rest + stem + '.txt', formats.yolo_bytes(s.parsed, classes, s.size)))
+                entries.append(('json/' + rest + stem + '.json', s.label[1], s.label[2]))
+        if available['coco'] is None:
+            boxes = formats.pixel_boxes(s.parsed, classes, s.size) if s.parsed is not None else []
+            coco[s.split].append((s.key, s.size, boxes))
+    for split in SPLITS:
+        if coco.get(split):
+            entries.append(made(f'coco/{split}.json', formats.coco_bytes(coco[split], classes)))
     problems = [f'{p}：{why}' for p, why in ((e[0], path_problem(e[0])) for e in entries) if why]
-    problems += collisions(e[0] for e in entries)
-    return entries, problems
+    for fmt in TRAINSET_FORMATS:  # every layout fw get can make must work on Windows too
+        problems += collisions(e[0] for e in trainset_layout(entries, fmt))
+    return entries, blobs, sorted(set(problems))
 
 
 @dataclass
@@ -385,15 +452,19 @@ class Plan:
     counts: dict
     changes: dict
     problems: List[str]
-    classes_data: bytes = b''
-    info_data: bytes = b''
+    notices: List[str] = field(default_factory=list)
+    formats: Dict[str, Optional[str]] = field(default_factory=dict)  # format -> None, or why it is left out
     entries: List[File] = field(default_factory=list)
+    blobs: Dict[str, bytes] = field(default_factory=dict)  # contents made for the snapshot, by sha256
 
     def summary(self) -> dict:
         return {'name': self.name, 'sources': [v['ref'] for v, _ in self.sources],
                 'based_on': self.previous['ref'] if self.previous else None,
                 'expect_latest_id': self.latest['id'] if self.latest else None,
                 'rule': self.rule, 'counts': self.counts, 'changes': self.changes, 'problems': self.problems,
+                'notices': self.notices, 'task': formats.TASK,
+                'formats': [f for f, why in self.formats.items() if why is None],
+                'missing_formats': {f: why for f, why in self.formats.items() if why is not None},
                 'samples': len(self.samples), 'file_count': len(self.entries),
                 'total_bytes': sum(e[2] for e in self.entries)}
 
@@ -406,26 +477,37 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     latest = _latest_trainset(conn, name)
     previous = None if o.fresh else latest
     samples, problems = _samples(conn, sources)
-    problems += _read_labels(store, samples, o.classes)
+    label_problems, notices = _read_labels(store, samples, o.classes)
+    problems += label_problems
     prev_splits = _previous_splits(conn, previous) if previous is not None else None
     rule, more = _assign(samples, o, prev_splits)
     problems += more
     if not samples:
         problems.append('来源版本里没有图片')
     counts = _counts(samples, o.classes)
-    p = Plan(name, sources, latest, previous, samples, rule, counts, _changes(samples, prev_splits), problems)
+    p = Plan(name, sources, latest, previous, samples, rule, counts, _changes(samples, prev_splits), problems,
+             notices)
+    if previous is not None and _previous_classes(conn, previous) != o.classes:
+        p.notices.append(f'类别表和 {previous["ref"]} 不一样，类别编号可能变了')
     if problems:
         return p
-    p.classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
-    info = {'format': FORMAT, 'name': name,
+    p.formats = _formats(store, samples)
+    summary = p.summary()
+    info = {'format': FORMAT, 'name': name, 'task': formats.TASK,
             'sources': [{'ref': v['ref'], 'manifest_sha256': v['manifest_sha256'], 'site': d['site'],
                          'line': d['line']} for v, d in sources],
-            'based_on': previous['ref'] if previous else None, 'classes': o.classes, 'rule': rule, 'counts': counts}
-    p.info_data = _json_bytes(info)
-    p.entries, p.problems = _tree(samples, p.classes_data, p.info_data)
+            'based_on': previous['ref'] if previous else None, 'classes': o.classes, 'rule': rule, 'counts': counts,
+            'formats': summary['formats'], 'missing_formats': summary['missing_formats']}
+    classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
+    p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
     if latest is not None and not p.problems and _same_content(conn, latest, p.entries):
         p.problems.append(f'和 {latest["ref"]} 完全一样（样本、划分、标注和类别表都没变），不用建新快照')
     return p
+
+
+def _previous_classes(conn, previous: dict) -> Optional[list]:
+    row = conn.execute('SELECT classes FROM trainset_versions WHERE version_id = %s', (previous['id'],)).fetchone()
+    return row['classes'] if row else None
 
 
 def _same_content(conn, latest: dict, entries: List[File]) -> bool:
@@ -445,7 +527,7 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
         raise DatasetError(409, f'{name} 在这期间有了变化（最新是 {now}）；请重新运行 fw trainset create')
     if p.problems:
         raise DatasetError(400, '没有建训练集快照：\n  ' + '\n  '.join(p.problems))
-    for data in (p.classes_data, p.info_data):
+    for data in p.blobs.values():
         store.put_bytes(data)
     manifest = manifest_bytes(p.entries)
     digest, _ = store.put_bytes(manifest)
@@ -459,10 +541,12 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
                 raise
 
     def record(c, version_id):
-        c.execute('INSERT INTO trainset_versions (version_id, based_on_id, classes, rule, counts) '
-                  'VALUES (%s, %s, %s, %s, %s)',
-                  (version_id, p.previous['id'] if p.previous else None, json.dumps(o.classes, ensure_ascii=False),
-                   json.dumps(p.rule, ensure_ascii=False), json.dumps(p.counts, ensure_ascii=False)))
+        summary = p.summary()
+        c.execute('INSERT INTO trainset_versions (version_id, based_on_id, task, classes, rule, counts, formats) '
+                  'VALUES (%s, %s, %s, %s, %s, %s, %s)',
+                  (version_id, p.previous['id'] if p.previous else None, formats.TASK,
+                   json.dumps(o.classes, ensure_ascii=False), json.dumps(p.rule, ensure_ascii=False),
+                   json.dumps(p.counts, ensure_ascii=False), json.dumps(summary['formats'])))
         for i, (v, _) in enumerate(p.sources):
             c.execute('INSERT INTO trainset_sources (version_id, position, source_id) VALUES (%s, %s, %s)',
                       (version_id, i, v['id']))
@@ -476,15 +560,16 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
 
 
 def info(conn, version_id: int) -> dict:
-    row = conn.execute('SELECT based_on_id, classes, rule, counts FROM trainset_versions WHERE version_id = %s',
-                       (version_id,)).fetchone()
+    row = conn.execute('SELECT based_on_id, task, classes, rule, counts, formats FROM trainset_versions '
+                       'WHERE version_id = %s', (version_id,)).fetchone()
     if row is None:
         raise DatasetError(404, '这个版本不是训练集快照')
     sources = [datasets.get_version_by_id(conn, r['source_id'])['ref'] for r in conn.execute(
         'SELECT source_id FROM trainset_sources WHERE version_id = %s ORDER BY position', (version_id,))]
     based_on = datasets.get_version_by_id(conn, row['based_on_id'])['ref'] if row['based_on_id'] else None
-    return {'trainset': {'classes': row['classes'], 'rule': row['rule'], 'counts': row['counts'],
-                         'sources': sources, 'based_on': based_on}}
+    return {'trainset': {'task': row['task'], 'classes': row['classes'], 'rule': row['rule'],
+                         'counts': row['counts'], 'formats': row['formats'], 'sources': sources,
+                         'based_on': based_on}}
 
 
 def get(conn, name: str, number: str) -> dict:

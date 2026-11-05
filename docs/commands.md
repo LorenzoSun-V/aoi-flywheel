@@ -156,7 +156,8 @@ fw get SES-TX@3 --to D:\fw\v3
 | 选项 | 说明 |
 |---|---|
 | `--to` | 必填，目标目录：要不存在或是空的 |
-| `--subpath` | 只取版本里的一个子目录，例如 `--subpath pos/train` |
+| `--subpath` | 只取版本里的一个子目录，例如 `--subpath pos/train`；训练集快照按 `--format` 摆好以后的路径算 |
+| `--format` | 只用于训练集快照：`yolo`（默认）、`coco`、`json`、`all`，见下文 |
 | `--copy` | 总是复制 |
 | `--hardlink` | 硬链接，只限 Linux：不多占盘，但取出的文件只读，和缓存共用一份数据，不能改 |
 | `--workers` | 并行数，默认 8 |
@@ -174,6 +175,16 @@ fw get SES-TX@3 --to D:\fw\v3
 
 方式默认先试 reflink（btrfs、XFS 上不多占盘，改文件也不影响缓存），不支持就复制（NTFS、ext4）。改取出来的文件不会影响缓存，也不会影响任何版本。
 
+**取训练集快照**：默认摆成 YOLO 的目录，另生成 `data.yaml`，可以直接 `yolo train data=<目录>/data.yaml`。
+
+```
+fw get SES-TX-det@2 --to D:\train\det2                   # YOLO：images/ labels/ data.yaml
+fw get SES-TX-det@2 --to D:\train\det2-coco --format coco  # COCO：train/ valid/ test/ 各有 _annotations.coco.json
+fw get SES-TX-det@2 --to D:\look\det2 --format json       # 图片和 LiteAnno JSON 放在一起，用 LiteAnno 打开看
+```
+
+每种格式的目录、类别编号、`data.yaml` 的内容见[训练集快照的格式](trainset-format.md#fw-get-按格式摆出来)。同一张图只下载一次，取几种格式都不重复下载。
+
 ### fw export 和 fw verify
 
 ```
@@ -181,7 +192,7 @@ fw export SES-TX@3 --to E:\usb\SES-TX@3       # 在能连平台的机器上
 fw verify E:\usb\SES-TX@3                     # 拷到连不上平台的机器后核对
 ```
 
-导出一个能独立使用的目录：`data/` 是版本的文件，`fw-manifest.txt` 是清单，`fw-version.json` 记着版本号和清单哈希。`fw verify` 不用连平台，按清单检查缺少的、多出来的、内容不一致的文件，全部一致才退出 0。
+导出一个能独立使用的目录：`data/` 是版本的文件，`fw-manifest.txt` 是清单，`fw-version.json` 记着版本号和清单哈希。训练集快照按快照里存的样子导出（`images/`、`labels/`、`json/`、`coco/` 都在）。`fw verify` 不用连平台，按清单检查缺少的、多出来的、内容不一致的文件，全部一致才退出 0。
 
 ### fw cache
 
@@ -201,12 +212,12 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 
 从一个或几个数据池版本建训练集快照：每张图分到 train、val 或 test，连同类别表一起冻结。训练时取这个快照，模型登记时带上它，以后就能从模型查回训练用的每个文件。目录和文件的格式见[训练集快照的格式](trainset-format.md)。
 
-先预览：每个划分多少张（其中多少张没有标注）、每个类别在每个划分里多少个框，接着上一版时还有新增、移除、换了划分、标注改了的个数。确认后才建。同一个名称再运行一次，就是这个快照的下一版，默认**接着上一版的划分**：原来的样本不换划分，新样本进 test。
+先预览：每个划分多少张（其中多少张没有标注）、每个类别在每个划分里多少个框，接着上一版时还有新增、移除、换了划分、标注改了的个数，还有生成了哪几种标注格式。确认后才建。建的时候服务器把标注转成 YOLO 和 COCO 检测框，和图片、原始 JSON 一起冻结（转换规则见[训练集快照的格式](trainset-format.md#标注怎么转)）。同一个名称再运行一次，就是这个快照的下一版，默认**接着上一版的划分**：原来的样本不换划分，新样本进 test。
 
 | 选项 | 说明 |
 |---|---|
 | `--from` | 必填，来源数据池版本，例如 `SES-TX@4`；几条产线合成一个快照就写几次。来源数据集要填了现场和产线 |
-| `--classes` | 必填，类别表文件：一行一个类别名，行号（从 0 起）是类别编号。标注里有表以外的类别，或者 YOLO 编号超出范围，就不建 |
+| `--classes` | 必填，类别表文件：一行一个类别名，行号（从 0 起）是类别编号，YOLO 和 COCO 都用它。标注里有表以外的类别，或者 YOLO 编号超出范围，就不建 |
 | `--val` | train/val 里 val 的比例，默认 0.2 |
 | `--seed` | 种子，默认 0。同样的样本、比例和种子，分法总是一样 |
 | `--test-dirs` | 这些目录下的新样本进 test，例如 `2026-10`，或带上现场和产线 `SES/TX/2026-10`；逗号分隔或写多次 |
@@ -221,6 +232,8 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 - 名称和数据集共用：已经有叫这个名的数据集，就不能用来建快照。
 - 快照只能用这条命令建，`fw dataset import` 往快照里导入会被拒绝。
 - 和最新版完全一样（样本、划分、标注、类别表都没变）时不建。
+- 这一版只做检测：`point`、`line`、`circle` 这类形状不能当检测框，有就不建；`polygon`、`rotation` 按外接矩形当检测框。
+- 有图片读不出尺寸时（不是 PNG、JPEG、BMP、GIF、TIFF、WebP，又没有 JSON 标注）不生成 COCO；快照里有 YOLO txt 标注时不生成 JSON 格式。预览里写着原因。
 - 预览之后有人建了同名快照的新版本，就不建，重新运行一次即可。
 - 服务器要读每个标注文件核对类别，几十万张图时预览和建快照各要一些时间。
 
@@ -247,7 +260,13 @@ print(v['id'], v['path'])
 
 和 `fw get` 一样用缓存、逐个核对；进度和结果打印到 stderr。要先在这台机器上 `fw login`，或者设好 `FW_SERVER`、`FW_TOKEN`。
 
-`fw.get_trainset` 返回的记录里另有 `classes`（类别名列表）、`counts`（每个划分的张数和每类框数）、`sources`（来源版本）、`based_on`（接着哪个快照）和 `rule`（划分规则）；不是快照的名称会报错（`fw.ApiError`，`.status` 是 400）。
+`fw.get_trainset(ref, dest, fmt='yolo')`：`fmt` 和 `fw get --format` 一样。返回的记录里另有 `format`、`data_yaml`（YOLO 时，给 ultralytics 的 `data=`）、`classes`（类别名列表）、`counts`（每个划分的张数和每类框数）、`formats`（快照里有的格式）、`sources`（来源版本）、`based_on`（接着哪个快照）和 `rule`（划分规则）；不是快照的名称会报错（`fw.ApiError`，`.status` 是 400）。
+
+```python
+from ultralytics import YOLO
+ts = fw.get_trainset('SES-TX-det@2', '/data/train/SES-TX-det@2')
+YOLO('yolov8s.pt').train(data=ts['data_yaml'])
+```
 
 出错时可能抛三种异常，训练脚本要都接住：
 

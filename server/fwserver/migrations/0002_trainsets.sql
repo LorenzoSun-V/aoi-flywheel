@@ -1,6 +1,7 @@
 -- 0002: training-set snapshots.
--- A snapshot is a version of a dataset of kind 'trainset': its files are the laid-out tree (train/, val/, test/,
--- classes.txt, trainset.json), so freezing, fetching and verifying work exactly as for any version. The rows
+-- A snapshot is a version of a dataset of kind 'trainset': its files are the images split into train, val and
+-- test with their labels in each format (docs/trainset-format.md), classes.txt and trainset.json, so freezing,
+-- fetching and verifying work exactly as for any version. The rows
 -- below record how it was made; they are written in the transaction that creates the version, before it is
 -- frozen, and never change afterwards.
 
@@ -11,9 +12,11 @@ ALTER TABLE datasets ADD CONSTRAINT datasets_kind_check
 CREATE TABLE trainset_versions (
   version_id   bigint PRIMARY KEY REFERENCES versions(id),
   based_on_id  bigint REFERENCES versions(id),   -- the snapshot it continued from, if any
+  task         text NOT NULL CHECK (task IN ('det')),                   -- what the labels were converted for
   classes      jsonb NOT NULL CHECK (jsonb_typeof(classes) = 'array'),  -- names; the index is the class id
   rule         jsonb NOT NULL CHECK (jsonb_typeof(rule) = 'object'),    -- how the split was made (for people)
-  counts       jsonb NOT NULL CHECK (jsonb_typeof(counts) = 'object')
+  counts       jsonb NOT NULL CHECK (jsonb_typeof(counts) = 'object'),
+  formats      jsonb NOT NULL CHECK (jsonb_typeof(formats) = 'array')   -- label formats it holds: yolo, coco, json
 );
 
 CREATE TABLE trainset_sources (
