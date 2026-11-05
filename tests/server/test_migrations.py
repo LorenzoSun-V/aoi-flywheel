@@ -19,7 +19,7 @@ def empty_db():
 
 
 def test_migrate_once_then_nothing(empty_db):
-    assert db.migrate(empty_db) == ['0001_init.sql']
+    assert db.migrate(empty_db) == ['0001_init.sql', '0002_trainsets.sql']
     assert db.migrate(empty_db) == []
     with db.connect(empty_db) as c:
         assert db.schema_problems(c) == []
@@ -34,7 +34,7 @@ def test_edited_or_newer_schema_is_refused(empty_db):
             db.migrate(empty_db)
         c.execute("UPDATE schema_migrations SET sha256 = %s WHERE version = 1",
                   (db._digest(db.migration_files()[0][2]),))
-        c.execute("INSERT INTO schema_migrations (version, name, sha256) VALUES (2, '0002_future.sql', 'y')")
+        c.execute("INSERT INTO schema_migrations (version, name, sha256) VALUES (99, '0099_future.sql', 'y')")
         assert any('比这个版本的程序新' in p for p in db.schema_problems(c))
 
 

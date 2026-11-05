@@ -217,3 +217,18 @@ class Api:
 
     def diff(self, old_id: int, new_id: int):
         return self.get('/diff', old=old_id, new=new_id)
+
+    # --- training-set snapshots ----------------------------------------------------------------
+    def trainsets(self):
+        return self.get('/trainsets')
+
+    def preview_trainset(self, name: str, body: dict):
+        """What creating this snapshot would make (counts, changes, problems); nothing is written."""
+        return self._json(_retry(lambda: self.http.post(f'/trainsets/{name}/preview', json=body)))
+
+    def create_trainset(self, name: str, body: dict):
+        """body as for the preview plus expect_latest_id from it: refused if a snapshot was made meanwhile."""
+        return self.post(f'/trainsets/{name}/versions', body)
+
+    def trainset(self, name: str, number='latest'):
+        return self.get(f'/trainsets/{name}/versions/{number}')

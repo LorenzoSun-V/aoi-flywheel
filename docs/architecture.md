@@ -121,7 +121,9 @@ flowchart TB
 
 **训练集快照**
 
-- 快照冻结的是划分的结果，不是规则：每张图的图片哈希和标注哈希、它实际分在 trainval 还是 test、类别编号和名称的对应表。规则（8:2、7:3，新数据进 test 等）只在建快照时用一次；取出时按快照原样还原，永远不重新划分。快照有自己的 ID，取出时按 `<现场>/<产线>/` 分目录，不同产线的同名文件不会冲突。
+- 快照冻结的是划分的结果，不是规则：每张图的图片哈希和标注哈希、它实际分在 train、val 还是 test、类别编号和名称的对应表。规则（8:2、7:3，新数据进 test 等）只在建快照时用一次；取出时按快照原样还原，永远不重新划分。快照有自己的 ID，取出时按 `<现场>/<产线>/` 分目录，不同产线的同名文件不会冲突。
+- 实现：快照是类型为「训练集快照」的数据集的一个版本，它的文件是按划分放好的图片，加上建快照时在服务器上转好的 YOLO 和 COCO 检测标注、原始 LiteAnno JSON、`classes.txt`、`trainset.json`（格式见 [`docs/trainset-format.md`](trainset-format.md)）。所以冻结、取回、导出、核对、对比全部沿用数据集版本，同一张图在文件库里仍只存一份；转换代码以后改了，已有快照也不变。`fw get` 默认按 YOLO 的目录摆出来，也可以摆成 COCO（RF-DETR 的目录）或 LiteAnno 能打开的目录，只改路径不改内容。来源、类别表、规则、统计和格式另记在两张表里，和版本在同一个事务里写、冻结后由触发器拒绝修改。
+- 同名快照再建一版时，默认接着上一版：原来的样本不换划分，新样本进 test（可选进 train/val，或把旧 test 并入 train/val）。train/val 按 `sha256(种子 + 样本标识)` 排序后按比例切，同样的输入总得到同样的划分；也可以给一份自己的划分清单。建之前服务器读每个标注，类别表以外的类别直接拒绝。
 - 训练脚本只认这个 ID，模型登记时带上它，追溯链就从模型接到了具体文件。模型版本引用快照里的那张类别表，推理和评估都按它解释类别编号。这就是之前定的五个文件约定里的“数据导出清单”。
 
 ## 模型版本
@@ -146,9 +148,9 @@ flowchart TB
 
 ```python
 import fw
-ts = fw.get_trainset('SES-TX-ts-12')     # 取到本地，返回目录和清单
-# ……现有训练代码读 ts.dir……
-fw.register_model('SES-TX-detr', onnx='best.onnx', trainset=ts.id, metrics='val.json')
+ts = fw.get_trainset('SES-TX-det@2', '/data/train/SES-TX-det@2')   # 取到本地，返回 id、目录、类别表
+# ……现有训练代码读 ts['path']……
+fw.register_model('SES-TX-detr', onnx='best.onnx', trainset=ts['id'], metrics='val.json')   # 第二步后半，名字待定
 ```
 
 ## 预标注和推理任务

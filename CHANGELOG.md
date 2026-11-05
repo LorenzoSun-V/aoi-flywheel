@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.2.0（未发布）
+
+第二步：训练集快照、模型版本、引擎、评估、发布和追溯链。
+
+- 新增训练集快照：`fw trainset create` 从一个或几个数据池版本建快照，每张图分到 train、val 或 test，连同类别表冻结；先预览每个划分的张数和每类框数，确认后才建。同名再建一版时默认接着上一版的划分（原来的样本不换划分，新样本进 test），可选 `--test-dirs`、`--merge-test`、`--new-to trainval`、`--split-file`、`--fresh`。标注里有类别表以外的类别、YOLO 编号超出范围、标注没有图片等情况直接拒绝。格式见[训练集快照的格式](docs/trainset-format.md)。
+- 建快照时服务器把标注转成 YOLO 和 COCO 检测框，和图片、原始 LiteAnno JSON 一起冻结；`fw get <快照>` 默认摆成 YOLO 的目录并生成 `data.yaml`，`--format coco` 摆成 RF-DETR 读的 COCO 目录，`--format json` 摆成 LiteAnno 能直接打开的目录。类别编号都是 classes.txt 的行号。
+- `fw trainset list`、`fw trainset show`；快照用 `fw get`、`fw export`、`fw verify`、`fw dataset diff` 取回、导出、核对和对比，和数据集版本一样。训练脚本用 `fw.get_trainset()` 取快照，返回 id、目录、类别表和 `data_yaml`。
+- `fw dataset list` 里快照的类型显示为「训练集快照」；往快照里 `fw dataset import` 会被拒绝。
+- 数据池里是 YOLO txt 标注的图，建快照时从框生成 LiteAnno JSON（矩形），`--format json` 也能取回、用 LiteAnno 打开。
+- `--require-labels`：要求每张图都有标注，有没标注的图就不建（默认当负样本）。
+- 数据库迁移 `0002_trainsets.sql`：服务启动时自动应用，不用手动操作；升级前照常备份。
+- 审查后修正（合并前）：确认后冻结的是预览时定下的来源版本；`--split-file` 建的版本 `based_on` 为空；YOLO 目录里原路径中叫 `images` 的目录改名为 `images_`，ultralytics 和 aoi-deteval 才找得到标注；YOLO txt 的 UTF-8 BOM 冻结时去掉；同一现场和产线的两个来源有同名不同扩展名的图片时不建；没有 train 或 val 时预览和 `fw get` 明确提醒；名称和第一版一起建，失败不留空名称，同时建同名第一版返回 409 而不是 500；`fw dataset create` 同时建同名数据集也返回 409。
+
 ## 0.1.0（未发布）
 
 第一步：文件库、数据集版本、`fw` 命令行，加部署、在线备份和恢复。

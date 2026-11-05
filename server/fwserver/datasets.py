@@ -12,14 +12,14 @@ A failure anywhere leaves no version behind; objects already uploaded stay and a
 from __future__ import annotations
 
 import re
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from fw.contract import ContractError, classify_changes, parse_manifest
 
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
-KINDS = ('pool', 'test', 'regression', 'other')
+KINDS = ('pool', 'test', 'regression', 'other')  # what people create; 'trainset' is made by trainsets.py
 
 
 class DatasetError(Exception):
@@ -40,7 +40,7 @@ def _stamp(t) -> Optional[str]:
 
 
 _VERSION = """
-SELECT v.id, d.name AS dataset, v.number, v.parent_id, pd.name AS parent_dataset, p.number AS parent_number,
+SELECT v.id, d.name AS dataset, d.kind, v.number, v.parent_id, pd.name AS parent_dataset, p.number AS parent_number,
        encode(v.manifest_sha256, 'hex') AS manifest_sha256, v.file_count, v.total_bytes, v.source, v.note,
        u.name AS created_by, v.created_at
 FROM versions v
@@ -56,7 +56,7 @@ def _version(row: dict) -> dict:
     if row['parent_id'] is not None:
         parent = {'id': row['parent_id'], 'dataset': row['parent_dataset'], 'number': row['parent_number'],
                   'ref': f'{row["parent_dataset"]}@{row["parent_number"]}'}
-    return {'id': row['id'], 'dataset': row['dataset'], 'number': row['number'],
+    return {'id': row['id'], 'dataset': row['dataset'], 'kind': row['kind'], 'number': row['number'],
             'ref': f'{row["dataset"]}@{row["number"]}', 'parent': parent,
             'manifest_sha256': row['manifest_sha256'], 'file_count': row['file_count'],
             'total_bytes': row['total_bytes'], 'source': row['source'], 'note': row['note'],
@@ -94,17 +94,23 @@ def get_dataset(conn, name: str) -> dict:
 
 
 def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = '', kind: str = 'pool',
-                   note: str = '') -> dict:
+                   note: str = '', internal: bool = False) -> dict:
+    """internal: also allow kind 'trainset' (only trainsets.py creates those)."""
     if not NAME.match(name or ''):
-        raise DatasetError(400, '数据集名只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
-    if kind not in KINDS:
+        raise DatasetError(400, '名称只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
+    if kind not in KINDS and not (internal and kind == 'trainset'):
         raise DatasetError(400, f'类型只能是 {"、".join(KINDS)}')
     with conn.transaction():
-        if conn.execute('SELECT 1 FROM datasets WHERE lower(name) = lower(%s)', (name,)).fetchone():
-            raise DatasetError(409, f'数据集 {name} 已经存在（名称不分大小写）')
-        conn.execute('INSERT INTO datasets (name, site, line, kind, note, created_by) VALUES (%s, %s, %s, %s, %s, %s)',
-                     (name, site, line, kind, note, user_id))
+        if not _insert_dataset(conn, user_id, name, site, line, kind, note):
+            raise DatasetError(409, f'{name} 已经存在（数据集和训练集快照共用名称，不分大小写）')
     return get_dataset(conn, name)
+
+
+def _insert_dataset(conn, user_id: int, name: str, site: str, line: str, kind: str, note: str) -> bool:
+    """False when the name is taken (also by someone committing it meanwhile: never a unique-key error)."""
+    return conn.execute('INSERT INTO datasets (name, site, line, kind, note, created_by) '
+                        'VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id',
+                        (name, site, line, kind, note, user_id)).fetchone() is not None
 
 
 def list_versions(conn, name: str) -> List[dict]:
@@ -137,7 +143,12 @@ def get_version_by_id(conn, version_id: int) -> dict:
 
 def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256: str, parent_id: Optional[int],
                    expect_latest_id: Optional[int], source: str = '', note: str = '',
-                   before_freeze: Optional[Callable[[], None]] = None) -> dict:
+                   before_freeze: Optional[Callable[[], None]] = None, trainset: bool = False,
+                   record: Optional[Callable[[Any, int], None]] = None, new_dataset: Optional[dict] = None) -> dict:
+    """trainset: the dataset must be a trainset (and only then may it be one); record(conn, version_id) writes
+    the trainset's own rows inside the transaction, before the version is frozen. new_dataset (site, line,
+    kind, note): create the dataset in the same transaction, so a failed first version leaves no name behind;
+    if the name was taken meanwhile, nothing is created (409)."""
     check_digest(manifest_sha256)
     data = store.read(manifest_sha256)
     if data is None:
@@ -158,15 +169,24 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
         raise DatasetError(503, str(e)) from None
     total = sum(s for _, _, s in entries)
     with conn.transaction():
-        dataset = conn.execute('SELECT id, name FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
+        if new_dataset is not None and not _insert_dataset(conn, user_id, name, new_dataset['site'],
+                                                           new_dataset['line'], new_dataset['kind'],
+                                                           new_dataset['note']):
+            again = '请重新运行 fw trainset create' if trainset else '请重新运行导入'
+            raise DatasetError(409, f'{name} 在这期间被别人建了；{again}')
+        dataset = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
                                (name,)).fetchone()
         if dataset is None:
             raise DatasetError(404, f'没有数据集 {name}')
+        if (dataset['kind'] == 'trainset') != trainset:
+            raise DatasetError(400, f'{dataset["name"]} 是训练集快照，只能用 fw trainset create 建新版本'
+                               if dataset['kind'] == 'trainset' else f'{dataset["name"]} 不是训练集快照')
         latest = conn.execute('SELECT id, number FROM versions WHERE dataset_id = %s ORDER BY number DESC LIMIT 1',
                               (dataset['id'],)).fetchone()
         if (latest['id'] if latest else None) != expect_latest_id:
             now = f'@{latest["number"]}' if latest else '没有版本'
-            raise DatasetError(409, f'{dataset["name"]} 在这期间有了变化（最新是 {now}）；请重新运行导入，以最新版本为父版本')
+            again = '请重新运行 fw trainset create' if trainset else '请重新运行导入，以最新版本为父版本'
+            raise DatasetError(409, f'{dataset["name"]} 在这期间有了变化（最新是 {now}）；{again}')
         if parent_id is not None:
             parent = conn.execute("SELECT encode(manifest_sha256, 'hex') AS m FROM versions WHERE id = %s",
                                   (parent_id,)).fetchone()
@@ -185,6 +205,8 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
                 cp.set_types(['int8', 'text', 'bytea', 'int8'])
                 for path, digest, size in entries:
                     cp.write_row((version_id, path, bytes.fromhex(digest), size))
+        if record is not None:
+            record(conn, version_id)
         if before_freeze is not None:
             before_freeze()  # tests: a failure between writing the rows and freezing
         conn.execute('UPDATE versions SET frozen = true WHERE id = %s', (version_id,))

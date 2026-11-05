@@ -10,6 +10,7 @@
 | `docs/commands.md` | 每条命令、选项、环境变量、常见问题 | 加命令、加选项、改输出或报错 |
 | `docs/architecture.md` | 设计和取舍（在线设计文档的副本） | 设计变了 |
 | `docs/manifest-format.md` | 清单格式 1 | 格式变了（只能出新版本，见下文） |
+| `docs/trainset-format.md` | 训练集快照的目录、`classes.txt`、`trainset.json`、划分规则 | 快照格式或划分规则变了 |
 | `docs/development.md` | 本文 | 分层、规则、测试方式变了 |
 | `CHANGELOG.md` | 每个 PR 用户能看到的变化 | 每个 PR |
 
@@ -19,18 +20,22 @@
 
 ```
 client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8 起，Windows、Linux）
-  contract.py        客户端和服务端共用：路径规则、哈希、清单格式、fw-objects 批量传输格式、版本差异
+  contract.py        客户端和服务端共用：路径规则、哈希、清单格式、fw-objects 批量传输格式、版本差异、
+                     哪些扩展名算图片和标注
   checks.py          导入前对目录的检查（只读，不连平台）
   api.py             平台 HTTP 接口的客户端，所有请求从这里出去
   cache.py           本机缓存：按哈希存的文件 + SQLite 索引（大小、修改时间）
   layout.py          把缓存里的文件摆成版本的目录：reflink、复制、硬链接，每个文件摆完都核对哈希
   pool.py            并行跑一组任务（上传、下载）：出错或 Ctrl+C 时取消还没开始的，不等手上的
-  ops.py             每条命令真正做的事（import_folder、get、export、verify、diff、get_version）
+  ops.py             每条命令真正做的事（import_folder、get、export、verify、diff、get_version、
+                     create_trainset、get_trainset）
   cli.py             命令行参数和输出格式，只调 ops
   config.py          设置文件和缓存的位置
 server/fwserver/     fw-server：只支持 Linux
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
+  trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
+  formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
   datasets.py        数据集和版本：建版本、冻结、差异、核对（verify）
   auth.py            账号、角色、凭据（只存凭据的 sha256）
   store.py           文件库：写入、落盘（syncfs）、停写标记、核对时的读取和隔离
@@ -45,7 +50,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ### 分层（`lint-imports` 检查）
 
-- 服务端只能往下调：`cli`、`app` → `datasets`、`auth` → `store`、`db`、`settings`。
+- 服务端只能往下调：`cli`、`app` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
 - 客户端永远不 import 服务端。
 - `fw.contract` 不依赖 `fw` 里的任何其他模块：服务端也 import 它，它必须保持纯粹。
 
@@ -69,6 +74,20 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 2. `cache.fetch_many`：先 `cached_many` 看缓存里有哪些（大小和修改时间和索引一致才算），其余的分批下载；每个下载的文件先核对哈希，再原子地放进缓存。
 3. `Layout.place` 把每个文件从缓存摆到目标路径（reflink → 复制，或硬链接），摆完重算哈希；对不上就强制重新下载这个内容（`cache.fetch(force=True)`），第二次还不对就报错。
 
+## 一次建训练集快照在代码里怎么走
+
+`fw trainset create`（`ops.create_trainset`）先调预览接口，确认后再调建快照接口，两次的参数一样，只是来源换成预览解析出的具体版本（`SES-TX` → `SES-TX@4`；建快照接口不收没有序号的来源）。服务端两次都走 `trainsets.plan`，建快照时 `trainsets.create` 再按同样的参数重算一遍，所以冻结的就是预览给人看的：
+
+1. `_sources`：解析来源版本，拒绝快照做来源、没填现场或产线的数据集。
+2. `_samples`：按同目录同名配对图片和标注，样本标识是 `<现场>/<产线>/<图片路径>`；两个来源里去掉扩展名后相同的图片拒绝（标注路径会一样）。
+3. `_read_labels`：从文件库读每个标注（同一内容只读一次，`formats.parse_json` / `parse_txt`），核对类别、形状和尺寸，把框裁到图片内。
+4. `_latest_trainset`、`_previous_splits`：同名快照的最新版，从它的目录结构读回每个样本的划分（按带扩展名的完整标识，标注按同划分同名找）。用划分清单或 `--fresh` 时不接着它。
+5. `_assign`：划分清单、接着上一版、或重新划分；train/val 用 `_cut` 按 `sha256(种子\n标识)` 排序后按比例切。
+6. `_formats`、`_tree`：看能生成哪些格式（COCO 要每张图的尺寸），摆出 `images/`、`labels/`、`json/`、`coco/`，加上 `classes.txt`、`trainset.json`；核对路径规则，并用 `contract.trainset_layout` 核对每种取回格式摆出来都不冲突。转出来的 YOLO 和 COCO 文件放在 `Plan.blobs` 里，建快照时写进文件库。
+7. `create`：先看最新版还是不是预览时那个（不是就 409），把 `classes.txt`、`trainset.json`、清单写进文件库，再调 `datasets.create_version(trainset=True, record=…, new_dataset=…)`：第一版时在同一个事务里先插入数据集那一行（`ON CONFLICT DO NOTHING`，别人同时建了就 409），再在冻结之前写 `trainset_versions` 和 `trainset_sources` 两张表。所以第一版失败不留下空名称。
+
+快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径（YOLO 时再写 `data.yaml`，并用 `yolo_safe` 把原路径里叫 `images` 的目录改名，因为 ultralytics 和 aoi-deteval 把最后一个 `images/` 换成 `labels/` 找标注）。
+
 ## 绝不能破的规则
 
 每条后面是守住它的地方和测试。改到相关代码时，先跑这些测试；新的修复先写一个在旧代码上失败的复现测试。
@@ -87,6 +106,11 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 改取出来的文件不影响缓存；硬链接只在明确要求时用，只限 Linux | `layout.py`、`ops.get` | `test_editing_a_fetched_folder_leaves_the_cache_alone`、`test_hardlink_*` |
 | Ctrl+C 立即生效，不等还在排队的上传、下载（Windows 上无超时的等待接不到 Ctrl+C） | `pool.run_all`（单个任务也在线程里跑）、`cli._on_sigint` 不做清理直接 `os._exit(130)`、`Cache.close` 不等别的线程 | `test_pool.py`、`test_cache.py`、`test_ctrl_c_*` |
 | 同一数据集同时导入，后提交的被拒，不悄悄覆盖 | `datasets.create_version` | `test_concurrent_import_into_same_dataset_is_refused`、`test_someone_else_added_a_version_meanwhile` |
+| 训练集快照的记录（类别、规则、统计、来源）冻结后不能改、不能删；只有快照有这份记录，快照都有；有版本的数据集不能改类型 | 数据库触发器（`0002_trainsets.sql`） | `test_snapshot_record_cannot_change`、`test_only_trainset_versions_have_a_record` |
+| 快照只能用 `fw trainset create` 建；标注里的类别都在类别表里；冻结的就是预览的（包括来源版本）；预览后有人建了新版就不建；同时建同名第一版只成一个，另一个 409 | `datasets.create_version` 的 `trainset`、`new_dataset` 参数、`trainsets.create` | `test_trainsets_are_made_only_by_trainset_create`、`test_bad_labels_are_refused`、`test_someone_else_made_one_meanwhile`、`test_what_was_previewed_is_what_is_frozen`、`test_two_first_versions_at_once` |
+| YOLO 格式里每张图的标注就在 ultralytics 找的位置 | `contract.yolo_safe`、`trainsets._tree`（去掉 BOM） | `test_images_folders_inside_the_pool_path`、`test_yolo_label_with_a_bom`、`test_yolo_layout_renames_images_folders` |
+| 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split` |
+| 转好的 YOLO / COCO 标注随快照冻结，取回只改路径不改内容；转不了的形状、图外的框不悄悄丢掉，直接不建 | `formats.py`、`trainsets._tree`、`contract.trainset_layout` | `test_formats.py`、`test_first_snapshot_layout_and_formats`、`test_labels_that_cannot_be_detection_boxes` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
 ## 数据库和迁移
@@ -102,6 +126,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 这些一旦有数据或有别的机器在用，就不能悄悄改：
 
 - **清单格式 1**（`docs/manifest-format.md`）：清单哈希就是版本内容的标识，改格式会让所有旧版本的哈希对不上。要改只能出「清单格式 2」，两种都能读。
+- **训练集快照格式 1**（`docs/trainset-format.md`，`trainset.json` 里的 `fw-trainset 1`）：训练代码按它读目录。可以往 `trainset.json` 加键、加新的格式目录；改目录结构、已有键的含义或 `trainset_layout` 摆出来的路径要出 `fw-trainset 2`。划分算法（`_cut`）和标注转换（`formats.py`）改了不影响已有快照（它们冻结的是结果），但同样的参数会得到不一样的新快照，要在更新记录里写清楚。
 - **fw-objects 1**（`contract.py` 的批量传输格式）：新旧 `fw` 和服务端要能互通；要改就出新的格式号，服务端同时支持一段时间。
 - **HTTP 接口 `/api/v1`**：只加字段、加接口；改含义或删字段要出 `/api/v2`。
 - **路径规则**（`contract.path_problem`、`collisions`）：放宽会让 Windows 上取不回；收紧会让旧版本在新规则下报错。改之前要想清楚旧数据。
@@ -110,7 +135,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ```
 python -m venv .venv && . .venv/bin/activate
-pip install -c deploy/constraints.txt -e ./client -e ./server pytest import-linter
+pip install -c deploy/constraints.txt -e ./client -e ./server pytest import-linter pillow   # pillow 只给测试用
 lint-imports
 pytest -q tests/client                                                  # 不需要数据库
 FW_TEST_ADMIN_DSN=postgresql://fw@127.0.0.1:5432/postgres pytest -q tests
@@ -137,7 +162,7 @@ CI（`.github/workflows/ci.yml`）有五个作业：服务端和全部测试（L
 
 **加导入检查**：写在 `checks.py`，分清「拒绝」（放进 `blocking()`）和「只提醒」；拒绝的要给出能照着做的办法和放行的选项。
 
-**下一步（第二步）**：模型版本、训练集快照、引擎、发布和追溯链，会是 `server/fwserver/` 里与 `datasets.py` 同层的新模块和新的迁移，客户端加 `fw model …` 一组命令。训练集快照要冻结每张图实际属于 trainval 还是 test、类别 id 和名称的对应，见架构文档。
+**下一步（第二步其余部分）**：模型版本、引擎、评估报告、发布和追溯链，会是 `server/fwserver/` 里在 `trainsets.py` 之上的新模块和新的迁移，客户端加 `fw model …` 一组命令。模型版本引用训练集快照的版本 id 和它的类别表。
 
 ## 约定
 
