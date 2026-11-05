@@ -109,8 +109,8 @@ CREATE TRIGGER fileset_files_delete AFTER DELETE ON fileset_files
 CREATE TABLE models (
   id          bigserial PRIMARY KEY,
   name        text NOT NULL CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-  site        text NOT NULL CHECK (site ~ '^[A-Za-z0-9_.]+$'),  -- = models.SITE_LINE: release refs are <site>-<line>-r<n>
-  line        text NOT NULL CHECK (line ~ '^[A-Za-z0-9_.]+$'),
+  site        text NOT NULL CHECK (site ~ '^[A-Za-z0-9_.\u3400-\u4DBF\u4E00-\u9FFF]+$'),  -- = models.SITE_LINE: release refs are <site>-<line>-r<n>
+  line        text NOT NULL CHECK (line ~ '^[A-Za-z0-9_.\u3400-\u4DBF\u4E00-\u9FFF]+$'),
   task        text NOT NULL CHECK (task IN ('det')),
   note        text NOT NULL DEFAULT '',
   created_by  bigint NOT NULL REFERENCES users(id),
@@ -214,8 +214,8 @@ CREATE TRIGGER eval_reports_check BEFORE INSERT ON eval_reports
 -- late with an earlier deployed_at never displaces the one actually deployed after it.
 CREATE TABLE releases (
   id                bigserial PRIMARY KEY,
-  site              text NOT NULL CHECK (site ~ '^[A-Za-z0-9_.]+$'),  -- = models.SITE_LINE: a ref names one line
-  line              text NOT NULL CHECK (line ~ '^[A-Za-z0-9_.]+$'),
+  site              text NOT NULL CHECK (site ~ '^[A-Za-z0-9_.\u3400-\u4DBF\u4E00-\u9FFF]+$'),  -- = models.SITE_LINE: a ref names one line
+  line              text NOT NULL CHECK (line ~ '^[A-Za-z0-9_.\u3400-\u4DBF\u4E00-\u9FFF]+$'),
   number            int NOT NULL CHECK (number > 0),
   model_version_id  bigint NOT NULL REFERENCES model_versions(id),
   deploy_repo       text NOT NULL CHECK (deploy_repo <> '' AND deploy_repo !~* '^https?://[^/]*@'),

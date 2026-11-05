@@ -32,7 +32,9 @@ SPLITS = ('train', 'val', 'test')
 ONNX, CLASSES, METRICS, EXTRA = 'model.onnx', 'classes.txt', 'metrics.json', 'files/'
 COMMIT = re.compile(r'[0-9a-f]{7,64}\Z')
 CREDENTIALS = re.compile(r'https?://[^/]*@', re.I)
-SITE_LINE = re.compile(r'[A-Za-z0-9_.]+\Z')  # the same as the CHECK on models and releases
+# Letters, digits, _ and . plus Chinese characters (CJK unified ideographs and extension A), by code point,
+# so that it does not depend on the database's locale: the same as the CHECKs on models and releases.
+SITE_LINE = re.compile(r'[A-Za-z0-9_.\u3400-\u4DBF\u4E00-\u9FFF]+\Z')
 RELEASE_REF = re.compile(r'(.+)-r([1-9][0-9]*)\Z')
 MAX_FILES = 5000
 MAX_METRICS = 1 << 20
@@ -80,7 +82,7 @@ def _name(value: str, what: str) -> str:
     if not value:
         raise DatasetError(400, f'要写{what}')
     if not SITE_LINE.match(value):
-        raise DatasetError(400, f'{what}只能用英文字母、数字、_ 和 .（发布编号是 <现场>-<产线>-r<序号>）：{value}')
+        raise DatasetError(400, f'{what}只能用汉字、英文字母、数字、_ 和 .（发布编号是 <现场>-<产线>-r<序号>）：{value}')
     return value
 
 

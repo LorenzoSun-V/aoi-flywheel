@@ -346,20 +346,21 @@ def test_a_token_in_the_repository_is_never_printed(api, model, snapshot, tmp_pa
 
 def test_two_lines_never_share_a_release_ref(api, make_api, snapshot, tmp_path):
     name = f'M-{uuid.uuid4().hex[:8]}'
-    with pytest.raises(ApiError, match='只能用英文字母'):
+    with pytest.raises(ApiError, match='只能用汉字'):
         api.create_model(name, 'A-B', 'C', 'det', '')
     api.create_model(name, 'A', 'B', 'det', '')
     register(api, name, snapshot, files_in(tmp_path))
     for site, line in (('A-B', 'C'), ('A', 'B-C'), ('SES/A', 'TX'), ('SES', 'T X'), ('S%2F', 'TX'), ('S?', 'TX'),
-                       ('SES@A', 'TX'), ('现场1', 'TX')):
-        with pytest.raises(ApiError, match='只能用英文字母、数字'):
+                       ('SES@A', 'TX'), ('现场／1', 'TX'), ('现场 1', 'TX')):
+        with pytest.raises(ApiError, match='只能用汉字、英文字母、数字'):
             release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site=site, line=line)
-    r = release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site='S1', line='L_2.a')
-    assert api.release(r['ref'])['ref'] == r['ref'] == 'S1-L_2.a-r1'
+    r = release(make_api('deploy'), f'{name}@1', '2026-10-20T10:00+08:00', site='现场1', line='线_2.a')
+    assert api.release(r['ref'])['ref'] == r['ref'] == '现场1-线_2.a-r1'
     assert api.chain(r['ref'])['release']['ref'] == r['ref']
 
 
-@pytest.mark.parametrize('value', ['SES', 'L_2.a', 'SES@A', 'A-B', 'a/b', ' a', 'a\tb', '现场', 'x%2F', 'a#b', ''])
+@pytest.mark.parametrize('value', ['SES', 'L_2.a', '现场1', '线_2.a', '\u3400', '\u9fff', 'SES@A', 'A-B', 'a/b', ' a',
+                                   'a\tb', '现场／1', '현장', '😀', '\u4dc0', 'é', 'x%2F', 'a#b', ''])
 def test_the_database_takes_the_names_the_server_takes(sql, api, model, snapshot, tmp_path, value):
     """Re-review 14:05: one rule for sites and lines, in models.SITE_LINE and in the CHECKs of 0003."""
     mv = api.model_version(model, 1) if api.model_versions(model) else register(api, model, snapshot, files_in(tmp_path))
