@@ -438,3 +438,39 @@ def test_training_scripts_can_catch_platform_errors_from_the_package():
     import fw
     from fw.api import ApiError
     assert fw.ApiError is ApiError and not issubclass(fw.ApiError, fw.FwError)
+
+
+def test_ctrl_c_during_an_upload_takes_effect_at_once(tmp_path, api, monkeypatch):
+    """Field report (Windows): Ctrl+C did nothing until every file was uploaded, then said 已中断."""
+    import signal
+    import time
+    monkeypatch.setattr(ops, 'UPLOAD_COUNT', 5)
+    src = make_folder(tmp_path / 'src', {f'img{i:03d}.png': b'%d' % i for i in range(300)})
+    real, calls = api.put_objects, []
+
+    def slow(items):
+        calls.append(len(items))
+        if len(calls) == 1:
+            time.sleep(3)  # the first batch is slow (a weak network)
+        elif len(calls) == 2:
+            time.sleep(0.1)
+            signal.raise_signal(signal.SIGINT)
+        return real(items)
+
+    monkeypatch.setattr(api, 'put_objects', slow)
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        ops.import_folder(api, 'SES-TX', src, workers=4, echo=quiet)
+    assert time.monotonic() - started < 2
+    assert not api.versions('SES-TX')
+
+
+def test_ctrl_c_ends_the_command_without_waiting_for_uploads_in_flight(monkeypatch, capsys):
+    """After Ctrl+C the fw command exits at once: a batch still being sent is dropped (the server keeps
+    nothing it has not checked), so the person is not left waiting for it."""
+    from fw import cli
+    exits = []
+    monkeypatch.setattr(cli.os, '_exit', exits.append)
+    monkeypatch.setattr(cli.ops, 'connect', lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+    cli.main(['whoami'])
+    assert exits == [130] and '已中断' in capsys.readouterr().err
