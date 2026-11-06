@@ -573,6 +573,30 @@ def test_short_paths_that_collide_are_refused(api, tmp_path):
     assert ok['problems'] == []
 
 
+def test_short_paths_never_share_a_label(api, tmp_path):
+    # review of #11: images/1.jpg with labels/1.txt and an unlabeled 1.png would both read labels/train/1.txt
+    src = pool(api, tmp_path, {'images/1.jpg': png(uuid.uuid4().hex), 'labels/1.txt': yolo_line(0).encode(),
+                               '1.png': png(uuid.uuid4().hex)})
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES,
+                                                                  'val': 0})
+    assert any('共用一份标注' in p and 'images/train/1.jpg' in p and 'images/train/1.png' in p
+               for p in preview['problems']), preview['problems']
+
+
+def test_an_old_layout_snapshot_can_be_made_again_with_short_paths(api, tmp_path, monkeypatch):
+    # review of #11: no COCO (size unreadable), so only the layout differs from the snapshot made before 0.2.3
+    src = pool(api, tmp_path, {'a.png': b'no header'})
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    monkeypatch.setattr(trainsets, 'PATHS', None)
+    old = make(api, name, [f'{src}@1'])
+    assert 'paths' not in old['trainset']['rule'] and 'coco' not in old['trainset']['formats']
+    monkeypatch.setattr(trainsets, 'PATHS', 'short')
+    new = make(api, name, [f'{src}@1'])
+    assert new['number'] == 2 and new['trainset']['rule']['paths'] == 'short'
+    preview = api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES})
+    assert any('完全一样' in p for p in preview['problems'])  # the same layout again is unchanged
+
+
 def test_one_label_is_never_given_to_two_images(api, tmp_path):
     # review of #10: labels/a.txt is next to an image labels/a.png and where YOLO looks for images/a.png
     files = {'b/images/a.png': png(uuid.uuid4().hex), 'b/labels/a.png': png(uuid.uuid4().hex),

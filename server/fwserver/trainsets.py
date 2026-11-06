@@ -48,6 +48,7 @@ from .formats import Label, Size
 from .store import Store
 
 FORMAT = 'fw-trainset 1'
+PATHS = 'short'  # how fw get lays out new snapshots (rule 'paths'); None was the layout before 0.2.3
 SPLITS = ('train', 'val', 'test')
 NEW_TO = ('test', 'trainval')
 MAX_CLASSES = 1000
@@ -583,6 +584,14 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         twins = sorted(p for p, n in Counter(short_layout).items() if n > 1)
         problems += [f'取回时路径去掉现场/产线和 images 这层目录后重名（{fmt} 格式）：{p}'
                      for p in twins + collisions(short_layout)]
+    # an image finds its label by its stem (YOLO: labels/<same path>.txt, LiteAnno: the .json next to it), so two
+    # images whose short paths differ only in the extension would share one label, even when one has none
+    for fmt in ('yolo', 'json'):
+        pictures = trainset_layout([e for e in entries if e[0].startswith('images/')], fmt, short=True)
+        stems = Counter(_stem(path) for path, _, _ in pictures)
+        problems += [f'取回时路径去掉现场/产线和 images 这层目录后，同名不同扩展名的图片会共用一份标注（{fmt} 格式）：'
+                     f'{"、".join(p for p, _, _ in pictures if _stem(p) == stem)}'
+                     for stem, n in stems.items() if n > 1]
     return entries, blobs, sorted(set(problems))
 
 
@@ -628,7 +637,8 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     prev_splits = _previous_splits(conn, previous) if previous is not None else None
     rule, more = _assign(samples, o, prev_splits)
     problems += more
-    rule['paths'] = 'short'  # fw get lays it out with fw.contract.short_paths (older snapshots: full paths)
+    if PATHS:
+        rule['paths'] = PATHS  # fw get lays it out with fw.contract.short_paths (older snapshots: full paths)
     if o.label_source is not None:  # how the labels were read: kept with the split rule, for people
         rule['label_source'] = o.label_source
     if o.label_classes is not None:
@@ -662,7 +672,8 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
             'formats': summary['formats'], 'missing_formats': summary['missing_formats']}
     classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
     p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
-    if latest is not None and not p.problems and _same_content(conn, latest, p.entries):
+    if latest is not None and not p.problems and _same_content(conn, latest, p.entries) and \
+            (_previous_rule(conn, latest) or {}).get('paths') == rule.get('paths'):  # a new layout is a change
         p.problems.append(f'和 {latest["ref"]} 完全一样（样本、划分、标注和类别表都没变），不用建新快照')
     return p
 
@@ -670,6 +681,11 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
 def _previous_classes(conn, previous: dict) -> Optional[list]:
     row = conn.execute('SELECT classes FROM trainset_versions WHERE version_id = %s', (previous['id'],)).fetchone()
     return row['classes'] if row else None
+
+
+def _previous_rule(conn, previous: dict) -> Optional[dict]:
+    row = conn.execute('SELECT rule FROM trainset_versions WHERE version_id = %s', (previous['id'],)).fetchone()
+    return row['rule'] if row else None
 
 
 def _same_content(conn, latest: dict, entries: List[File]) -> bool:

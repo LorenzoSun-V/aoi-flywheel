@@ -7,6 +7,10 @@
 - `fw get` 取回训练集快照时路径变短：去掉 `<现场>/<产线>/` 两层和数据池里的 YOLO `images/` 层，`images/train/SES/TX/images_/1.bmp` 变成 `images/train/1.bmp`（`labels/`、`--format coco`、`--format json` 同样）。快照里存的路径和样本标识不变（`--format all`、划分清单照旧）。去掉后有两张图路径相同（几个来源里同路径的图，或者池里同时有 `images/a.png` 和 `a.png`）时不建快照。新快照的 `rule` 里记 `"paths": "short"`，COCO 的 `file_name` 也是短路径；以前建的快照取回时仍是长路径。新服务器建的快照要用新版 `fw` 取，旧版 `fw` 会按长路径摆，COCO 对不上。
 - `fw dataset import` 的扫描也按 `images/` ↔ `labels/` 配对，不再把配好的图和 txt 报成「没有标注的图片」「找不到图片的标注」。
 - `fw get --format json` 把 LiteAnno JSON 放在每张图旁边（以前就是这样，手册补上说明：`--format all` 的 JSON 单独在 `json/` 下，LiteAnno 读不到）。
+- 复审后修正（合并前）：
+  - 去掉几层后只差扩展名的两张图（例如 `images/1.bmp` 有标注、`1.png` 没有）会共用一份标注（YOLO 的 `labels/train/1.txt`、LiteAnno 的 `1.json`），这样的快照也不建。
+  - 导入扫描里 `labels/a.json` 不再因为旁边有配上的 `labels/a.txt` 就算作配上（YOLO 只认 txt），会报「找不到图片的标注」。
+  - 0.2.3 以前建的快照用同样的输入续建时，只是取回布局变了也能建新版，不再报「完全一样」。
 
 ## 0.2.2（未发布）
 

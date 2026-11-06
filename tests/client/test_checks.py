@@ -29,11 +29,12 @@ def test_report_and_blocking(tmp_path):
 def test_yolo_labels_pair_with_images(tmp_path):
     # tx_v8/images/1.bmp + tx_v8/labels/1.txt: the import used to call both unpaired
     for rel in ['images/1.bmp', 'labels/1.txt', 'images/2.bmp', 'labels/3.txt', 'b1/images/x/4.png',
-                'b1/labels/x/4.txt', 'images/5.png', 'labels/5.json']:
+                'b1/labels/x/4.txt', 'images/5.png', 'labels/5.json', 'images/6.png', 'labels/6.txt',
+                'labels/6.json']:
         write(tmp_path, rel, rel.encode())
     r = scan_folder(tmp_path)
     assert r.unlabeled_images == ['images/2', 'images/5']  # YOLO only reads .txt from labels/
-    assert r.orphan_labels == ['labels/3', 'labels/5']
+    assert r.orphan_labels == ['labels/3', 'labels/5', 'labels/6']  # labels/6.json: YOLO only takes the .txt
 
 
 def test_same_stem_images_need_force(tmp_path):

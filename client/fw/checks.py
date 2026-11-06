@@ -136,8 +136,9 @@ def scan_folder(folder) -> FolderReport:
     # where YOLO looks for it (images/ -> labels/)
     yolo = {s: yolo_label_stem(s + '.x') for s in image_stems}
     report.unlabeled_images = sorted(s for s in image_stems if s not in label_stems and yolo[s] not in txt_stems)
-    yolo_found = {y for y in yolo.values() if y in txt_stems}
-    report.orphan_labels = sorted(s for s in label_stems if s not in image_stems and s not in yolo_found)
+    yolo_found = {y for y in yolo.values() if y in txt_stems}  # only the .txt there is YOLO's
+    report.orphan_labels = sorted({_stem(rel) for rel in report.labels if _stem(rel) not in image_stems and not (
+        _stem(rel) in yolo_found and rel.lower().endswith('.txt'))})
     by_name: Dict[str, List[str]] = defaultdict(list)
     for rel in report.images:
         by_name[PurePosixPath(_stem(rel)).name.lower()].append(rel)

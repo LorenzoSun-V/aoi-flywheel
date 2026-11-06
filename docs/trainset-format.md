@@ -25,7 +25,7 @@ coco/<划分>.json                              这个划分的 COCO 检测标�
 
 `fw get <快照> --to <目录> --format <格式>`，默认 `yolo`。只改路径，内容就是冻结的文件，每个都按清单核对过。三种格式都带 `classes.txt` 和 `trainset.json`。
 
-**取回的路径比存的短**（0.2.3 起建的快照，`rule` 里有 `"paths": "short"`）：`<原路径>` 前的 `<现场>/<产线>/` 去掉，原路径里**最后一个**叫 `images` 的目录也去掉（数据池按 YOLO 放的 `images/` 层，它的 `labels/` 建快照时已经配好了）。例如数据池 `tx_v8` 的 `images/1.bmp` 取回成 `images/train/1.bmp`、`labels/train/1.txt`，`b1/images/x/2.png` 取回成 `images/train/b1/x/2.png`。去掉后有两张图路径相同（几个来源里有同路径的图，或者一个池里同时有 `images/a.png` 和 `a.png`）时不建快照，预览列出重名的路径。0.2.3 以前建的快照取回时仍是 `<现场>/<产线>/<原路径>`。
+**取回的路径比存的短**（0.2.3 起建的快照，`rule` 里有 `"paths": "short"`）：`<原路径>` 前的 `<现场>/<产线>/` 去掉，原路径里**最后一个**叫 `images` 的目录也去掉（数据池按 YOLO 放的 `images/` 层，它的 `labels/` 建快照时已经配好了）。例如数据池 `tx_v8` 的 `images/1.bmp` 取回成 `images/train/1.bmp`、`labels/train/1.txt`，`b1/images/x/2.png` 取回成 `images/train/b1/x/2.png`。去掉后有两张图路径相同（几个来源里有同路径的图，或者一个池里同时有 `images/a.png` 和 `a.png`），或者只差扩展名（`images/1.bmp` 和 `1.png` 会找同一个 `labels/train/1.txt`）时不建快照，预览列出这些路径。0.2.3 以前建的快照取回时仍是 `<现场>/<产线>/<原路径>`。
 
 | 格式 | 摆出来的目录 | 给谁用 |
 |---|---|---|
