@@ -561,13 +561,15 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
                     test_dirs=(), merge_test: bool = False, new_to: str = 'test',
                     split: Optional[Dict[str, str]] = None, fresh: bool = False, note: str = '',
                     require_labels: bool = False, dry_run: bool = False, confirm: Optional[Confirm] = None,
-                    echo: Echo = print) -> Optional[dict]:
+                    echo: Echo = print, label_source: Optional[str] = None) -> Optional[dict]:
     """Preview a training-set snapshot, ask, then freeze it. The server builds both from the same inputs (the
     source versions the preview resolved, e.g. SES-TX@4 for SES-TX), so what is frozen is what was shown; if
     someone made another snapshot of this name meanwhile, it refuses."""
     body = {'sources': list(sources), 'classes': list(classes), 'val': val, 'seed': seed,
             'test_dirs': list(test_dirs), 'merge_test': merge_test, 'new_to': new_to, 'split': split,
             'fresh': fresh, 'note': note, 'require_labels': require_labels}
+    if label_source is not None:  # only when given: a server from before this option still takes the request
+        body['label_source'] = label_source
     preview = api.preview_trainset(name, body)
     if preview['based_on']:
         how = f'接着 {preview["based_on"]} 的划分'

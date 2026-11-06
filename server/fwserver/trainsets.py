@@ -17,7 +17,7 @@ code or seed reads them.
 
 Making one (plan, then create):
 1. resolve the source pool versions; every source needs a site and a line (they name its folder);
-2. pair every image with the label of the same stem in its folder; refuse orphan labels and ambiguous pairs;
+2. pair every image with its label: the same stem in its folder, or the .txt YOLO finds (images/ -> labels/);\n   refuse orphan labels and ambiguous pairs (label_source picks json or txt for an image with both);
 3. read every label; refuse class names that are not in the class table, YOLO ids out of range, shapes that
    cannot be a detection box and boxes outside the image;
 4. assign splits: from a split file; or continuing the previous snapshot (old samples keep their split, new
@@ -81,6 +81,7 @@ class Options:
     fresh: bool = False  # do not continue the previous snapshot
     note: str = ''
     require_labels: bool = False  # refuse images without a label instead of keeping them as negatives
+    label_source: Optional[str] = None  # 'json' or 'txt': which label to use for an image that has both
 
 
 def _examples(items, n: int = EXAMPLES) -> str:
@@ -118,6 +119,8 @@ def check_options(o: Options) -> None:
         raise DatasetError(400, 'val 比例应在 0 到 1 之间（不含 1）')
     if o.new_to not in NEW_TO:
         raise DatasetError(400, f'新样本的去向只能是 {"、".join(NEW_TO)}')
+    if o.label_source is not None and o.label_source not in LABEL_SOURCES:
+        raise DatasetError(400, f'标注来源只能是 {"、".join(LABEL_SOURCES)}，不是 {o.label_source!r}')
     if o.split is not None and (o.test_dirs or o.merge_test):
         raise DatasetError(400, '用了划分清单，就不能再用 --test-dirs 或 --merge-test')
     if o.split is not None:
@@ -151,7 +154,23 @@ def _files(conn, version_id: int) -> List[File]:
         (version_id,))]
 
 
-def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
+def _yolo_label_stem(image_path: str) -> Optional[str]:
+    """Where ultralytics (and aoi-deteval) look for an image's label: its path with the LAST folder named images
+    turned into labels, e.g. b1/images/x/a.png -> b1/labels/x/a (then .txt). None without such a folder."""
+    parts = image_path.split('/')
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == 'images':
+            return _stem('/'.join(parts[:i] + ['labels'] + parts[i + 1:]))
+    return None
+
+
+LABEL_SOURCES = ('json', 'txt')
+
+
+def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[str, Sample], List[str]]:
+    """Pair every image with its label: a .json or .txt of the same name in its folder, or the .txt where YOLO
+    looks for it (images/ -> labels/). An image with more than one: label_source ('json' or 'txt') picks the
+    kind; still more than one, or none given, is refused. Labels no image claims are refused (orphans)."""
     samples: Dict[str, Sample] = {}
     stems: Dict[str, str] = {}  # <site>/<line>/<image path without extension> -> key: their labels share a path
     problems = []
@@ -167,18 +186,44 @@ def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
                 images[_stem(f[0])].append(f)
             elif ext in LABEL_EXTS:
                 labels[_stem(f[0])].append(f)
-        orphans = sorted(s for s in labels if s not in images)
+        candidates: Dict[str, List[File]] = {}
+        claimed = set()
+        for stem in images:
+            found = list(labels.get(stem, ()))
+            yolo = _yolo_label_stem(images[stem][0][0])
+            if yolo is not None:
+                found += [f for f in labels.get(yolo, ()) if f[0].lower().endswith('.txt')]
+            candidates[stem] = found
+            claimed.update(f[0] for f in found)
+        orphans = sorted(f[0] for group in labels.values() for f in group if f[0] not in claimed)
         if orphans:
-            problems.append(f'{version["ref"]} 有 {len(orphans)} 个标注没有对应的图片：{_examples(orphans)}')
+            problems.append(f'{version["ref"]} 有 {len(orphans)} 个标注没有对应的图片（同目录同名，或 YOLO 的 '
+                            f'images/ 对应 labels/）：{_examples(orphans)}')
         twins = sorted(s for s, v in images.items() if len(v) > 1)
         if twins:
             problems.append(f'{version["ref"]} 有 {len(twins)} 组同名不同扩展名的图片，标注对不上：{_examples(twins)}')
-        double = sorted(s for s, v in labels.items() if len(v) > 1 and s in images)
+        mixed, double = [], []
+        chosen: Dict[str, Optional[File]] = {}
+        for stem, found in candidates.items():
+            kinds = {PurePosixPath(f[0]).suffix.lower().lstrip('.') for f in found}
+            pick = found
+            if len(kinds) > 1:
+                if label_source is None:
+                    mixed.append(images[stem][0][0])
+                    continue
+                pick = [f for f in found if f[0].lower().endswith('.' + label_source)]
+            if len(pick) > 1:
+                double.append(images[stem][0][0])
+                continue
+            chosen[stem] = pick[0] if pick else None
+        if mixed:
+            problems.append(f'{version["ref"]} 有 {len(mixed)} 张图同时有 JSON 和 txt 标注，不知道用哪个；'
+                            f'用 --label-source json 或 --label-source txt 选一种：{_examples(mixed)}')
         if double:
-            problems.append(f'{version["ref"]} 有 {len(double)} 张图同时有 JSON 和 txt 标注，不知道用哪个：'
-                            f'{_examples(double)}')
+            problems.append(f'{version["ref"]} 有 {len(double)} 张图有两个同类的标注（同目录一个、labels/ 下一个），'
+                            f'不知道用哪个：{_examples(double)}')
         for stem, imgs in images.items():
-            if len(imgs) > 1 or len(labels.get(stem, ())) > 1:
+            if len(imgs) > 1 or stem not in chosen:
                 continue
             image = imgs[0]
             key = f'{site}/{line}/{image[0]}'
@@ -189,8 +234,7 @@ def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
             if twin != key:
                 problems.append(f'两个来源有同名不同扩展名的图片 {twin} 和 {key}，YOLO 标注会是同一个文件')
                 continue
-            label = labels[stem][0] if stem in labels else None
-            samples[key] = Sample(key, site, line, image, label)
+            samples[key] = Sample(key, site, line, image, chosen[stem])
     return samples, problems
 
 
@@ -505,7 +549,7 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     sources = _sources(conn, o.sources)
     latest = _latest_trainset(conn, name)
     previous = None if o.fresh or o.split is not None else latest  # a split file continues nothing
-    samples, problems = _samples(conn, sources)
+    samples, problems = _samples(conn, sources, o.label_source)
     label_problems, notices = _read_labels(store, samples, o.classes)
     problems += label_problems
     prev_splits = _previous_splits(conn, previous) if previous is not None else None
@@ -534,6 +578,8 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
                          'line': d['line']} for v, d in sources],
             'based_on': previous['ref'] if previous else None, 'classes': o.classes, 'rule': rule, 'counts': counts,
             'formats': summary['formats'], 'missing_formats': summary['missing_formats']}
+    if o.label_source is not None:
+        info['label_source'] = o.label_source
     classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
     p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
     if latest is not None and not p.problems and _same_content(conn, latest, p.entries):

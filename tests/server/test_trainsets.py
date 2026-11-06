@@ -527,6 +527,53 @@ def test_images_folders_inside_the_pool_path(api, cache, tmp_path):
     assert 'train/SES/images/batch/images/one.json' in json_tree
 
 
+def test_a_yolo_pool_pairs_images_with_labels(api, cache, tmp_path):
+    # 2026-11-06, the SES pool: <batch>/images/a.png with <batch>/labels/a.txt (and often a.json next to the image).
+    files = {'b1/images/a.png': png(uuid.uuid4().hex), 'b1/labels/a.txt': yolo_line(1).encode(),
+             'b1/images/sub/c.png': png(uuid.uuid4().hex), 'b1/labels/sub/c.txt': yolo_line(0).encode(),
+             'b1/images/neg.png': png(uuid.uuid4().hex),
+             'images/top.png': png(uuid.uuid4().hex), 'labels/top.txt': yolo_line(0).encode()}
+    src = pool(api, tmp_path, files)
+    v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
+    train = v['trainset']['counts']['train']
+    assert (train['samples'], train['negatives']) == (4, 1)
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g')
+    assert tree['labels/train/SES/TX/b1/images_/a.txt'] == yolo_line(1).encode()
+    assert tree['labels/train/SES/TX/b1/images_/sub/c.txt'] == yolo_line(0).encode()
+    assert tree['labels/train/SES/TX/images_/top.txt'] == yolo_line(0).encode()
+    assert not any(p.endswith('neg.txt') for p in tree)
+    for image in (p for p in tree if p.startswith('images/') and not p.endswith('neg.png')):
+        assert ultralytics_label('/data/' + image)[len('/data/'):] in tree
+    # a label in labels/ whose image is not where YOLO would look is still an orphan
+    src = pool(api, tmp_path, {'b1/pics/a.png': png(uuid.uuid4().hex), 'b1/labels/a.txt': yolo_line(0).encode()})
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES})
+    assert any('没有对应的图片' in p and 'b1/labels/a.txt' in p for p in preview['problems']), preview['problems']
+
+
+def test_label_source_picks_json_or_txt(api, cache, tmp_path):
+    files = {'b1/images/a.png': png(uuid.uuid4().hex), 'b1/images/a.json': label('scratch'),
+             'b1/labels/a.txt': yolo_line(1).encode(),
+             'b1/images/only_json.png': png(uuid.uuid4().hex), 'b1/images/only_json.json': label('dent'),
+             'b1/images/only_txt.png': png(uuid.uuid4().hex), 'b1/labels/only_txt.txt': yolo_line(0).encode()}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    preview = api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES})
+    assert any('同时有 JSON 和 txt' in p and '--label-source' in p for p in preview['problems']), preview['problems']
+    for source, first in (('json', b'0 '), ('txt', b'1 ')):  # a.json says scratch (0), a.txt says dent (1)
+        v = make(api, f'{name}-{source}', [f'{src}@1'], val=0, label_source=source)
+        tree = fetch(api, cache, v['ref'], tmp_path / source)
+        assert tree['labels/train/SES/TX/b1/images_/a.txt'].startswith(first)
+        assert tree['labels/train/SES/TX/b1/images_/only_json.txt'].startswith(b'1 ')  # each still has its own
+        assert tree['labels/train/SES/TX/b1/images_/only_txt.txt'].startswith(b'0 ')
+        assert json.loads(tree['trainset.json'])['label_source'] == source
+    two = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.txt': yolo_line(0).encode(),
+                               'b/labels/a.txt': yolo_line(1).encode()})
+    preview = api.preview_trainset(name, {'sources': [f'{two}@1'], 'classes': CLASSES, 'label_source': 'txt'})
+    assert any('两个同类的标注' in p for p in preview['problems']), preview['problems']
+    assert status_of(lambda: api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES,
+                                                         'label_source': 'xml'})) == 400
+
+
 def test_require_labels(api, tmp_path):
     src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': label('scratch'),
                                'neg.png': png(uuid.uuid4().hex)})
