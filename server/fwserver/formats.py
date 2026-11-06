@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import re
 import struct
 from collections import Counter
 from dataclasses import dataclass, field
@@ -33,12 +35,15 @@ class Label:
     names: List[str]  # the class name of every object, in file order
     boxes: List[Box] = field(default_factory=list)  # json: pixel boxes clipped to the image
     yolo_rows: List[Tuple[int, float, float, float, float]] = field(default_factory=list)  # txt: as written
+    yolo_coords: List[str] = field(default_factory=list)  # txt: the four coordinates of every row, as written
     size: Optional[Size] = None  # json: imageWidth, imageHeight
     clipped: int = 0  # boxes that reached outside the image and were cut back to it
     outside: int = 0  # boxes with nothing left inside the image
     shapes: Counter = field(default_factory=Counter)  # json: shape types used as boxes, other than rectangle
     refused: Counter = field(default_factory=Counter)  # json: shape types that cannot be a detection box
-    data: Optional[bytes] = None  # txt: the file without the UTF-8 BOM it was written with (None: no BOM)
+    data: Optional[bytes] = None  # the label as the snapshot holds it, when that is not the file itself: a txt
+    # without the UTF-8 BOM it was written with, or a label whose classes a class map changed (None: the file)
+    moved: Counter = field(default_factory=Counter)  # shapes a class map renamed or dropped: (old, new or '') -> n
 
 
 def _number(v) -> Optional[float]:
@@ -134,22 +139,86 @@ def parse_txt(text: str, classes: List[str]):
             return f'第 {n} 行的坐标不在 0 到 1 之间'
         label.names.append(classes[cid])
         label.yolo_rows.append((cid, *values))
+        label.yolo_coords.append(' '.join(fields[1:]))
     return label
+
+
+def remap_json(text: str, class_map: Dict[str, str]) -> Tuple[Optional[str], Counter]:
+    """A LiteAnno / X-AnyLabeling label with its class names changed by class_map (old -> new; an empty new name
+    drops the shape, which makes it background): the new text, or None when no shape is in the map, and how
+    many shapes each (old, new) moved. Everything else in the file stays as it is; what is not a label is left
+    for parse_json to refuse."""
+    moved: Counter = Counter()
+    if not class_map:
+        return None, moved
+    nonce, numbers = os.urandom(8).hex(), []
+
+    def keep(token: str) -> str:  # every number (and NaN, Infinity) goes back exactly as written, e.g. -0
+        numbers.append(token)
+        return f'\0{nonce}:{len(numbers) - 1}\0'
+    try:
+        doc = json.loads(text, parse_float=keep, parse_int=keep, parse_constant=keep)
+    except ValueError:
+        return None, moved
+    shapes = doc.get('shapes') if isinstance(doc, dict) else None
+    if not isinstance(shapes, list):
+        return None, moved
+    kept = []
+    for shape in shapes:
+        name = shape.get('label') if isinstance(shape, dict) else None
+        if isinstance(name, str) and name in class_map:
+            new = class_map[name]
+            moved[(name, new)] += 1
+            if not new:
+                continue
+            shape = dict(shape, label=new)  # the same keys in the same order
+        kept.append(shape)
+    if not moved:
+        return None, moved
+    doc['shapes'] = kept
+    out = json.dumps(doc, ensure_ascii=False, indent=2)
+    out = re.sub(r'"\\u0000' + nonce + r':(\d+)\\u0000"', lambda m: numbers[int(m.group(1))], out)
+    # a lone surrogate (written as an escape like \udc80) has no UTF-8: write it back as the escape
+    out = re.sub('[\ud800-\udfff]', lambda m: f'\\u{ord(m.group()):04x}', out)
+    return out + '\n', moved
+
+
+def remap_txt(label: Label, class_map: Dict[str, str], classes: List[str]) -> bool:
+    """In place: rename the boxes of a YOLO label by class_map (an empty new name drops the box) and number
+    every row by classes, the snapshot's class table (a name not in it gets -1; the caller refuses those
+    labels). True when a row was dropped or got another class id, i.e. the file has to be written again
+    (yolo_bytes keeps the coordinates as written)."""
+    index = {n: i for i, n in enumerate(classes)}
+    names, rows, coords, changed = [], [], [], False
+    for name, (cid, *box), text in zip(label.names, label.yolo_rows, label.yolo_coords):
+        new = class_map.get(name, name)
+        if new != name:
+            label.moved[(name, new)] += 1
+        if not new:
+            changed = True
+            continue
+        nid = index.get(new, -1)
+        changed = changed or nid != cid
+        names.append(new)
+        rows.append((nid, *box))
+        coords.append(text)
+    label.names, label.yolo_rows, label.yolo_coords = names, rows, coords
+    return changed
 
 
 def _f(v: float) -> str:
     return f'{v:.6f}'
 
 
-def yolo_bytes(label: Label, classes: List[str], size: Size) -> bytes:
-    """YOLO detection label: one line per box, 'class cx cy w h' normalised to the image, 6 decimals."""
+def yolo_bytes(label: Label, classes: List[str], size: Optional[Size]) -> bytes:
+    """YOLO detection label: one line per box, 'class cx cy w h' normalised to the image, 6 decimals; a txt
+    label keeps its coordinates as written (only the class id is its own), so no box changes in rewriting."""
     if label.kind == 'txt':
-        rows = label.yolo_rows
-    else:
-        w, h = size
-        index = {n: i for i, n in enumerate(classes)}
-        rows = [(index[b.name], (b.x1 + b.x2) / 2 / w, (b.y1 + b.y2) / 2 / h, (b.x2 - b.x1) / w, (b.y2 - b.y1) / h)
-                for b in label.boxes]
+        return ''.join(f'{r[0]} {c}\n' for r, c in zip(label.yolo_rows, label.yolo_coords)).encode('utf-8')
+    w, h = size
+    index = {n: i for i, n in enumerate(classes)}
+    rows = [(index[b.name], (b.x1 + b.x2) / 2 / w, (b.y1 + b.y2) / 2 / h, (b.x2 - b.x1) / w, (b.y2 - b.y1) / h)
+            for b in label.boxes]
     return ''.join(f'{c} {_f(cx)} {_f(cy)} {_f(bw)} {_f(bh)}\n' for c, cx, cy, bw, bh in rows).encode('ascii')
 
 

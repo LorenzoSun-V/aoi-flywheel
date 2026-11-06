@@ -76,11 +76,15 @@ class TrainsetBody(BaseModel):
     fresh: bool = False
     note: str = ''
     require_labels: bool = False  # refuse images without a label (default: they are negative samples)
+    label_source: Optional[str] = None  # json or txt: the label of an image that has both
+    label_classes: Optional[List[str]] = Field(default=None, max_length=trainsets.MAX_CLASSES)  # .txt numbering
+    class_map: Optional[Dict[str, str]] = None  # class in the labels -> class in classes, '' drops the box
     expect_latest_id: Optional[int] = None  # create only: the newest snapshot seen in the preview
 
     def options(self) -> trainsets.Options:
         return trainsets.Options(self.sources, self.classes, self.val, self.seed, self.test_dirs, self.merge_test,
-                                 self.new_to, self.split, self.fresh, self.note, self.require_labels)
+                                 self.new_to, self.split, self.fresh, self.note, self.require_labels,
+                                 self.label_source, self.label_classes, self.class_map)
 
 
 class ModelBody(BaseModel):

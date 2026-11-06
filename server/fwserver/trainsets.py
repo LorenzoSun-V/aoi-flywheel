@@ -17,9 +17,11 @@ code or seed reads them.
 
 Making one (plan, then create):
 1. resolve the source pool versions; every source needs a site and a line (they name its folder);
-2. pair every image with the label of the same stem in its folder; refuse orphan labels and ambiguous pairs;
-3. read every label; refuse class names that are not in the class table, YOLO ids out of range, shapes that
-   cannot be a detection box and boxes outside the image;
+2. pair every image with its label: the same stem in its folder, or the .txt YOLO finds (images/ -> labels/);
+   refuse orphan labels and ambiguous pairs (label_source picks json or txt for an image with both);
+3. read every label (.txt ids by label_classes, else by the class table) and apply class_map (rename, or drop
+   a class: background); refuse class names that are not in the class table, map sources no label has, YOLO
+   ids out of range, shapes that cannot be a detection box and boxes outside the image;
 4. assign splits: from a split file; or continuing the previous snapshot (old samples keep their split, new
    ones go to test unless told otherwise, optionally old test merged into train/val); or fresh (chosen test
    folders to test, the rest to train/val). train/val is cut by ratio in an order fixed by the seed;
@@ -66,6 +68,9 @@ class Sample:
     split: str = ''
     parsed: Optional[Label] = None
     size: Optional[Size] = None  # (width, height): from the JSON label, else from the image header
+    # the label files the snapshot freezes for it: 'labels' / 'json' -> (bytes made for the snapshot, or None
+    # and the pool's file as it is); None while its label cannot be converted (the snapshot is refused then)
+    outputs: Optional[Dict[str, Tuple[Optional[bytes], Optional[File]]]] = None
 
 
 @dataclass
@@ -81,6 +86,9 @@ class Options:
     fresh: bool = False  # do not continue the previous snapshot
     note: str = ''
     require_labels: bool = False  # refuse images without a label instead of keeping them as negatives
+    label_source: Optional[str] = None  # 'json' or 'txt': which label to use for an image that has both
+    label_classes: Optional[List[str]] = None  # the class table the .txt labels are numbered by (None: classes)
+    class_map: Optional[Dict[str, str]] = None  # class in the labels -> class in classes, or '' (drop the box)
 
 
 def _examples(items, n: int = EXAMPLES) -> str:
@@ -101,23 +109,45 @@ def _parse_ref(ref: str) -> Tuple[str, str]:
     return name, (number if sep else 'latest')
 
 
+def _bad_name(name) -> bool:
+    return not isinstance(name, str) or not name or name != name.strip() or any(c in name for c in '\t\r\n')
+
+
+def _check_table(names: List[str], what: str) -> None:
+    if not names:
+        raise DatasetError(400, f'{what}是空的')
+    if len(names) > MAX_CLASSES:
+        raise DatasetError(400, f'{what}不能超过 {MAX_CLASSES} 个类别')
+    for name in names:
+        if _bad_name(name):
+            raise DatasetError(400, f'类别名不能为空、不能有首尾空格、制表符或换行：{name!r}')
+    dup = [n for n, c in Counter(names).items() if c > 1]
+    if dup:
+        raise DatasetError(400, f'{what}里有重复的名称：{_examples(dup)}')
+
+
 def check_options(o: Options) -> None:
     if not o.sources:
         raise DatasetError(400, '至少要一个来源版本（--from）')
-    if not o.classes:
-        raise DatasetError(400, '类别表是空的')
-    if len(o.classes) > MAX_CLASSES:
-        raise DatasetError(400, f'类别不能超过 {MAX_CLASSES} 个')
-    for name in o.classes:
-        if not name or name != name.strip() or any(c in name for c in '\t\r\n'):
-            raise DatasetError(400, f'类别名不能为空、不能有首尾空格、制表符或换行：{name!r}')
-    dup = [n for n, c in Counter(o.classes).items() if c > 1]
-    if dup:
-        raise DatasetError(400, f'类别表里有重复的名称：{_examples(dup)}')
+    _check_table(o.classes, '类别表')
+    if o.label_classes is not None:
+        _check_table(o.label_classes, 'txt 标注的类别表（--label-classes）')
+    if o.class_map:
+        if len(o.class_map) > MAX_CLASSES:
+            raise DatasetError(400, f'类别映射不能超过 {MAX_CLASSES} 条')
+        for old, new in o.class_map.items():
+            if _bad_name(old):
+                raise DatasetError(400, f'映射的源类别名不能为空、不能有首尾空格、制表符或换行：{old!r}')
+            if new == old:
+                raise DatasetError(400, f'映射 {old}={new} 的源和目标一样，不用写')
+            if new and new not in o.classes:
+                raise DatasetError(400, f'映射 {old}={new} 的目标 {new!r} 不在类别表里（要去掉这类框就写 {old}=）')
     if not 0 <= o.val < 1 or math.isnan(o.val):
         raise DatasetError(400, 'val 比例应在 0 到 1 之间（不含 1）')
     if o.new_to not in NEW_TO:
         raise DatasetError(400, f'新样本的去向只能是 {"、".join(NEW_TO)}')
+    if o.label_source is not None and o.label_source not in LABEL_SOURCES:
+        raise DatasetError(400, f'标注来源只能是 {"、".join(LABEL_SOURCES)}，不是 {o.label_source!r}')
     if o.split is not None and (o.test_dirs or o.merge_test):
         raise DatasetError(400, '用了划分清单，就不能再用 --test-dirs 或 --merge-test')
     if o.split is not None:
@@ -151,7 +181,23 @@ def _files(conn, version_id: int) -> List[File]:
         (version_id,))]
 
 
-def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
+def _yolo_label_stem(image_path: str) -> Optional[str]:
+    """Where ultralytics (and aoi-deteval) look for an image's label: its path with the LAST folder named images
+    turned into labels, e.g. b1/images/x/a.png -> b1/labels/x/a (then .txt). None without such a folder."""
+    parts = image_path.split('/')
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == 'images':
+            return _stem('/'.join(parts[:i] + ['labels'] + parts[i + 1:]))
+    return None
+
+
+LABEL_SOURCES = ('json', 'txt')
+
+
+def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[str, Sample], List[str]]:
+    """Pair every image with its label: a .json or .txt of the same name in its folder, or the .txt where YOLO
+    looks for it (images/ -> labels/). An image with more than one: label_source ('json' or 'txt') picks the
+    kind; still more than one, or none given, is refused. Labels no image claims are refused (orphans)."""
     samples: Dict[str, Sample] = {}
     stems: Dict[str, str] = {}  # <site>/<line>/<image path without extension> -> key: their labels share a path
     problems = []
@@ -167,18 +213,50 @@ def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
                 images[_stem(f[0])].append(f)
             elif ext in LABEL_EXTS:
                 labels[_stem(f[0])].append(f)
-        orphans = sorted(s for s in labels if s not in images)
+        candidates: Dict[str, List[File]] = {}
+        claimed: Counter = Counter()  # label path -> how many images found it
+        for stem in images:
+            found = list(labels.get(stem, ()))
+            yolo = _yolo_label_stem(images[stem][0][0])
+            if yolo is not None:
+                found += [f for f in labels.get(yolo, ()) if f[0].lower().endswith('.txt')]
+            candidates[stem] = found
+            claimed.update(f[0] for f in found)
+        orphans = sorted(f[0] for group in labels.values() for f in group if f[0] not in claimed)
+        shared = sorted(path for path, n in claimed.items() if n > 1)
+        if shared:  # e.g. labels/a.txt is next to an image labels/a.png and where YOLO looks for images/a.png
+            problems.append(f'{version["ref"]} 有 {len(shared)} 个标注同时配到了两张图（一张同目录同名、一张是 '
+                            f'images/ 下的），不知道是哪张的：{_examples(shared)}')
         if orphans:
-            problems.append(f'{version["ref"]} 有 {len(orphans)} 个标注没有对应的图片：{_examples(orphans)}')
+            problems.append(f'{version["ref"]} 有 {len(orphans)} 个标注没有对应的图片（同目录同名，或 YOLO 的 '
+                            f'images/ 对应 labels/）：{_examples(orphans)}')
         twins = sorted(s for s, v in images.items() if len(v) > 1)
         if twins:
             problems.append(f'{version["ref"]} 有 {len(twins)} 组同名不同扩展名的图片，标注对不上：{_examples(twins)}')
-        double = sorted(s for s, v in labels.items() if len(v) > 1 and s in images)
+        mixed, double = [], []
+        chosen: Dict[str, Optional[File]] = {}
+        for stem, found in candidates.items():
+            if any(claimed[f[0]] > 1 for f in found):
+                continue
+            kinds = Counter(PurePosixPath(f[0]).suffix.lower().lstrip('.') for f in found)
+            if any(n > 1 for n in kinds.values()):  # before label_source: it never hides two of one kind
+                double.append(images[stem][0][0])
+                continue
+            pick = found
+            if len(kinds) > 1:
+                if label_source is None:
+                    mixed.append(images[stem][0][0])
+                    continue
+                pick = [f for f in found if f[0].lower().endswith('.' + label_source)]
+            chosen[stem] = pick[0] if pick else None
+        if mixed:
+            problems.append(f'{version["ref"]} 有 {len(mixed)} 张图同时有 JSON 和 txt 标注，不知道用哪个；'
+                            f'用 --label-source json 或 --label-source txt 选一种：{_examples(mixed)}')
         if double:
-            problems.append(f'{version["ref"]} 有 {len(double)} 张图同时有 JSON 和 txt 标注，不知道用哪个：'
-                            f'{_examples(double)}')
+            problems.append(f'{version["ref"]} 有 {len(double)} 张图有两个同一种的标注（例如同目录一个 txt、'
+                            f'labels/ 下又一个），不知道用哪个：{_examples(double)}')
         for stem, imgs in images.items():
-            if len(imgs) > 1 or len(labels.get(stem, ())) > 1:
+            if len(imgs) > 1 or stem not in chosen:
                 continue
             image = imgs[0]
             key = f'{site}/{line}/{image[0]}'
@@ -189,8 +267,7 @@ def _samples(conn, sources) -> Tuple[Dict[str, Sample], List[str]]:
             if twin != key:
                 problems.append(f'两个来源有同名不同扩展名的图片 {twin} 和 {key}，YOLO 标注会是同一个文件')
                 continue
-            label = labels[stem][0] if stem in labels else None
-            samples[key] = Sample(key, site, line, image, label)
+            samples[key] = Sample(key, site, line, image, chosen[stem])
     return samples, problems
 
 
@@ -202,7 +279,8 @@ def _header_size(store: Store, image: File) -> Optional[Size]:
         return None
 
 
-def _parse(store: Store, label: File, classes: List[str]):
+def _parse(store: Store, label: File, o: Options):
+    """A label with o.class_map applied and, for a .txt, numbered by o.classes; or why it cannot be used."""
     data = store.read(label[1])
     if data is None:
         return '服务器上没有这个文件，先运行 fw-server verify'
@@ -210,33 +288,48 @@ def _parse(store: Store, label: File, classes: List[str]):
         text = data.decode('utf-8-sig')
     except UnicodeDecodeError:
         return '不是 UTF-8'
+    class_map = o.class_map or {}
     if label[0].lower().endswith('.json'):
-        return formats.parse_json(text)
-    parsed = formats.parse_txt(text, classes)
-    if not isinstance(parsed, str) and data.startswith(BOM):
+        mapped, moved = formats.remap_json(text, class_map)
+        parsed = formats.parse_json(text if mapped is None else mapped)
+        if not isinstance(parsed, str) and mapped is not None:
+            parsed.data, parsed.moved = mapped.encode('utf-8'), moved
+        return parsed
+    parsed = formats.parse_txt(text, o.label_classes if o.label_classes is not None else o.classes)
+    if isinstance(parsed, str):
+        return parsed
+    if data.startswith(BOM):
         parsed.data = data[len(BOM):]  # YOLO readers take the BOM for part of the first class id
+    if formats.remap_txt(parsed, class_map, o.classes):
+        parsed.data = formats.yolo_bytes(parsed, o.classes, None)
     return parsed
 
 
-def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -> Tuple[List[str], List[str]]:
-    """Read every label (each content once) and check it can be a YOLO detection label: (problems, notices)."""
-    known = set(classes)
-    parsed: Dict[str, object] = {}  # label sha256 -> Label, or a problem string
+def _read_labels(store: Store, samples: Dict[str, Sample], o: Options) -> Tuple[List[str], List[str]]:
+    """Read every label (each content once), apply the class map and check it can be a YOLO detection label:
+    (problems, notices)."""
+    known = set(o.classes)
+    parsed: Dict[Tuple[str, bool], object] = {}  # (label sha256, is .json) -> Label, or a problem string
     clipped_by: Dict[Tuple[str, Size], Label] = {}  # one clipped copy per label content and image size
     unreadable, no_size, outside = [], [], []
     unknown, refused = defaultdict(list), defaultdict(list)
-    clipped, as_box = 0, Counter()
+    clipped, as_box, moved, emptied, txt = 0, Counter(), Counter(), [], 0
     for s in samples.values():
         if s.label is None:
             continue
         where = f'{s.site}/{s.line}/{s.label[0]}'
         digest = s.label[1]
-        if digest not in parsed:
-            parsed[digest] = _parse(store, s.label, classes)
-        label = parsed[digest]
+        read = (digest, s.label[0].lower().endswith('.json'))  # the same bytes as .json and .txt are two labels
+        if read not in parsed:
+            parsed[read] = _parse(store, s.label, o)
+        label = parsed[read]
         if isinstance(label, str):
             unreadable.append(f'{where}：{label}')
             continue
+        moved.update(label.moved)
+        if label.moved and not label.names:
+            emptied.append(where)
+        txt += label.kind == 'txt'
         if label.kind == 'json':
             size = label.size or _header_size(store, s.image)
             if size is None:
@@ -245,7 +338,7 @@ def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -
             key = (digest, size)
             if key not in clipped_by:
                 copy = Label('json', label.names, list(label.boxes), size=size, shapes=label.shapes,
-                             refused=label.refused)
+                             refused=label.refused, data=label.data, moved=label.moved)
                 formats.clip(copy, size)
                 clipped_by[key] = copy
             label = clipped_by[key]
@@ -274,7 +367,16 @@ def _read_labels(store: Store, samples: Dict[str, Sample], classes: List[str]) -
                         f'例如 {_examples(where, 3)}')
     if outside:
         problems.append(f'{len(outside)} 个标注里有框完全在图片外面：{_examples(outside, 3)}')
+    unused = sorted(set(o.class_map or ()) - {old for old, _ in moved})
+    if unused:
+        problems.append(f'映射的源类别 {_examples(unused)} 在标注里一个框也没有（写错了？类别名区分大小写）')
     notices = []
+    for (old, new), n in sorted(moved.items()):
+        notices.append(f'映射：{old} 的 {n} 个框算作 {new}' if new else f'映射：{old} 的 {n} 个框去掉，当背景')
+    if emptied:
+        notices.append(f'{len(emptied)} 张图的框全被映射去掉了，当没有框的背景图收进来：{_examples(emptied, 3)}')
+    if o.label_classes is not None and not txt:
+        notices.append('没有用到 txt 标注，--label-classes 不起作用')
     if clipped:
         notices.append(f'{clipped} 个框超出图片边界，已裁到图片内')
     if as_box:
@@ -312,8 +414,8 @@ def _latest_trainset(conn, name: str) -> Optional[dict]:
     return datasets.get_version_by_id(conn, latest['id']) if latest else None
 
 
-def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]]]:
-    """key -> (split, sha256 of its label files) of every sample in a snapshot, read back from its tree: the
+def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Dict[str, str]]]:
+    """key -> (split, {'json' / 'labels': sha256}) of every sample in a snapshot, read back from its tree: the
     files under json/ and labels/ of its split and stem (one of them is the pool's label, the other made from
     it). The key keeps the image's extension."""
     images: Dict[str, str] = {}
@@ -330,7 +432,7 @@ def _previous_splits(conn, previous: dict) -> Dict[str, Tuple[str, Optional[str]
     out = {}
     for key, split in images.items():
         where = f'{split}/{_stem(key)}'
-        out[key] = (split, frozenset(d for d in (found['json'].get(where), found['labels'].get(where)) if d))
+        out[key] = (split, {top: found[top][where] for top in found if where in found[top]})
     return out
 
 
@@ -405,18 +507,45 @@ def _counts(samples: Dict[str, Sample], classes: List[str]) -> dict:
     return counts
 
 
-def _changes(samples: Dict[str, Sample], previous: Optional[Dict[str, Tuple[str, Optional[str]]]]) -> dict:
+def _outputs(samples: Dict[str, Sample], classes: List[str], with_json: bool) -> None:
+    """Sample.outputs of every sample whose label can be converted (a negative has none)."""
+    known = set(classes)
+    for s in samples.values():
+        if s.label is None:
+            s.outputs = {}
+            continue
+        label = s.parsed
+        if label is None or not all(n in known for n in label.names):
+            continue
+        out: Dict[str, Tuple[Optional[bytes], Optional[File]]] = {}
+        if label.kind == 'txt':
+            out['labels'] = (label.data, None) if label.data is not None else (None, s.label)
+            if with_json:  # for LiteAnno: rectangles from the boxes
+                out['json'] = (formats.liteanno_bytes(label, classes, s.size, PurePosixPath(s.image[0]).name), None)
+        else:
+            out['labels'] = (formats.yolo_bytes(label, classes, s.size), None)
+            out['json'] = (label.data, None) if label.data is not None else (None, s.label)
+        s.outputs = out
+
+
+def _changes(samples: Dict[str, Sample], previous: Optional[Dict[str, Tuple[str, Dict[str, str]]]]) -> dict:
     if previous is None:
         return {}
     moved = sorted(f'{k}：{previous[k][0]} → {s.split}' for k, s in samples.items()
                    if k in previous and previous[k][0] != s.split)
+
     def relabeled_(k: str, s: Sample) -> bool:
-        if s.label is None:
-            return bool(previous[k][1])
-        mine = {s.label[1]}
-        if s.parsed is not None and s.parsed.data is not None:  # frozen without its BOM
-            mine.add(hashlib.sha256(s.parsed.data).hexdigest())
-        return not mine & previous[k][1]
+        """The label files this snapshot freezes for the sample are not the ones frozen last time (a label made
+        from another source, with another map or class table, or for another image size counts too)."""
+        old = previous[k][1]
+        if s.label is None or not old:
+            return bool(old) or s.label is not None
+        if s.outputs is None:  # cannot be converted, so the snapshot is refused: compare the label itself
+            data = s.parsed.data if s.parsed is not None else None
+            return (hashlib.sha256(data).hexdigest() if data is not None else s.label[1]) not in old.values()
+        new = {top: hashlib.sha256(data).hexdigest() if data is not None else file[1]
+               for top, (data, file) in s.outputs.items()}
+        return new != old  # a json/ that comes or goes (e.g. no LiteAnno JSON this time) counts too
 
     relabeled = sum(1 for k, s in samples.items() if k in previous and relabeled_(k, s))
     added = sum(1 for k in samples if k not in previous)
@@ -445,18 +574,11 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         rest = f'{s.split}/{s.site}/{s.line}/'
         stem = _stem(s.image[0])
         entries.append(('images/' + rest + s.image[0], s.image[1], s.image[2]))
-        if s.parsed is not None and s.parsed.kind == 'txt':
-            if s.parsed.data is not None:  # the same label without its BOM
-                entries.append(made('labels/' + rest + stem + '.txt', s.parsed.data))
-            else:  # already a YOLO detection label: as it is
-                entries.append(('labels/' + rest + stem + '.txt', s.label[1], s.label[2]))
-            if available['json'] is None:  # for LiteAnno: rectangles from the boxes
-                name = PurePosixPath(s.image[0]).name
-                entries.append(made('json/' + rest + stem + '.json',
-                                    formats.liteanno_bytes(s.parsed, classes, s.size, name)))
-        elif s.parsed is not None:
-            entries.append(made('labels/' + rest + stem + '.txt', formats.yolo_bytes(s.parsed, classes, s.size)))
-            entries.append(('json/' + rest + stem + '.json', s.label[1], s.label[2]))
+        if s.outputs is None:
+            raise RuntimeError(f'{s.key} 的标注没有转好')  # plan builds the tree only when every label converts
+        for top, (data, file) in s.outputs.items():  # see _outputs
+            path = f'{top}/{rest}{stem}.{"txt" if top == "labels" else "json"}'
+            entries.append(made(path, data) if data is not None else (path, file[1], file[2]))
         if available['coco'] is None:
             boxes = formats.pixel_boxes(s.parsed, classes, s.size) if s.parsed is not None else []
             coco[s.split].append((s.key, s.size, boxes))
@@ -505,12 +627,18 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     sources = _sources(conn, o.sources)
     latest = _latest_trainset(conn, name)
     previous = None if o.fresh or o.split is not None else latest  # a split file continues nothing
-    samples, problems = _samples(conn, sources)
-    label_problems, notices = _read_labels(store, samples, o.classes)
+    samples, problems = _samples(conn, sources, o.label_source)
+    label_problems, notices = _read_labels(store, samples, o)
     problems += label_problems
     prev_splits = _previous_splits(conn, previous) if previous is not None else None
     rule, more = _assign(samples, o, prev_splits)
     problems += more
+    if o.label_source is not None:  # how the labels were read: kept with the split rule, for people
+        rule['label_source'] = o.label_source
+    if o.label_classes is not None:
+        rule['label_classes'] = o.label_classes
+    if o.class_map:
+        rule['class_map'] = o.class_map
     if not samples:
         problems.append('来源版本里没有图片')
     if o.require_labels:
@@ -518,6 +646,8 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
         if bare:
             problems.append(f'要求每张图都有标注（--require-labels），有 {len(bare)} 张没有：{_examples(bare, 3)}')
     counts = _counts(samples, o.classes)
+    available = _formats(store, samples)  # also gives the txt-labelled images their size
+    _outputs(samples, o.classes, available['json'] is None)
     p = Plan(name, sources, latest, previous, samples, rule, counts, _changes(samples, prev_splits), problems,
              notices)
     if previous is not None and _previous_classes(conn, previous) != o.classes:
@@ -527,7 +657,7 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
         p.notices.append(f'没有 {"、".join(empty)} 样本：只能当测试集用，不能直接训练（ultralytics 要 train 和 val）')
     if problems:
         return p
-    p.formats = _formats(store, samples)
+    p.formats = available
     summary = p.summary()
     info = {'format': FORMAT, 'name': name, 'task': formats.TASK,
             'sources': [{'ref': v['ref'], 'manifest_sha256': v['manifest_sha256'], 'site': d['site'],

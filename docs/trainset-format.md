@@ -13,7 +13,7 @@ classes.txt                                   类别表：一行一个类别名�
 trainset.json                                 这个快照怎么来的：来源、类别、划分规则、每类框数、格式
 images/<划分>/<现场>/<产线>/<原路径>            每张图片
 labels/<划分>/<现场>/<产线>/<原文件名>.txt      YOLO 检测标注
-json/<划分>/<现场>/<产线>/<原文件名>.json       数据池里的 LiteAnno / X-AnyLabeling 标注，原样；YOLO txt 标注的图是从框生成的
+json/<划分>/<现场>/<产线>/<原文件名>.json       数据池里的 LiteAnno / X-AnyLabeling 标注，原样（类别映射改到了的是改过的）；YOLO txt 标注的图是从框生成的
 coco/<划分>.json                              这个划分的 COCO 检测标注
 ```
 
@@ -36,6 +36,35 @@ coco/<划分>.json                              这个划分的 COCO 检测标�
 - 快照没有 train 或 val 时（例如只有几张图，或者整版都是测试集），`data.yaml` 照样生成，但 ultralytics 训练要 train 和 val 都有：建快照的预览和 `fw get` 都会说缺哪个，`fw.get_trainset()` 返回的 `missing_splits` 列出来。
 - 某种格式没有生成时（见下文），取那种格式会报错并说明原因。
 
+## 标注怎么配对
+
+每张图找它的标注，两个地方都找：
+
+1. **同目录同名**：`2026-09/0001.png` 配 `2026-09/0001.json` 或 `2026-09/0001.txt`；
+2. **YOLO 找标注的位置**（只认 `.txt`）：把图片路径里**最后一个** `images/` 换成 `labels/`，例如 `batch1/images/0001.png` 配 `batch1/labels/0001.txt`，和 ultralytics、aoi-deteval 找标注的方式一样。
+
+- 一张图既配到 JSON 又配到 txt（比如 `images/` 里有 `0001.json`，`labels/` 里有 `0001.txt`），要用 `--label-source json` 或 `--label-source txt` 说用哪个，没说就不建。只有一种的图照样用自己那一种。
+- 同一种配到两个（同目录一个 `0001.txt`、`labels/` 下又一个）不建：不知道用哪个。给了 `--label-source` 也一样，选另一种不会把这个问题盖过去。
+- 一个标注同时配到两张图也不建：例如 `batch/labels/0001.txt` 旁边有一张 `batch/labels/0001.png`，它又是 `batch/images/0001.png` 找标注的位置。
+- 没有图认领的标注（孤立标注）不建，多半是放错了目录。
+- 没有标注的图是负样本，照样收进来（`--require-labels` 时不建）。
+
+## 类别映射
+
+类别表属于快照，不属于数据池：数据池里的 `classes.txt` 不读，类别表是建快照时用 `--classes` 给的。标注里的类别和这张表对不上时，有两个选项，**只改快照里的标注，数据池里的不变**：
+
+- `--label-classes <类别表>`：txt 标注自己的类别表（行号是 txt 里的类别编号）。不写就按 `--classes` 读。例如数据池的 txt 按 `Dirty Scratch Crack Solder others` 5 类编号，快照只要前 4 类：`--label-classes classes5.txt`。
+- `--map 源=目标`（可写多次）：标注里的「源」类别算作类别表里的「目标」，例如 `--map DL1=DL --map DL2=DL` 把两类合成一类；**目标留空就去掉这类框，当背景**，例如 `--map others=`。目标必须在类别表里。
+
+规则：
+
+- 映射在核对类别之前做，按类别名、只做一次（`A=B` 和 `B=` 同时写时，A 的框算作 B，不会再被去掉）。映射之后还有类别表以外的类别就不建。
+- JSON 标注：改形状的 `label`，删掉映射成空的形状（不管是什么形状），文件里别的内容（其余形状、`flags`、`description`、自定义的键和它们的顺序）不动；数字按原文写回（`0.1234567890123456789`、`1e1`、`-0`、`NaN` 都原样，不经过数值转换）；字符串里没法用 UTF-8 写的孤立代理码位（例如 `\udc80`）按转义写回。按 `indent=2`、UTF-8 写回，最后有换行。
+- txt 标注：去掉映射成空的行，按快照的类别表重新编号；每行的四个坐标**原样保留**，只换第一个数（数之间统一成一个空格，换行统一成 LF），重写不会让框变形，和同一快照里的 COCO 一致。行没去掉、编号也没变的文件原样冻结。
+- 框全被去掉的图是**没有框的背景图**：快照里有它的空标注文件，`counts` 里不算 `negatives`（那是没有标注文件的图）。
+- 映射的源类别在哪个标注里都没有，就不建（多半是写错了，类别名区分大小写）。
+- 预览里列出每条映射去掉或并进了多少个框、多少张图的框全被去掉；用的 `--label-source`、`--label-classes`、`--map` 记在 `rule` 里，`fw trainset show` 也显示。
+
 ## 标注怎么转
 
 这一版只做**检测**（`trainset.json` 里 `task` 是 `det`）：每个目标是一个和坐标轴对齐的框。
@@ -47,7 +76,7 @@ LiteAnno / X-AnyLabeling JSON：
 - 图片尺寸用标注里的 `imageWidth`、`imageHeight`；没有时读图片的文件头（PNG、JPEG、BMP、GIF、TIFF、WebP），也读不出来就不建。
 - 超出图片的框裁到图片内，个数在预览里列出来；完全在图片外的框不建快照。
 
-数据池里本来就是 YOLO txt 的，原样放进 `labels/`（文件开头有 UTF-8 BOM 的去掉 BOM，别的字节不变）：每行必须是 `类别 中心x 中心y 宽 高` 5 个数，坐标在 0 到 1 之间（分割、旋转框、关键点格式的行不建快照）。
+数据池里本来就是 YOLO txt 的，原样放进 `labels/`（文件开头有 UTF-8 BOM 的去掉 BOM，别的字节不变；类别映射或 `--label-classes` 改到了的只换类别编号、去掉映射掉的行，坐标原样）：每行必须是 `类别 中心x 中心y 宽 高` 5 个数，坐标在 0 到 1 之间（分割、旋转框、关键点格式的行不建快照）。
 
 **YOLO**（`labels/…/*.txt`）：每个框一行 `类别编号 中心x 中心y 宽 高`，按图片宽高归一化，保留 6 位小数，换行是 LF。标注里一个框也没有的图片是空文件；没有标注文件的图片（负样本）没有 txt，ultralytics 都当作背景图。
 
@@ -58,7 +87,7 @@ LiteAnno / X-AnyLabeling JSON：
 - `categories` 的 `id` **就是 classes.txt 的行号，从 0 起**，和 YOLO 的类别编号一致，没有为背景留 0 号。
 - 要知道每张图的尺寸：没有 JSON 标注的图（负样本、YOLO txt 标注的）读文件头。有图读不出尺寸时不生成 COCO，其余照常。
 
-**JSON**（`json/…/*.json`）：数据池里有 JSON 的，就是原文件。数据池里是 YOLO txt 的，建快照时从框生成一个，给 LiteAnno 打开看图用：每个框一个 `rectangle`（像素坐标，和 COCO 一样裁到图内，保留 4 位小数），`label` 是类别名，`imagePath` 是图片文件名，`imageWidth` / `imageHeight` 从图片文件头读，`version` 是 `"3.1"`。有 YOLO txt 标注的图读不出尺寸时，`json` 格式不生成。
+**JSON**（`json/…/*.json`）：数据池里有 JSON 的，就是原文件（类别映射改到了的，是改过的那份）。数据池里是 YOLO txt 的，建快照时从框生成一个，给 LiteAnno 打开看图用：每个框一个 `rectangle`（像素坐标，和 COCO 一样裁到图内，保留 4 位小数），`label` 是类别名，`imagePath` 是图片文件名，`imageWidth` / `imageHeight` 从图片文件头读，`version` 是 `"3.1"`。有 YOLO txt 标注的图读不出尺寸时，`json` 格式不生成。
 
 `trainset.json` 的 `formats` 列出这个快照有哪些格式，`missing_formats` 写着没生成的格式和原因。
 
@@ -70,7 +99,7 @@ LiteAnno / X-AnyLabeling JSON：
 
 ## classes.txt
 
-UTF-8，一行一个类别名，最后有换行。第 1 行是编号 0。建快照时给的类别表原样写进来，这个快照里所有标注都已核对过：JSON 标注里每个形状的 `label` 都在类别表里，YOLO txt 每行第一个数在 0 到类别数减 1 之间。YOLO 和 COCO 的类别编号都是这里的行号。
+UTF-8，一行一个类别名，最后有换行。第 1 行是编号 0。建快照时给的类别表原样写进来，这个快照里所有标注都已核对过（类别映射之后）：JSON 标注里每个形状的 `label` 都在类别表里，YOLO txt 每行第一个数在 0 到类别数减 1 之间。YOLO 和 COCO 的类别编号都是这里的行号。
 
 ## trainset.json
 
@@ -86,7 +115,7 @@ UTF-8 JSON，键的含义：
 | `sources` | 来源数据池版本，每项 `ref`（例如 `SES-TX@4`）、`manifest_sha256`（那个版本的清单哈希）、`site`、`line` |
 | `based_on` | 接着哪个快照的划分，例如 `SES-TX-det@1`；第一版、重新划分、用划分清单时是 `null` |
 | `classes` | 类别名列表，和 classes.txt 一样 |
-| `rule` | 划分规则（只是记录给人看，取回时不再用），见下表 |
+| `rule` | 划分规则和读标注的规则（只是记录给人看，取回时不再用），见下表 |
 | `counts` | `train`、`val`、`test` 各自的 `samples`（样本数）、`negatives`（无标注的）、`boxes`（每个类别的框数，`.json` 每个形状算一个，`.txt` 每行算一个） |
 
 `rule` 的键：
@@ -100,6 +129,9 @@ UTF-8 JSON，键的含义：
 | `merge_test` | 是否把上一版 test 里的样本重新分到 train/val |
 | `new_to` | 只在 `continue` 时有：新样本去 `test` 还是 `trainval` |
 | `split_count` | 只在 `split-file` 时有：清单的行数 |
+| `label_source` | 只在给了 `--label-source` 时有：同时有 JSON 和 txt 的图用哪一种，`json` 或 `txt` |
+| `label_classes` | 只在给了 `--label-classes` 时有：txt 标注按哪张类别表读编号 |
+| `class_map` | 只在给了 `--map` 时有：`{"源": "目标"}`，目标是空字符串的是去掉的类别 |
 
 ## 怎么划分
 
@@ -121,9 +153,9 @@ UTF-8 JSON，键的含义：
 
 - 来源是训练集快照，或者来源数据集没有填现场或产线；
 - 两个来源里有同一个标识（同一现场、产线下的同一路径）；
-- 有标注没有对应的图片；有同名不同扩展名的图片；一张图同时有 `.json` 和 `.txt`；
+- 有标注没有对应的图片；有同名不同扩展名的图片；一张图同时有 JSON 和 txt 标注又没给 `--label-source`，或者有两个同一种的标注；一个标注同时配到两张图（见[标注怎么配对](#标注怎么配对)）；
 - 标注读不了（不是 UTF-8、不是合法 JSON、没有 `shapes` 列表、形状没有类别名、坐标不是数、`.txt` 编号不是整数或不是 5 个数、坐标不在 0 到 1 之间）；
-- 标注里有类别表以外的类别，或者 `.txt` 编号超出类别表；
+- 标注里有类别表以外的类别（类别映射之后），或者 `.txt` 编号超出它的类别表（`--label-classes`，没给就是 `--classes`）；`--map` 的源类别在标注里一个框也没有；
 - 有不能当检测框的形状（`point`、`line`、`linestrip`、`circle` 等），有完全在图片外的框，有读不出图片尺寸的 JSON 标注；
 - 划分清单和来源对不上，`--test-dirs` 有没匹配上的目录；
 - 和同名快照的最新版完全一样（样本、划分、标注、类别表都没变）；

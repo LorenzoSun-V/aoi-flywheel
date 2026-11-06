@@ -142,12 +142,15 @@ def cmd_cache(args) -> None:
 
 def cmd_trainset_create(args, api: Api) -> int:
     classes = ops.read_classes(args.classes)
+    label_classes = ops.read_classes(args.label_classes) if args.label_classes else None
+    class_map = ops.parse_class_map(args.class_map)
     split = ops.read_split_file(args.split_file) if args.split_file else None
     test_dirs = [d for item in args.test_dirs for d in item.split(',') if d.strip()]
     result = ops.create_trainset(api, args.name, args.sources, classes, val=args.val, seed=args.seed,
                                  test_dirs=test_dirs, merge_test=args.merge_test, new_to=args.new_to, split=split,
                                  fresh=args.fresh, note=args.note, require_labels=args.require_labels,
-                                 dry_run=args.dry_run,
+                                 dry_run=args.dry_run, label_source=args.label_source,
+                                 label_classes=label_classes, class_map=class_map,
                                  confirm=None if args.yes else _ask)
     return 0 if result is not None or args.dry_run else 1
 
@@ -183,6 +186,9 @@ def cmd_trainset_show(args, api: Api) -> None:
         if rule.get('new_to') == 'trainval':
             how += '，新样本进 train/val'
     print(f'规则：{how}')
+    labels = ops.label_rule_text(rule)
+    if labels:
+        print(f'标注：{labels}')
     print(f'标注格式：{"、".join(ops.FORMAT_NAMES.get(f, f) for f in ts["formats"])}（检测框）')
     ops.show_trainset_plan(print, {'counts': ts['counts']}, ts['classes'])
 
@@ -438,6 +444,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--fresh', action='store_true', help='不接着上一版的划分，全部重新分')
     s.add_argument('--require-labels', action='store_true',
                    help='每张图都要有标注，有没标注的图就不建（默认没标注的图当负样本收进来）')
+    s.add_argument('--label-source', choices=('json', 'txt'),
+                   help='一张图同时有 JSON 和 txt 标注时用哪一种（不写就拒绝建）')
+    s.add_argument('--label-classes', metavar='类别表',
+                   help='txt 标注自己的类别表（行号是 txt 里的类别编号），和 --classes 不同时用；不写就按 --classes 读')
+    s.add_argument('--map', dest='class_map', action='append', default=[], metavar='源=目标',
+                   help='把标注里的一个类别算作类别表里的另一个，例如 DL1=DL；目标留空就去掉这类框、当背景，'
+                        '例如 others=；可写多次。数据池里的标注不变')
     s.add_argument('--note', default='', help='备注')
     s.add_argument('--dry-run', action='store_true', help='只预览划分和统计，不建快照')
     s.add_argument('--yes', action='store_true', help='不问确认，直接建快照')
