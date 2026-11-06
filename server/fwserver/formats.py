@@ -38,7 +38,9 @@ class Label:
     outside: int = 0  # boxes with nothing left inside the image
     shapes: Counter = field(default_factory=Counter)  # json: shape types used as boxes, other than rectangle
     refused: Counter = field(default_factory=Counter)  # json: shape types that cannot be a detection box
-    data: Optional[bytes] = None  # txt: the file without the UTF-8 BOM it was written with (None: no BOM)
+    data: Optional[bytes] = None  # the label as the snapshot holds it, when that is not the file itself: a txt
+    # without the UTF-8 BOM it was written with, or a label whose classes a class map changed (None: the file)
+    moved: Counter = field(default_factory=Counter)  # shapes a class map renamed or dropped: (old, new or '') -> n
 
 
 def _number(v) -> Optional[float]:
@@ -135,6 +137,58 @@ def parse_txt(text: str, classes: List[str]):
         label.names.append(classes[cid])
         label.yolo_rows.append((cid, *values))
     return label
+
+
+def remap_json(text: str, class_map: Dict[str, str]) -> Tuple[Optional[str], Counter]:
+    """A LiteAnno / X-AnyLabeling label with its class names changed by class_map (old -> new; an empty new name
+    drops the shape, which makes it background): the new text, or None when no shape is in the map, and how
+    many shapes each (old, new) moved. Everything else in the file stays as it is; what is not a label is left
+    for parse_json to refuse."""
+    moved: Counter = Counter()
+    if not class_map:
+        return None, moved
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None, moved
+    shapes = doc.get('shapes') if isinstance(doc, dict) else None
+    if not isinstance(shapes, list):
+        return None, moved
+    kept = []
+    for shape in shapes:
+        name = shape.get('label') if isinstance(shape, dict) else None
+        if isinstance(name, str) and name in class_map:
+            new = class_map[name]
+            moved[(name, new)] += 1
+            if not new:
+                continue
+            shape = dict(shape, label=new)  # the same keys in the same order
+        kept.append(shape)
+    if not moved:
+        return None, moved
+    doc['shapes'] = kept
+    return json.dumps(doc, ensure_ascii=False, indent=2) + '\n', moved
+
+
+def remap_txt(label: Label, class_map: Dict[str, str], classes: List[str]) -> bool:
+    """In place: rename the boxes of a YOLO label by class_map (an empty new name drops the box) and number
+    every row by classes, the snapshot's class table (a name not in it gets -1; the caller refuses those
+    labels). True when a row was dropped or got another class id, i.e. the file has to be written again."""
+    index = {n: i for i, n in enumerate(classes)}
+    names, rows, changed = [], [], False
+    for name, (cid, *box) in zip(label.names, label.yolo_rows):
+        new = class_map.get(name, name)
+        if new != name:
+            label.moved[(name, new)] += 1
+        if not new:
+            changed = True
+            continue
+        nid = index.get(new, -1)
+        changed = changed or nid != cid
+        names.append(new)
+        rows.append((nid, *box))
+    label.names, label.yolo_rows = names, rows
+    return changed
 
 
 def _f(v: float) -> str:

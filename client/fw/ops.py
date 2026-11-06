@@ -509,6 +509,34 @@ def read_classes(path) -> List[str]:
     return names
 
 
+def parse_class_map(items: List[str]) -> Optional[Dict[str, str]]:
+    """--map items, 'old=new': the class old in the labels becomes new (a class of the class table); 'old='
+    drops its boxes (they become background). None when there are none."""
+    out: Dict[str, str] = {}
+    for item in items:
+        old, sep, new = item.partition('=')
+        old, new = old.strip(), new.strip()
+        if not sep or not old:
+            raise FwError(f'--map 的写法是 源类别=目标类别（目标留空就是去掉这类框），不是 {item!r}')
+        if old in out:
+            raise FwError(f'--map 里 {old} 写了两次')
+        out[old] = new
+    return out or None
+
+
+def label_rule_text(rule: dict) -> str:
+    """How a snapshot read its labels, from its rule: '' when nothing was set."""
+    parts = []
+    if rule.get('label_source'):
+        parts.append(f'同时有 JSON 和 txt 的图用 {rule["label_source"]}')
+    if rule.get('label_classes'):
+        names = rule['label_classes']
+        parts.append(f'txt 按自己的 {len(names)} 类编号读（{"、".join(names[:8])}{" 等" if len(names) > 8 else ""}）')
+    if rule.get('class_map'):
+        parts.append('映射 ' + '、'.join(f'{old}→{new or "去掉"}' for old, new in rule['class_map'].items()))
+    return '；'.join(parts)
+
+
 def read_split_file(path) -> Dict[str, str]:
     """A split made elsewhere: one sample per line, '<site>/<line>/<image path>' and train, val or test,
     separated by a tab or spaces; empty lines and lines starting with # are skipped."""
@@ -561,16 +589,28 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
                     test_dirs=(), merge_test: bool = False, new_to: str = 'test',
                     split: Optional[Dict[str, str]] = None, fresh: bool = False, note: str = '',
                     require_labels: bool = False, dry_run: bool = False, confirm: Optional[Confirm] = None,
-                    echo: Echo = print, label_source: Optional[str] = None) -> Optional[dict]:
+                    echo: Echo = print, label_source: Optional[str] = None,
+                    label_classes: Optional[List[str]] = None,
+                    class_map: Optional[Dict[str, str]] = None) -> Optional[dict]:
     """Preview a training-set snapshot, ask, then freeze it. The server builds both from the same inputs (the
     source versions the preview resolved, e.g. SES-TX@4 for SES-TX), so what is frozen is what was shown; if
     someone made another snapshot of this name meanwhile, it refuses."""
     body = {'sources': list(sources), 'classes': list(classes), 'val': val, 'seed': seed,
             'test_dirs': list(test_dirs), 'merge_test': merge_test, 'new_to': new_to, 'split': split,
             'fresh': fresh, 'note': note, 'require_labels': require_labels}
-    if label_source is not None:  # only when given: a server from before this option still takes the request
+    # only when given: a server from before these options still takes the request
+    if label_source is not None:
         body['label_source'] = label_source
+    if label_classes is not None:
+        body['label_classes'] = list(label_classes)
+    if class_map:
+        body['class_map'] = dict(class_map)
     preview = api.preview_trainset(name, body)
+    rule = preview.get('rule') or {}
+    for key, option in (('label_source', '--label-source'), ('label_classes', '--label-classes'),
+                        ('class_map', '--map')):
+        if key in body and key not in rule:  # a server from before the option takes the request and ignores it
+            raise FwError(f'服务器版本太旧，不认 {option}（会当作没写），先升级服务器')
     if preview['based_on']:
         how = f'接着 {preview["based_on"]} 的划分'
     elif preview.get('latest'):
@@ -578,6 +618,9 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
     else:
         how = '第一版'
     echo(f'{name}：{how}；来源 {"、".join(preview["sources"])}；类别 {len(classes)} 个')
+    labels = label_rule_text(rule)
+    if labels:
+        echo(f'标注：{labels}')
     show_trainset_plan(echo, preview, classes)
     for notice in preview.get('notices', []):
         echo(f'  注意：{notice}')

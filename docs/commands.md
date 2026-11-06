@@ -220,6 +220,8 @@ fw cache clear    # 清空；已经取出的目录不受影响（--hardlink 取�
 ```
 fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 2026-10 --dry-run
 fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 2026-10
+fw trainset create SES-TX-det --from SES-TX@4 --classes classes4.txt --label-source txt \
+    --label-classes classes5.txt --map others=        # txt 按 5 类编号，others 当背景，快照只要 4 类
 ```
 
 从一个或几个数据池版本建训练集快照：每张图分到 train、val 或 test，连同类别表一起冻结。训练时取这个快照，模型登记时带上它，以后就能从模型查回训练用的每个文件。目录和文件的格式见[训练集快照的格式](trainset-format.md)。
@@ -238,10 +240,15 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 | `--split-file` | 用自己的划分清单：每行一个样本「`<现场>/<产线>/<图片路径>` 制表符或空格 `train`、`val` 或 `test`」，`#` 开头的行不算。清单要正好包括来源里的全部图片。用清单时不算接着上一版（`based_on` 是空的） |
 | `--fresh` | 不接着上一版，全部重新划分 |
 | `--require-labels` | 每张图都要有标注：有没标注的图就不建，预览里列出来。默认没有标注的图当负样本收进来 |
+| `--label-source` | `json` 或 `txt`：一张图同时有 JSON 和 txt 标注时用哪一种（例如 `images/a.json` 和 `labels/a.txt`）。不写时遇到这样的图就不建 |
+| `--label-classes` | txt 标注自己的类别表文件（行号是 txt 里的类别编号），和 `--classes` 不一样时用；不写就按 `--classes` 读 |
+| `--map` | `源=目标`，可写多次：标注里的「源」类别算作类别表里的「目标」，例如 `DL1=DL`；目标留空就去掉这类框、当背景，例如 `others=`。只改快照里的标注，数据池不变 |
 | `--note` | 备注 |
 | `--dry-run` | 只预览，不建 |
 | `--yes` | 不问确认 |
 
+- 标注怎么配对：同目录同名的 `.json` / `.txt`，或者 YOLO 的 `images/` 对应 `labels/` 的 `.txt`（数据池按 YOLO 目录放的也能直接建）。详见[标注怎么配对](trainset-format.md#标注怎么配对)和[类别映射](trainset-format.md#类别映射)。
+- 用了 `--map` 时，预览里列出每条映射去掉或并进了多少个框；映射的源类别在标注里一个框也没有就不建（多半写错了，类别名区分大小写）。
 - 名称和数据集共用：已经有叫这个名的数据集，就不能用来建快照。
 - 快照只能用这条命令建，`fw dataset import` 往快照里导入会被拒绝。
 - 和最新版完全一样（样本、划分、标注、类别表都没变）时不建。
@@ -257,7 +264,7 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --test-dirs 
 
 ```
 fw trainset list                 # 全部快照和它们的最新版
-fw trainset show SES-TX-det@2    # 来源、划分规则、每个划分的张数和每类框数
+fw trainset show SES-TX-det@2    # 来源、划分规则、读标注的规则（映射等）、每个划分的张数和每类框数
 ```
 
 取回用 `fw get SES-TX-det@2 --to <目录>`，导出、核对、对比也和数据集版本一样（`fw export`、`fw verify`、`fw dataset diff`）。对比两个快照时，换了划分的样本显示成改名。`fw dataset list` 里也列出快照，类型是「训练集快照」。

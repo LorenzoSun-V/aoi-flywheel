@@ -2,6 +2,7 @@
 import io
 import json
 import struct
+from collections import Counter
 
 import pytest
 
@@ -114,3 +115,20 @@ def test_coco_document():
     assert doc['annotations'] == [{'id': 1, 'image_id': 1, 'category_id': 1, 'bbox': [1.25, 2.0, 2.25, 2.0],
                                    'area': 4.5, 'iscrowd': 0, 'segmentation': []}]
     assert [c['id'] for c in doc['categories']] == [0, 1]
+
+
+def test_remap_json_and_txt():
+    assert formats.remap_json('{not json', {'a': ''}) == (None, Counter())  # parse_json says why
+    assert formats.remap_json('{"shapes": [1, {"label": 2}]}', {'a': ''}) == (None, Counter())
+    text = json.dumps({'shapes': [{'label': 'a', 'x': 1}, {'label': 'b'}, 'odd'], 'k': 'v'})
+    new, moved = formats.remap_json(text, {'a': 'b', 'b': 'a'})  # one step: a swap stays a swap
+    assert json.loads(new) == {'shapes': [{'label': 'b', 'x': 1}, {'label': 'a'}, 'odd'], 'k': 'v'}
+    assert moved == Counter({('a', 'b'): 1, ('b', 'a'): 1}) and new.endswith('}\n')
+    label = formats.parse_txt('0 0.5 0.5 0.1 0.1\n1 0.5 0.5 0.2 0.2\n2 0.5 0.5 0.3 0.3\n', ['x', 'y', 'z'])
+    assert formats.remap_txt(label, {'x': '', 'z': 'y'}, ['y'])
+    assert label.names == ['y', 'y'] and [r[0] for r in label.yolo_rows] == [0, 0]
+    assert label.moved == Counter({('x', ''): 1, ('z', 'y'): 1})
+    same = formats.parse_txt('1 0.5 0.5 0.1 0.1\n', ['x', 'y'])
+    assert not formats.remap_txt(same, {}, ['x', 'y'])  # nothing changed: the file is frozen as it is
+    other = formats.parse_txt('0 0.5 0.5 0.1 0.1\n', ['y', 'x'])  # its own table: renumbered
+    assert formats.remap_txt(other, {}, ['x', 'y']) and other.yolo_rows[0][0] == 1

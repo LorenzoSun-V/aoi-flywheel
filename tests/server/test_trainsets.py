@@ -565,13 +565,114 @@ def test_label_source_picks_json_or_txt(api, cache, tmp_path):
         assert tree['labels/train/SES/TX/b1/images_/a.txt'].startswith(first)
         assert tree['labels/train/SES/TX/b1/images_/only_json.txt'].startswith(b'1 ')  # each still has its own
         assert tree['labels/train/SES/TX/b1/images_/only_txt.txt'].startswith(b'0 ')
-        assert json.loads(tree['trainset.json'])['label_source'] == source
+        assert json.loads(tree['trainset.json'])['rule']['label_source'] == source
+        assert api.trainset(*v['ref'].split('@'))['trainset']['rule']['label_source'] == source
     two = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.txt': yolo_line(0).encode(),
                                'b/labels/a.txt': yolo_line(1).encode()})
     preview = api.preview_trainset(name, {'sources': [f'{two}@1'], 'classes': CLASSES, 'label_source': 'txt'})
     assert any('两个同类的标注' in p for p in preview['problems']), preview['problems']
     assert status_of(lambda: api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES,
                                                          'label_source': 'xml'})) == 400
+
+
+SES5 = ['Dirty', 'Scratch', 'Crack', 'Solder', 'others']  # the SES pool's txt ids; others is background
+SES4 = SES5[:4]
+
+
+def test_class_map_drops_others_and_reads_txt_by_its_own_table(api, cache, tmp_path):
+    # 2026-11-06, the SES pool: txt numbered by 5 classes, others (4) is background; the snapshot has 4 classes.
+    kept = '3 0.15 0.4 0.2 0.4\n'  # Solder only, written by hand: nothing to change, so frozen byte for byte
+    files = {'b1/images/a.png': png(uuid.uuid4().hex), 'b1/labels/a.txt': (yolo_line(4) + yolo_line(1)).encode(),
+             'b1/images/b.png': png(uuid.uuid4().hex), 'b1/labels/b.txt': yolo_line(4).encode(),
+             'b1/images/c.png': png(uuid.uuid4().hex), 'b1/labels/c.txt': kept.encode()}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    body = {'sources': [f'{src}@1'], 'classes': SES4, 'val': 0}
+    preview = api.preview_trainset(name, body)  # without --label-classes, id 4 is past the 4-class table
+    assert any('超出类别表' in p for p in preview['problems']), preview['problems']
+    preview = api.preview_trainset(name, dict(body, label_classes=SES5))
+    assert any("'others' 不在类别表里" in p for p in preview['problems']), preview['problems']
+    v = make(api, name, [f'{src}@1'], SES4, val=0, label_classes=SES5, class_map={'others': ''})
+    ts = v['trainset']
+    assert ts['counts']['train']['boxes'] == {'Dirty': 0, 'Scratch': 1, 'Crack': 0, 'Solder': 1}
+    assert ts['counts']['train']['negatives'] == 0  # b has a label: an image with no boxes, not a missing label
+    assert ts['rule']['label_classes'] == SES5 and ts['rule']['class_map'] == {'others': ''}
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt='all')
+    lab = 'labels/train/SES/TX/b1/images/'  # fmt all: the snapshot as it is stored
+    assert tree[lab + 'a.txt'] == yolo_line(1).encode()
+    assert tree[lab + 'b.txt'] == b''
+    assert tree[lab + 'c.txt'] == kept.encode()
+    assert tree['classes.txt'] == ('\n'.join(SES4) + '\n').encode()
+    a = json.loads(tree['json/train/SES/TX/b1/images/a.json'])
+    assert [s['label'] for s in a['shapes']] == ['Scratch']
+    coco = json.loads(tree['coco/train.json'])
+    assert sorted(x['category_id'] for x in coco['annotations']) == [1, 3]
+    assert json.loads(tree['trainset.json'])['rule']['class_map'] == {'others': ''}
+    # the notices say what the map did
+    preview = api.preview_trainset(f'{name}-again', dict(body, label_classes=SES5, class_map={'others': ''}))
+    assert '映射：others 的 2 个框去掉，当背景' in preview['notices'], preview['notices']
+    assert any(n.startswith('1 张图的框全被映射去掉了') and 'b1/labels/b.txt' in n for n in preview['notices'])
+
+
+def test_class_map_on_json_keeps_the_rest_of_the_file(api, cache, tmp_path):
+    poly = {'label': 'others', 'points': [[0, 0], [5, 0], [5, 5]], 'shape_type': 'polygon', 'group_id': 3}
+    point = {'label': 'others', 'points': [[1, 1]], 'shape_type': 'point'}  # dropped with its class, not refused
+    keep = {'label': 'DL1', 'points': [[10, 20], [50, 20], [50, 60], [10, 60]], 'shape_type': 'rectangle',
+            'description': '划痕', 'flags': {'x': True}}
+    doc = json.loads(label(shapes=[poly, keep, point]))
+    doc['custom'] = {'kept': [1, 2]}
+    raw = json.dumps(doc, ensure_ascii=False).encode()
+    files = {'d.png': png(uuid.uuid4().hex), 'd.json': raw,
+             'e.png': png(uuid.uuid4().hex), 'e.json': label('DL2', 'DL'),
+             'f.png': png(uuid.uuid4().hex), 'f.json': label('DL')}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    v = make(api, name, [f'{src}@1'], ['DL'], val=0, class_map={'others': '', 'DL1': 'DL', 'DL2': 'DL'})
+    assert v['trainset']['counts']['train']['boxes'] == {'DL': 4}
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt='all')
+    d = json.loads(tree['json/train/SES/TX/d.json'])
+    assert d['shapes'] == [dict(keep, label='DL')] and d['custom'] == {'kept': [1, 2]}
+    assert list(d) == list(doc)  # the same keys in the same order
+    assert tree['json/train/SES/TX/f.json'] == label('DL')  # nothing to change: the file as it is
+    assert tree['labels/train/SES/TX/e.txt'] == (yolo_line(0) * 2).encode()
+    # a map source that no label has is refused: a typo would otherwise leave the boxes as they are
+    preview = api.preview_trainset(f'{name}-x', {'sources': [f'{src}@1'], 'classes': ['DL', 'DL1', 'DL2'],
+                                                 'class_map': {'others': '', 'dl1': 'DL'}})
+    assert any("映射的源类别 dl1" in p for p in preview['problems']), preview['problems']
+
+
+def test_class_map_snapshot_continues_without_relabeling(api, tmp_path):
+    files = {'b1/images/a.png': png(uuid.uuid4().hex), 'b1/labels/a.txt': (yolo_line(4) + yolo_line(0)).encode(),
+             'b1/images/j.png': png(uuid.uuid4().hex), 'b1/images/j.json': label('others', 'Crack')}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    kw = dict(label_classes=SES5, class_map={'others': '', 'Crack': 'Scratch'})
+    make(api, name, [f'{src}@1'], SES4, val=0, **kw)
+    add_version(api, tmp_path, src, dict(files, **{'b1/images/new.png': png(uuid.uuid4().hex)}))
+    body = {'sources': [f'{src}@2'], 'classes': SES4, **kw}
+    preview = api.preview_trainset(name, body)  # the mapped labels frozen last time are the same: not relabeled
+    assert (preview['changes']['added'], preview['changes']['relabeled']) == (1, 0), preview['changes']
+    v = make(api, name, [f'{src}@2'], SES4, **kw)
+    boxes = {split: c['boxes'] for split, c in v['trainset']['counts'].items() if c['samples']}
+    assert boxes == {'train': {'Dirty': 1, 'Scratch': 1, 'Crack': 0, 'Solder': 0},
+                     'test': {'Dirty': 0, 'Scratch': 0, 'Crack': 0, 'Solder': 0}}
+
+
+def test_class_map_options_are_checked(api, tmp_path):
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': label('scratch')})
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    body = {'sources': [f'{src}@1'], 'classes': CLASSES}
+    for extra in ({'class_map': {'scratch': 'nope'}}, {'class_map': {'scratch': 'scratch'}},
+                  {'class_map': {' scratch': ''}}, {'class_map': {'': 'dent'}},
+                  {'label_classes': []}, {'label_classes': ['a', 'a']}, {'label_classes': ['a\tb']}):
+        assert status_of(lambda: api.preview_trainset(name, dict(body, **extra))) == 400, extra
+    preview = api.preview_trainset(name, dict(body, label_classes=['x']))  # only JSON labels: has no effect
+    assert '没有用到 txt 标注，--label-classes 不起作用' in preview['notices']
+    assert ops.parse_class_map(['others=', 'DL1 = DL']) == {'others': '', 'DL1': 'DL'}
+    assert ops.parse_class_map([]) is None
+    for bad in (['others'], ['=DL'], ['a=', 'a=b']):
+        with pytest.raises(ops.FwError):
+            ops.parse_class_map(bad)
 
 
 def test_require_labels(api, tmp_path):
@@ -673,6 +774,39 @@ def test_only_trainset_versions_have_a_record(sql, snapshot, api, tmp_path):
 
 
 # --- the command line and the training-script call -----------------------------------------------------------
+def test_an_old_server_that_ignores_the_label_options_is_refused():
+    class OldServer:  # a server from before these options: takes the request, leaves them out of the rule
+        def preview_trainset(self, name, body):
+            return {'rule': {'mode': 'fresh'}, 'based_on': None, 'sources': body['sources'], 'problems': []}
+    for kw, option in ((dict(label_source='txt'), '--label-source'), (dict(label_classes=SES5), '--label-classes'),
+                       (dict(class_map={'others': ''}), '--map')):
+        with pytest.raises(ops.FwError, match=f'服务器版本太旧，不认 {option}'):
+            ops.create_trainset(OldServer(), 'T', ['P@1'], SES4, echo=quiet, dry_run=True, **kw)
+
+
+def test_command_line_class_map(service, tokens, api, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('FW_CONFIG', str(tmp_path / 'config.json'))
+    monkeypatch.setenv('FW_CACHE', str(tmp_path / 'cache'))
+    monkeypatch.delenv('FW_SERVER', raising=False)
+    monkeypatch.delenv('FW_TOKEN', raising=False)
+    assert fw_cli.main(['login', '--server', service.url, '--token', tokens['algo']]) == 0
+    src = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.json': label('others'),
+                               'b/labels/a.txt': (yolo_line(4) + yolo_line(2)).encode()})
+    (tmp_path / 'c4.txt').write_text('\n'.join(SES4) + '\n', encoding='utf-8')
+    (tmp_path / 'c5.txt').write_text('\n'.join(SES5) + '\n', encoding='utf-8')
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    args = ['trainset', 'create', name, '--from', f'{src}@1', '--classes', str(tmp_path / 'c4.txt'), '--val', '0',
+            '--label-source', 'txt', '--label-classes', str(tmp_path / 'c5.txt'), '--map', 'others=', '--yes']
+    assert fw_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert '标注：同时有 JSON 和 txt 的图用 txt；txt 按自己的 5 类编号读' in out and '映射 others→去掉' in out, out
+    assert '注意：映射：others 的 1 个框去掉，当背景' in out
+    assert fw_cli.main(['trainset', 'show', name]) == 0
+    assert '映射 others→去掉' in capsys.readouterr().out
+    assert fw_cli.main(args[:-3] + ['--map', 'others', '--dry-run']) == 1
+    assert '--map 的写法' in capsys.readouterr().err
+
+
 def test_command_line_and_get_trainset(service, tokens, api, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv('FW_CONFIG', str(tmp_path / 'config.json'))
     monkeypatch.setenv('FW_CACHE', str(tmp_path / 'cache'))
