@@ -8,7 +8,7 @@
 - `fw dataset import` 的扫描也按 `images/` ↔ `labels/` 配对，不再把配好的图和 txt 报成「没有标注的图片」「找不到图片的标注」。
 - `fw get --format json` 把 LiteAnno JSON 放在每张图旁边（以前就是这样，手册补上说明：`--format all` 的 JSON 单独在 `json/` 下，LiteAnno 读不到）。
 - 复审后修正（合并前）：
-  - 去掉几层后只差扩展名的两张图（例如 `images/1.bmp` 有标注、`1.png` 没有）会共用一份标注（YOLO 的 `labels/train/1.txt`、LiteAnno 的 `1.json`），这样的快照也不建。
+  - 去掉几层后只差扩展名的两张图（例如 `images/1.bmp` 有标注、`1.png` 没有）会共用一份标注（YOLO 的 `labels/train/1.txt`、LiteAnno 的 `1.json`），这样的快照也不建。只差大小写的（`A.bmp` 和 `a.png`，Windows 上是同一个标注文件）也算；检查一次分组完成，重名很多时预览不会变慢。
   - 导入扫描里 `labels/a.json` 不再因为旁边有配上的 `labels/a.txt` 就算作配上（YOLO 只认 txt），会报「找不到图片的标注」。
   - 0.2.3 以前建的快照用同样的输入续建时，只是取回布局变了也能建新版，不再报「完全一样」。
 

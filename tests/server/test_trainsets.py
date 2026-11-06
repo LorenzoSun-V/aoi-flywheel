@@ -581,6 +581,27 @@ def test_short_paths_never_share_a_label(api, tmp_path):
                                                                   'val': 0})
     assert any('共用一份标注' in p and 'images/train/1.jpg' in p and 'images/train/1.png' in p
                for p in preview['problems']), preview['problems']
+    # 2nd review: only the case differs (one file on Windows), and many such pairs are grouped in one pass
+    files = {'images/A.jpg': png(uuid.uuid4().hex), 'labels/A.txt': yolo_line(0).encode(),
+             'a.png': png(uuid.uuid4().hex)}
+    src = pool(api, tmp_path, files)
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES,
+                                                                  'val': 0})
+    assert any('共用一份标注' in p and 'images/train/A.jpg' in p and 'images/train/a.png' in p
+               for p in preview['problems']), preview['problems']
+
+
+def test_shared_label_check_is_one_pass(monkeypatch):
+    # 2nd review of #11: every shared stem rescanned the whole list (500 pairs: 1,000,000 _stem calls)
+    calls = []
+    real = trainsets._stem
+    monkeypatch.setattr(trainsets, '_stem', lambda p: calls.append(p) or real(p))
+    entries = []
+    for i in range(500):
+        entries += [(f'images/train/SES/TX/images/{i}.jpg', 'a', 1), (f'images/train/SES/TX/{i}.png', 'b', 1)]
+    problems = trainsets._shared_labels(entries)
+    assert len(problems) == 2 * 500  # every pair, in the yolo and the json layout
+    assert len(calls) == 2 * len(entries)
 
 
 def test_an_old_layout_snapshot_can_be_made_again_with_short_paths(api, tmp_path, monkeypatch):

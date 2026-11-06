@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
-from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, manifest_bytes,
+from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, fold, manifest_bytes,
                          path_problem, short_paths, trainset_layout, yolo_label_stem)
 
 from . import datasets, formats
@@ -584,15 +584,23 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         twins = sorted(p for p, n in Counter(short_layout).items() if n > 1)
         problems += [f'取回时路径去掉现场/产线和 images 这层目录后重名（{fmt} 格式）：{p}'
                      for p in twins + collisions(short_layout)]
-    # an image finds its label by its stem (YOLO: labels/<same path>.txt, LiteAnno: the .json next to it), so two
-    # images whose short paths differ only in the extension would share one label, even when one has none
-    for fmt in ('yolo', 'json'):
-        pictures = trainset_layout([e for e in entries if e[0].startswith('images/')], fmt, short=True)
-        stems = Counter(_stem(path) for path, _, _ in pictures)
-        problems += [f'取回时路径去掉现场/产线和 images 这层目录后，同名不同扩展名的图片会共用一份标注（{fmt} 格式）：'
-                     f'{"、".join(p for p, _, _ in pictures if _stem(p) == stem)}'
-                     for stem, n in stems.items() if n > 1]
+    problems += _shared_labels(entries)
     return entries, blobs, sorted(set(problems))
+
+
+def _shared_labels(entries: List[File]) -> List[str]:
+    """An image finds its label by its stem (YOLO: labels/<same path>.txt, LiteAnno: the .json next to it), so two
+    images whose short paths differ only in the extension, or only in case (one file on Windows, see fold), would
+    share one label even when one of them has none. One pass, grouped by the folded stem."""
+    problems = []
+    images = [e for e in entries if e[0].startswith('images/')]
+    for fmt in ('yolo', 'json'):
+        by_label = defaultdict(list)
+        for path, _, _ in trainset_layout(images, fmt, short=True):
+            by_label[fold(_stem(path))].append(path)
+        problems += [f'取回时路径去掉现场/产线和 images 这层目录后，同名不同扩展名的图片会共用一份标注（{fmt} 格式）：'
+                     f'{"、".join(group)}' for group in by_label.values() if len(group) > 1]
+    return problems
 
 
 @dataclass
