@@ -29,7 +29,7 @@ TASKS = {'det': '检测'}
 TAGS = {'candidate': '候选', 'deprecated': '弃用'}
 PRECISIONS = ('fp32', 'fp16')
 SPLITS = ('train', 'val', 'test')
-ONNX, CLASSES, METRICS, EXTRA = 'model.onnx', 'classes.txt', 'metrics.json', 'files/'
+ONNX, CLASSES, METRICS, EXTRA, WEIGHTS = 'model.onnx', 'classes.txt', 'metrics.json', 'files/', 'weights/'
 COMMIT = re.compile(r'[0-9a-f]{7,64}\Z')
 CREDENTIALS = re.compile(r'https?://[^/]*@', re.I)
 # Letters, digits, _ and . plus Chinese characters (CJK unified ideographs and extension A), by code point,
@@ -94,9 +94,9 @@ def _pinned(name: str, number: str) -> str:
 
 
 # --- file sets ---------------------------------------------------------------------------------------------
-def _entries(files: Sequence, required: str, top: Sequence[str]) -> List[Entry]:
+def _entries(files: Sequence, required: str, top: Sequence[str], weights: bool = False) -> List[Entry]:
     """The files of a request as (path, sha256, size): paths allowed for this record, no duplicates, no two
-    paths that collide on Windows."""
+    paths that collide on Windows. weights: one file may be weights/<name> (the trained weights, .pt / .pth)."""
     if not files:
         raise DatasetError(400, '没有文件')
     if len(files) > MAX_FILES:
@@ -114,8 +114,14 @@ def _entries(files: Sequence, required: str, top: Sequence[str]) -> List[Entry]:
             check_path(path)
         except ContractError as e:
             raise DatasetError(400, f'文件路径不能用：{e}') from None
-        if path not in top and not (path.startswith(EXTRA) and len(path) > len(EXTRA)):
-            raise DatasetError(400, f'{path}：只能是 {"、".join(top)} 或 files/ 下的文件')
+        if weights and path.startswith(WEIGHTS):
+            if '/' in path[len(WEIGHTS):] or any(p.startswith(WEIGHTS) for p in seen):
+                raise DatasetError(400, f'{path}：weights/ 下只能有一个权重文件，不能有子目录')
+            if size == 0:  # frozen, an empty file would also block the retry with the real one (same ONNX)
+                raise DatasetError(400, f'{path}：权重文件是空的，没有登记')
+        elif path not in top and not (path.startswith(EXTRA) and len(path) > len(EXTRA)):
+            raise DatasetError(400, f'{path}：只能是 {"、".join(top)}' + ('、weights/<权重文件>' if weights else '')
+                                    + ' 或 files/ 下的文件')
         if path in seen:
             raise DatasetError(400, f'{path} 写了两次')
         seen.add(path)
@@ -291,7 +297,7 @@ def _model_versions(conn, rows: List[dict]) -> List[dict]:
              'file_count': r['file_count'], 'total_bytes': r['total_bytes'],
              'trainset': {'id': r['trainset_id'], 'ref': f'{r["trainset_dataset"]}@{r["trainset_number"]}',
                           'manifest_sha256': r['trainset_manifest']},
-             'classes': r['classes'], 'code_repo': r['code_repo'], 'code_commit': r['code_commit'],
+             'classes': r['classes'], 'code_repo': r['code_repo'], 'code_commit': r['code_commit'] or '',
              'code_dirty': r['code_dirty'], 'metrics': r['metrics'], 'note': r['note'], 'tags': tags[r['id']],
              'created_by': r['created_by'], 'created_at': _stamp(r['created_at'])} for r in rows]
 
@@ -334,9 +340,10 @@ def model_version_detail(conn, name: str, number: str) -> dict:
 def register_model_version(conn, store: Store, user_id: int, name: str, files: Sequence, trainset_id: int,
                            code_repo: str = '', code_commit: str = '', code_dirty: bool = False,
                            note: str = '') -> dict:
-    """files: model.onnx, optionally metrics.json and files/...; classes.txt is added from the snapshot."""
+    """files: model.onnx, optionally weights/<name>, metrics.json and files/...; classes.txt is added from the
+    snapshot. The training code (repository, commit) is optional: an empty commit records none."""
     model = get_model(conn, name)
-    entries = _entries(files, ONNX, (ONNX, METRICS))
+    entries = _entries(files, ONNX, (ONNX, METRICS), weights=True)
     trainset = datasets.get_version_by_id(conn, trainset_id)
     if trainset['kind'] != 'trainset':
         raise DatasetError(400, f'{trainset["ref"]} 不是训练集快照；模型版本要引用训练用的快照（fw trainset create 建的）')
@@ -347,8 +354,10 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
     classes = conn.execute("SELECT encode(sha256, 'hex') AS d, size FROM version_files "
                            "WHERE version_id = %s AND path = 'classes.txt'", (trainset_id,)).fetchone()
     entries.append((CLASSES, classes['d'], classes['size']))
-    commit = _commit(code_commit, '训练代码的提交号')
+    commit = _commit(code_commit, '训练代码的提交号') if _text(code_commit, '训练代码的提交号') else None
     repo = _repo(code_repo, '训练代码仓库', required=False)
+    if commit is None and (repo or code_dirty):
+        raise DatasetError(400, '写了训练代码仓库或「有没提交的改动」，就要写训练代码的提交号')
     note = _text(note, '备注')
     _check_stored(store, entries)
     onnx = next(d for p, d, _ in entries if p == ONNX)
@@ -362,7 +371,7 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
         if same:
             old = _model_versions(conn, same)[0]
             if (old['manifest_sha256'], old['trainset']['id'], old['code_commit'], old['code_repo'],
-                    old['code_dirty']) == (manifest, trainset_id, commit, repo, bool(code_dirty)):
+                    old['code_dirty']) == (manifest, trainset_id, commit or '', repo, bool(code_dirty)):
                 return dict(old, existing=True)
             raise DatasetError(409, f'这个 ONNX 已经登记为 {old["ref"]}，但训练集快照、代码或附带的文件不一样；'
                                     '同一个 ONNX 只登记一次')

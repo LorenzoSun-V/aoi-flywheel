@@ -97,7 +97,7 @@ FileRow = Tuple[str, str, int]  # (path, sha256, size)
 class ModelVersionBody(BaseModel):
     files: List[FileRow] = Field(max_length=models.MAX_FILES)
     trainset_id: int
-    code_commit: str
+    code_commit: str = ''  # optional: no training code recorded
     code_repo: str = ''
     code_dirty: bool = False
     note: str = ''

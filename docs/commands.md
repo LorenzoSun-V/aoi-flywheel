@@ -276,24 +276,26 @@ fw model show SES-TX-detr@3                          # 文件、类别、训练�
 ### fw model register
 
 ```
-fw model register SES-TX-detr --onnx runs/best.onnx --trainset SES-TX-det@2 --metrics runs/val.json \
-  --file runs/best.pt --file configs/train.yaml
+fw model register SES-TX-detr --onnx runs/best.onnx --weights runs/best.pt --trainset SES-TX-det@2 \
+  --file configs/train.yaml
 ```
 
-把 ONNX 传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
+把 ONNX 和权重传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。模型好不好以平台用 aoi-deteval 统一算的指标为准（第三步由 GPU worker 用权重和从 ONNX 构建的引擎评估），不看各训练框架自己算的指标，所以指标和训练代码都是选填。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
 
 | 选项 | 说明 |
 |---|---|
-| `--onnx` | 必填，ONNX 文件。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
+| `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
+| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，用来统一评估 |
 | `--trainset` | 必填，训练用的训练集快照，例如 `SES-TX-det@2`。追溯链就是从这里接到数据的；类别表也用这个快照的，登记时一起放进模型版本 |
-| `--metrics` | 验证指标 JSON，要是一个 JSON 对象，内容随意（训练结束时的 val 指标），`fw model show`、`fw model compare` 会列出里面的数值 |
-| `--file` | 附件：权重、训练配置等，登记在 `files/` 下；写目录就带上整个目录；可写多次 |
-| `--code-commit` | 训练代码的 git 提交号。不写就用当前目录 git 仓库的 HEAD，有没提交的改动时会提示，并记在这个版本上 |
-| `--code-repo` | 训练代码仓库地址；不写就用当前目录的 origin。地址里带的账号和令牌（`https://user:token@…`）会去掉，不会记下来 |
+| `--metrics` | 选填：训练框架自己算的验证指标 JSON（一个 JSON 对象），只作参考；`fw model show`、`fw model compare` 会列出里面的数值 |
+| `--file` | 附件：训练配置等，登记在 `files/` 下；写目录就带上整个目录；可写多次 |
+| `--code-dir` | 选填：训练代码的 git 目录，记下它的 HEAD 和 origin；有没提交的改动时会提示，并记在这个版本上 |
+| `--code-commit`、`--code-repo` | 选填：不用 `--code-dir` 时直接写提交号（和仓库地址）。只写仓库地址不写提交号会被拒绝。地址里带的账号和令牌（`https://user:token@…`）会去掉，不会记下来 |
 | `--note` | 备注 |
 
 - 同一个模型里，一个 ONNX 只登记一次。同样的 ONNX、快照、代码和文件再登记一次（脚本跑了两遍，网络断了重试），返回已有的那个版本，不会多出一个；ONNX 一样而别的不一样就拒绝。
-- 模型版本里的文件：`model.onnx`、`classes.txt`（快照的类别表）、`metrics.json`（有 `--metrics` 时）、`files/…`（附件）。
+- 训练代码三个选项都不写时不记，`fw model show` 和追溯链里显示「未记录」。不会自动读当前目录的 git：当前目录可能是别的仓库。
+- 模型版本里的文件：`model.onnx`、`classes.txt`（快照的类别表）、`weights/<权重文件>`（有 `--weights` 时）、`metrics.json`（有 `--metrics` 时）、`files/…`（附件）。
 - 引擎不在这里登记：上传的引擎不一定能在部署的机器上用，引擎要从 ONNX 在目标环境里构建（第三步由 GPU worker 调部署仓库的构建入口；在那之前现场自己构建，发布时记下 GPU、TensorRT 版本和引擎的哈希，见 `fw release register`）。
 
 ### fw model get
@@ -302,7 +304,7 @@ fw model register SES-TX-detr --onnx runs/best.onnx --trainset SES-TX-det@2 --me
 fw model get SES-TX-detr@3 --to /opt/deploy/models/SES-TX-detr@3
 ```
 
-把模型版本的文件取到一个空目录：`model.onnx`、`classes.txt`、`metrics.json`、`files/…`，另外生成 `fw-model.json`（不在模型版本里：版本编号、快照、类别表、ONNX 哈希、训练代码提交号）。和 `fw get` 一样走本机缓存，每个文件按清单核对；`--copy`、`--hardlink` 也一样。部署账号也能用，但只能取模型版本的文件，取不了数据集。
+把模型版本的文件取到一个空目录：`model.onnx`、`classes.txt`、`weights/…`、`metrics.json`、`files/…`（有哪些取哪些），另外生成 `fw-model.json`（不在模型版本里：版本编号、快照、类别表、ONNX 哈希、训练代码提交号）。和 `fw get` 一样走本机缓存，每个文件按清单核对；`--copy`、`--hardlink` 也一样。部署账号也能用，但只能取模型版本的文件，取不了数据集。
 
 ### fw model tag、fw model compare
 
@@ -402,12 +404,11 @@ print(v['id'], v['path'])
 训练完登记模型版本：
 
 ```python
-mv = fw.register_model('SES-TX-detr', onnx='runs/best.onnx', trainset=ts, metrics='runs/val.json',
-                       files=['runs/best.pt'], code_commit='<训练代码提交号>')
+mv = fw.register_model('SES-TX-detr', onnx='runs/best.onnx', weights='runs/best.pt', trainset=ts)
 print(mv['ref'])   # SES-TX-detr@3
 ```
 
-`trainset` 可以是 `fw.get_trainset` 返回的记录、它的 `id`，或者 `'SES-TX-det@2'`。参数和 `fw model register` 一样；不写 `code_commit` 时用当前目录 git 仓库的 HEAD（脚本从别的目录运行时最好写上）。同样的东西再登记一次返回已有的版本，`mv['existing']` 为 `True`。
+`trainset` 可以是 `fw.get_trainset` 返回的记录、它的 `id`，或者 `'SES-TX-det@2'`。参数和 `fw model register` 一样（`weights`、`metrics`、`files`、`code_dir`、`code_commit`、`code_repo`、`note`）；训练代码不写就不记。同样的东西再登记一次返回已有的版本，`mv['existing']` 为 `True`。
 
 部署脚本取模型版本：
 

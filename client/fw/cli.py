@@ -229,7 +229,7 @@ def cmd_model_versions(args, api: Api) -> None:
         print(f'{args.name} 还没有版本；用 fw model register 登记')
         return
     _table(['版本', '训练集快照', 'ONNX', '代码提交', '标签', '登记人', '登记时间', '备注'],
-           [[v['ref'], v['trainset']['ref'], v['onnx_sha256'][:12], v['code_commit'][:10] + ('*' if v['code_dirty'] else ''),
+           [[v['ref'], v['trainset']['ref'], v['onnx_sha256'][:12], (v['code_commit'] or '-')[:10] + ('*' if v['code_dirty'] else ''),
              _tags(v) or '-', v['created_by'], _when(v['created_at']), v['note']] for v in rows])
     if any(v['code_dirty'] for v in rows):
         print('提交号后面有 * 的：训练时代码有没提交的改动')
@@ -240,8 +240,7 @@ def cmd_model_show(args, api: Api) -> None:
     print(f'{mv["ref"]}：{mv["site"]}/{mv["line"]}，{TASK_NAMES.get(mv["task"], mv["task"])}，'
           f'{mv["created_by"]} 登记于 {_when(mv["created_at"])}')
     print(f'训练集快照：{mv["trainset"]["ref"]}；类别：{"、".join(mv["classes"])}')
-    print(f'训练代码：{mv["code_repo"] or "（没有登记仓库地址）"} @ {mv["code_commit"]}'
-          + ('（训练时有没提交的改动）' if mv['code_dirty'] else ''))
+    print('训练代码：' + ops.code_text(mv) + ('（训练时有没提交的改动）' if mv['code_dirty'] else ''))
     if mv['tags']:
         print(f'标签：{_tags(mv)}')
     if mv['note']:
@@ -261,7 +260,7 @@ def cmd_model_show(args, api: Api) -> None:
 
 def cmd_model_register(args, api: Api) -> None:
     ops.register_model(api, args.name, args.onnx, args.trainset, args.metrics, args.file, args.code_commit,
-                       args.code_repo, args.note, workers=args.workers)
+                       args.code_repo, args.note, workers=args.workers, weights=args.weights, code_dir=args.code_dir)
 
 
 def cmd_model_get(args, api: Api) -> None:
@@ -470,11 +469,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('name', help='模型名称（先用 fw model create 建）')
     s.add_argument('--onnx', required=True, help='ONNX 文件')
     s.add_argument('--trainset', required=True, help='训练用的训练集快照，例如 SES-TX-det@2')
-    s.add_argument('--metrics', help='验证指标 JSON（一个 JSON 对象，比如训练结束时的 val 指标）')
+    s.add_argument('--weights', help='训练出的权重（.pt、.pth），登记在 weights/ 下，以后平台用它统一评估')
+    s.add_argument('--metrics', help='可选：训练框架自己的验证指标 JSON，只作参考')
     s.add_argument('--file', action='append', default=[], metavar='文件或目录',
-                   help='附件：权重、配置等，登记在 files/ 下；可写多次')
-    s.add_argument('--code-commit', help='训练代码的 git 提交号；不写就用当前目录 git 仓库的 HEAD')
-    s.add_argument('--code-repo', help='训练代码仓库地址；不写就用当前目录的 origin（去掉其中的账号和令牌）')
+                   help='附件：训练配置等，登记在 files/ 下；可写多次')
+    s.add_argument('--code-dir', help='可选：训练代码的 git 目录，记下它的 HEAD 和 origin（去掉其中的账号和令牌）')
+    s.add_argument('--code-commit', help='可选：训练代码的 git 提交号（不用 --code-dir 时）')
+    s.add_argument('--code-repo', help='可选：训练代码仓库地址，和 --code-commit 一起写')
     s.add_argument('--note', default='', help='备注')
     s.add_argument('--workers', type=int, default=8)
     s.set_defaults(func=cmd_model_register)
