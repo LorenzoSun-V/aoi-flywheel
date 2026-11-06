@@ -153,11 +153,11 @@ def remap_json(text: str, class_map: Dict[str, str]) -> Tuple[Optional[str], Cou
         return None, moved
     nonce, numbers = os.urandom(8).hex(), []
 
-    def keep(token: str) -> str:  # a number with a fraction or exponent goes back exactly as written
+    def keep(token: str) -> str:  # every number (and NaN, Infinity) goes back exactly as written, e.g. -0
         numbers.append(token)
         return f'\0{nonce}:{len(numbers) - 1}\0'
     try:
-        doc = json.loads(text, parse_float=keep)
+        doc = json.loads(text, parse_float=keep, parse_int=keep, parse_constant=keep)
     except ValueError:
         return None, moved
     shapes = doc.get('shapes') if isinstance(doc, dict) else None
@@ -178,6 +178,8 @@ def remap_json(text: str, class_map: Dict[str, str]) -> Tuple[Optional[str], Cou
     doc['shapes'] = kept
     out = json.dumps(doc, ensure_ascii=False, indent=2)
     out = re.sub(r'"\\u0000' + nonce + r':(\d+)\\u0000"', lambda m: numbers[int(m.group(1))], out)
+    # a lone surrogate (written as an escape like \udc80) has no UTF-8: write it back as the escape
+    out = re.sub('[\ud800-\udfff]', lambda m: f'\\u{ord(m.group()):04x}', out)
     return out + '\n', moved
 
 

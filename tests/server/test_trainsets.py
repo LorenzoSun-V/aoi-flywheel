@@ -494,8 +494,8 @@ def test_previous_splits_keep_the_extension(monkeypatch):
             ('images/test/SES/TX/b.png', 'i3', 1), ('classes.txt', 'c', 1)]
     monkeypatch.setattr(trainsets, '_files', lambda conn, version_id: rows)
     assert trainsets._previous_splits(None, {'id': 1}) == {
-        'SES/TX/same/a.png': ('train', {'j1', 'l1'}), 'SES/TX/same/a.jpg': ('val', {'l2'}),
-        'SES/TX/b.png': ('test', set())}
+        'SES/TX/same/a.png': ('train', {'json': 'j1', 'labels': 'l1'}),
+        'SES/TX/same/a.jpg': ('val', {'labels': 'l2'}), 'SES/TX/b.png': ('test', {})}
 
 
 def test_same_stem_in_two_sources_is_refused(api, tmp_path):
@@ -687,6 +687,44 @@ def test_a_new_class_map_on_a_continued_snapshot_counts_as_relabeled(api, tmp_pa
     assert api.preview_trainset(name, body)['changes']['relabeled'] == 0
     changes = api.preview_trainset(name, dict(body, class_map={'A': 'B'}))['changes']
     assert (changes['added'], changes['relabeled']) == (1, 2), changes
+
+
+def test_a_txt_with_the_bytes_of_a_json_is_read_as_txt(api, tmp_path):
+    # review 2 of #10: the parsed labels were cached by content alone, so b.txt took a.json's boxes
+    files = {'a.png': png(uuid.uuid4().hex), 'a.json': label('scratch'),
+             'b.png': png(uuid.uuid4().hex), 'b.txt': label('scratch')}
+    src = pool(api, tmp_path, files)
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES,
+                                                                'label_source': 'txt'})
+    assert any('b.txt' in p and '不是整数' in p for p in preview['problems']), preview['problems']
+
+
+def test_switching_the_label_source_counts_as_relabeled(api, tmp_path):
+    # review 2 of #10: the txt is byte for byte the YOLO made from the JSON, whose size (200x100) is not the
+    # image's (400x200), so the JSON and COCO frozen for it change: that is a relabeled sample
+    yolo = yolo_line(0).encode()  # what the JSON's box (10,20)-(50,60) on 200x100 becomes
+    files = {'b/images/x.png': png(uuid.uuid4().hex, 400, 200), 'b/images/x.json': label('scratch'),
+             'b/labels/x.txt': yolo}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    make(api, name, [f'{src}@1'], val=0, label_source='json')
+    add_version(api, tmp_path, src, dict(files, **{'b/images/new.png': png(uuid.uuid4().hex)}))
+    body = {'sources': [f'{src}@2'], 'classes': CLASSES}
+    assert api.preview_trainset(name, dict(body, label_source='json'))['changes']['relabeled'] == 0
+    changes = api.preview_trainset(name, dict(body, label_source='txt'))['changes']
+    assert (changes['added'], changes['relabeled']) == (1, 1), changes
+
+
+def test_a_class_map_on_a_json_with_a_lone_surrogate(api, cache, tmp_path):
+    # review 2 of #10: "\udc80" has no UTF-8; rewriting the file gave HTTP 500
+    doc = json.loads(label('A'))
+    doc['shapes'][0]['description'] = '\udc80'
+    raw = json.dumps(doc).encode()  # ensure_ascii: the file holds the escape \udc80
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': raw})
+    v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], ['B'], val=0, class_map={'A': 'B'})
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt='json')
+    shape = json.loads(tree['train/SES/TX/a.json'])['shapes'][0]
+    assert (shape['label'], shape['description']) == ('B', '\udc80')
 
 
 def test_class_map_options_are_checked(api, tmp_path):

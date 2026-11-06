@@ -137,13 +137,16 @@ def test_remap_json_and_txt():
 
 def test_remapping_keeps_numbers_and_coordinates_as_written():
     # review of #10: rewriting must not move a box or change any number in the file
-    text = ('{"calibration": 0.1234567890123456789, "big": 12345678901234567890123, "e": 1E400, "shapes": '
+    text = ('{"calibration": 0.1234567890123456789, "big": 12345678901234567890123, "e": 1E400, "zero": -0, '
+            '"nan": NaN, "odd": "\\udc80", "shapes": '
             '[{"label": "A", "points": [[1e1, 20.000000000000000001], [50.5, 60]], "shape_type": "rectangle"}]}')
     new, _ = formats.remap_json(text, {'A': 'B'})
     doc = json.loads(new, parse_float=Decimal)
     assert doc['calibration'] == Decimal('0.1234567890123456789') and doc['big'] == 12345678901234567890123
-    assert '1E400' in new and '[\n          1e1,\n          20.000000000000000001\n        ]' in new
+    assert '1E400' in new and '"zero": -0,' in new and '"nan": NaN' in new
+    assert '[\n          1e1,\n          20.000000000000000001\n        ]' in new
     assert doc['shapes'][0]['label'] == 'B' and formats.remap_json(new, {'B': 'A'})[0] is not None
+    assert doc['odd'] == '\udc80' and new.encode('utf-8')  # a lone surrogate goes back as its escape
     label = formats.parse_txt('1 0.5 0.5 0.0000004 0.2\n', ['B', 'A'])
     assert formats.remap_txt(label, {}, ['A', 'B'])
     assert formats.yolo_bytes(label, ['A', 'B'], None) == b'0 0.5 0.5 0.0000004 0.2\n'

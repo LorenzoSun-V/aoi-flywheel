@@ -248,6 +248,7 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes4.txt --label-sou
 | `--yes` | 不问确认 |
 
 - 标注怎么配对：同目录同名的 `.json` / `.txt`，或者 YOLO 的 `images/` 对应 `labels/` 的 `.txt`（数据池按 YOLO 目录放的也能直接建）。详见[标注怎么配对](trainset-format.md#标注怎么配对)和[类别映射](trainset-format.md#类别映射)。
+- 「标注改了」：这个样本这一版冻结的 `json/` 或 `labels/` 文件和上一版不一样。数据池里的标注改了、换了 `--label-source`、映射或类别表变了，只要冻结的文件变了都算。
 - 用了 `--map` 时，预览里列出每条映射去掉或并进了多少个框；映射的源类别在标注里一个框也没有就不建（多半写错了，类别名区分大小写）。
 - 名称和数据集共用：已经有叫这个名的数据集，就不能用来建快照。
 - 快照只能用这条命令建，`fw dataset import` 往快照里导入会被拒绝。
