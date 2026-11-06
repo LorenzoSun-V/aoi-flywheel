@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.2.3（未发布）
+
+按 SES-TX 实测（`tx_v8`：`images/1.bmp` + `labels/1.txt`）修正。
+
+- `fw get` 取回训练集快照时路径变短：去掉 `<现场>/<产线>/` 两层和数据池里的 YOLO `images/` 层，`images/train/SES/TX/images_/1.bmp` 变成 `images/train/1.bmp`（`labels/`、`--format coco`、`--format json` 同样）。快照里存的路径和样本标识不变（`--format all`、划分清单照旧）。去掉后有两张图路径相同（几个来源里同路径的图，或者池里同时有 `images/a.png` 和 `a.png`）时不建快照。新快照的 `rule` 里记 `"paths": "short"`，COCO 的 `file_name` 也是短路径；以前建的快照取回时仍是长路径。新服务器建的快照要用新版 `fw` 取，旧版 `fw` 会按长路径摆，COCO 对不上。
+- `fw dataset import` 的扫描也按 `images/` ↔ `labels/` 配对，不再把配好的图和 txt 报成「没有标注的图片」「找不到图片的标注」。
+- `fw get --format json` 把 LiteAnno JSON 放在每张图旁边（以前就是这样，手册补上说明：`--format all` 的 JSON 单独在 `json/` 下，LiteAnno 读不到）。
+
 ## 0.2.2（未发布）
 
 按 SES 现场的真实数据池修正建训练集快照：数据池按 YOLO 目录放的标注能配上，标注里的类别可以在建快照时映射到快照的类别表。数据池里的标注都不改。

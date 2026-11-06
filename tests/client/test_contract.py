@@ -168,3 +168,19 @@ def test_yolo_layout_renames_images_folders():
                                                                  'labels/val/SES/TX/b/images_/1.txt']
     assert [p for p, _, _ in trainset_layout(stored, 'json')] == ['val/SES/TX/b/images/1.png',
                                                                  'val/SES/TX/b/images/1.json']
+
+
+def test_short_paths_for_fw_get():
+    from fw.contract import short_paths, trainset_layout
+    assert short_paths(['SES/TX/images/1.bmp', 'SES/TX/b1/images/x/2.png', 'SES/RX/a/images/images/3.png',
+                        'SES/TX/4.png']) == {
+        'SES/TX/images/1.bmp': '1.bmp', 'SES/TX/b1/images/x/2.png': 'b1/x/2.png',
+        'SES/RX/a/images/images/3.png': 'a/images/3.png', 'SES/TX/4.png': '4.png'}  # only the last images/ goes
+    stored = [('images/train/SES/TX/images/1.bmp', 'i', 1), ('labels/train/SES/TX/images/1.txt', 'l', 1),
+              ('json/train/SES/TX/images/1.json', 'j', 1), ('coco/train.json', 'c', 1)]
+    lay = lambda fmt, short=True: [p for p, _, _ in trainset_layout(stored, fmt, short)]  # noqa: E731
+    assert lay('yolo') == ['images/train/1.bmp', 'labels/train/1.txt']
+    assert lay('json') == ['train/1.bmp', 'train/1.json']
+    assert lay('coco') == ['train/1.bmp', 'train/_annotations.coco.json']
+    assert lay('all') == [p for p, _, _ in stored]
+    assert lay('yolo', False) == ['images/train/SES/TX/images_/1.bmp', 'labels/train/SES/TX/images_/1.txt']

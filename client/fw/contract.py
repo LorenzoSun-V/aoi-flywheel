@@ -15,7 +15,8 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from typing import Dict, Iterable, List, Tuple
+from pathlib import PurePosixPath
+from typing import Dict, Iterable, List, Optional, Tuple
 
 MANIFEST_HEADER = 'fw-manifest 1'
 IMAGE_EXTS = frozenset({'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp'})
@@ -295,6 +296,18 @@ def batches(objects: Iterable[Tuple[str, int]], max_count: int, max_bytes: int) 
     return out
 
 
+def yolo_label_stem(image_path: str) -> Optional[str]:
+    """Where ultralytics (and aoi-deteval) look for an image's label: its path with the LAST folder named images
+    turned into labels, e.g. b1/images/x/a.png -> b1/labels/x/a (then .txt). None without such a folder."""
+    parts = image_path.split('/')
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == 'images':
+            path = '/'.join(parts[:i] + ['labels'] + parts[i + 1:])
+            suffix = PurePosixPath(path).suffix
+            return path[: len(path) - len(suffix)] if suffix else path
+    return None
+
+
 _IMAGES_DIR = re.compile(r'images_*\Z')
 
 
@@ -307,7 +320,31 @@ def yolo_safe(sub: str) -> str:
     return '/'.join([p + '_' if _IMAGES_DIR.match(p) else p for p in parts[:-1]] + parts[-1:])
 
 
-def trainset_layout(entries: Iterable[Entry], fmt: str) -> List[Entry]:
+def short_paths(subs: Iterable[str]) -> Dict[str, str]:
+    """The shorter path fw get uses for each <site>/<line>/<path in pool> of a snapshot made with short paths
+    (rule 'paths': 'short'): <site>/<line>/ goes, and so does the LAST folder named images in the pool path (the
+    pool's YOLO images/ folder, whose labels/ the snapshot already paired), e.g. SES/TX/b1/images/x/1.png ->
+    b1/x/1.png. The server refuses to make a snapshot whose shorter paths collide (two sources with the same
+    path, or a pool with both images/a.png and a.png)."""
+    subs = list(subs)
+    split = []
+    for sub in subs:
+        parts = sub.split('/')
+        if len(parts) < 3 or not all(parts):
+            raise ContractError(f'训练集快照里有不认识的路径 {sub}')
+        split.append(parts)
+    out = {}
+    for sub, parts in zip(subs, split):
+        pool = parts[2:]
+        for i in range(len(pool) - 2, -1, -1):
+            if pool[i] == 'images':
+                pool = pool[:i] + pool[i + 1:]
+                break
+        out[sub] = '/'.join(pool)
+    return out
+
+
+def trainset_layout(entries: Iterable[Entry], fmt: str, short: bool = False) -> List[Entry]:
     """The files of a training-set snapshot as fw get lays them out in one format (docs/trainset-format.md):
 
     yolo  images/<split>/..., labels/<split>/...txt (ultralytics finds a label by images/ -> labels/; folders
@@ -316,21 +353,35 @@ def trainset_layout(entries: Iterable[Entry], fmt: str) -> List[Entry]:
     json  train|val|test/... images with the LiteAnno JSON next to each (open the folder in LiteAnno)
     all   the snapshot as it is stored
 
-    classes.txt and trainset.json are in every layout. Only paths change; contents are the frozen ones."""
+    "..." is <site>/<line>/<path in pool>; with short (snapshots whose rule has 'paths': 'short') it is the
+    shorter path from short_paths. classes.txt and trainset.json are in every layout. Only paths change;
+    contents are the frozen ones."""
     if fmt not in TRAINSET_FORMATS:
         raise ContractError(f'格式只能是 {"、".join(TRAINSET_FORMATS)}，不是 {fmt!r}')
+    entries = list(entries)
+    names: Dict[str, str] = {}
+    if short and fmt != 'all':
+        subs = set()
+        for path, _, _ in entries:
+            top, _, rest = path.partition('/')
+            split, _, sub = rest.partition('/')
+            if top in ('images', 'labels', 'json') and split in TRAINSET_SPLITS and sub:
+                subs.add(sub)
+        names = short_paths(sorted(subs))
     out = []
     for path, digest, size in entries:
         top, _, rest = path.partition('/')
         split, _, sub = rest.partition('/')
+        sub = names.get(sub, sub)
         if not rest or fmt == 'all':
             new = path
         elif top == 'images' and split in TRAINSET_SPLITS and sub:
-            new = {'yolo': f'images/{split}/{yolo_safe(sub)}', 'coco': f'{COCO_DIRS[split]}/{sub}', 'json': rest}[fmt]
+            new = {'yolo': f'images/{split}/{yolo_safe(sub)}', 'coco': f'{COCO_DIRS[split]}/{sub}',
+                   'json': f'{split}/{sub}'}[fmt]
         elif top == 'labels':
             new = f'labels/{split}/{yolo_safe(sub)}' if fmt == 'yolo' and sub else (path if fmt == 'yolo' else None)
         elif top == 'json':
-            new = rest if fmt == 'json' else None
+            new = f'{split}/{sub}' if fmt == 'json' else None
         elif top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS:
             new = f'{COCO_DIRS[rest[:-5]]}/{COCO_FILE}' if fmt == 'coco' else None
         else:
