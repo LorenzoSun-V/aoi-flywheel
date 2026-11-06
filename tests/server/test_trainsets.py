@@ -550,6 +550,17 @@ def test_a_yolo_pool_pairs_images_with_labels(api, cache, tmp_path):
     assert any('没有对应的图片' in p and 'b1/labels/a.txt' in p for p in preview['problems']), preview['problems']
 
 
+def test_one_label_is_never_given_to_two_images(api, tmp_path):
+    # review of #10: labels/a.txt is next to an image labels/a.png and where YOLO looks for images/a.png
+    files = {'b/images/a.png': png(uuid.uuid4().hex), 'b/labels/a.png': png(uuid.uuid4().hex),
+             'b/labels/a.txt': yolo_line(0).encode(), 'b/images/c.png': png(uuid.uuid4().hex),
+             'b/labels/c.txt': yolo_line(1).encode()}
+    src = pool(api, tmp_path, files)
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES})
+    shared = [p for p in preview['problems'] if '同时配到了两张图' in p]
+    assert len(shared) == 1 and 'b/labels/a.txt' in shared[0] and 'c.txt' not in shared[0], preview['problems']
+
+
 def test_label_source_picks_json_or_txt(api, cache, tmp_path):
     files = {'b1/images/a.png': png(uuid.uuid4().hex), 'b1/images/a.json': label('scratch'),
              'b1/labels/a.txt': yolo_line(1).encode(),
@@ -570,7 +581,13 @@ def test_label_source_picks_json_or_txt(api, cache, tmp_path):
     two = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.txt': yolo_line(0).encode(),
                                'b/labels/a.txt': yolo_line(1).encode()})
     preview = api.preview_trainset(name, {'sources': [f'{two}@1'], 'classes': CLASSES, 'label_source': 'txt'})
-    assert any('两个同类的标注' in p for p in preview['problems']), preview['problems']
+    assert any('两个同一种的标注' in p for p in preview['problems']), preview['problems']
+    # review of #10: picking json must not hide two txt labels of one image (one next to it, one in labels/)
+    three = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.json': label('scratch'),
+                                 'b/images/a.txt': yolo_line(0).encode(), 'b/labels/a.txt': yolo_line(1).encode()})
+    for source in ('json', 'txt'):
+        preview = api.preview_trainset(name, {'sources': [f'{three}@1'], 'classes': CLASSES, 'label_source': source})
+        assert any('两个同一种的标注' in p for p in preview['problems']), (source, preview['problems'])
     assert status_of(lambda: api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES,
                                                          'label_source': 'xml'})) == 400
 
@@ -656,6 +673,20 @@ def test_class_map_snapshot_continues_without_relabeling(api, tmp_path):
     boxes = {split: c['boxes'] for split, c in v['trainset']['counts'].items() if c['samples']}
     assert boxes == {'train': {'Dirty': 1, 'Scratch': 1, 'Crack': 0, 'Solder': 0},
                      'test': {'Dirty': 0, 'Scratch': 0, 'Crack': 0, 'Solder': 0}}
+
+
+def test_a_new_class_map_on_a_continued_snapshot_counts_as_relabeled(api, tmp_path):
+    # review of #10: the labels the snapshot freezes are compared, not the pool's files before the map
+    files = {'x.png': png(uuid.uuid4().hex), 'x.txt': yolo_line(0).encode(),
+             'y.png': png(uuid.uuid4().hex), 'y.json': label('A')}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    make(api, name, [f'{src}@1'], ['A', 'B'], val=0)
+    add_version(api, tmp_path, src, dict(files, **{'new.png': png(uuid.uuid4().hex)}))
+    body = {'sources': [f'{src}@2'], 'classes': ['A', 'B']}
+    assert api.preview_trainset(name, body)['changes']['relabeled'] == 0
+    changes = api.preview_trainset(name, dict(body, class_map={'A': 'B'}))['changes']
+    assert (changes['added'], changes['relabeled']) == (1, 2), changes
 
 
 def test_class_map_options_are_checked(api, tmp_path):

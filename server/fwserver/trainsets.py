@@ -211,7 +211,7 @@ def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[st
             elif ext in LABEL_EXTS:
                 labels[_stem(f[0])].append(f)
         candidates: Dict[str, List[File]] = {}
-        claimed = set()
+        claimed: Counter = Counter()  # label path -> how many images found it
         for stem in images:
             found = list(labels.get(stem, ()))
             yolo = _yolo_label_stem(images[stem][0][0])
@@ -220,6 +220,10 @@ def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[st
             candidates[stem] = found
             claimed.update(f[0] for f in found)
         orphans = sorted(f[0] for group in labels.values() for f in group if f[0] not in claimed)
+        shared = sorted(path for path, n in claimed.items() if n > 1)
+        if shared:  # e.g. labels/a.txt is next to an image labels/a.png and where YOLO looks for images/a.png
+            problems.append(f'{version["ref"]} 有 {len(shared)} 个标注同时配到了两张图（一张同目录同名、一张是 '
+                            f'images/ 下的），不知道是哪张的：{_examples(shared)}')
         if orphans:
             problems.append(f'{version["ref"]} 有 {len(orphans)} 个标注没有对应的图片（同目录同名，或 YOLO 的 '
                             f'images/ 对应 labels/）：{_examples(orphans)}')
@@ -229,23 +233,25 @@ def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[st
         mixed, double = [], []
         chosen: Dict[str, Optional[File]] = {}
         for stem, found in candidates.items():
-            kinds = {PurePosixPath(f[0]).suffix.lower().lstrip('.') for f in found}
+            if any(claimed[f[0]] > 1 for f in found):
+                continue
+            kinds = Counter(PurePosixPath(f[0]).suffix.lower().lstrip('.') for f in found)
+            if any(n > 1 for n in kinds.values()):  # before label_source: it never hides two of one kind
+                double.append(images[stem][0][0])
+                continue
             pick = found
             if len(kinds) > 1:
                 if label_source is None:
                     mixed.append(images[stem][0][0])
                     continue
                 pick = [f for f in found if f[0].lower().endswith('.' + label_source)]
-            if len(pick) > 1:
-                double.append(images[stem][0][0])
-                continue
             chosen[stem] = pick[0] if pick else None
         if mixed:
             problems.append(f'{version["ref"]} 有 {len(mixed)} 张图同时有 JSON 和 txt 标注，不知道用哪个；'
                             f'用 --label-source json 或 --label-source txt 选一种：{_examples(mixed)}')
         if double:
-            problems.append(f'{version["ref"]} 有 {len(double)} 张图有两个同类的标注（同目录一个、labels/ 下一个），'
-                            f'不知道用哪个：{_examples(double)}')
+            problems.append(f'{version["ref"]} 有 {len(double)} 张图有两个同一种的标注（例如同目录一个 txt、'
+                            f'labels/ 下又一个），不知道用哪个：{_examples(double)}')
         for stem, imgs in images.items():
             if len(imgs) > 1 or stem not in chosen:
                 continue
@@ -505,10 +511,11 @@ def _changes(samples: Dict[str, Sample], previous: Optional[Dict[str, Tuple[str,
     def relabeled_(k: str, s: Sample) -> bool:
         if s.label is None:
             return bool(previous[k][1])
-        mine = {s.label[1]}
-        if s.parsed is not None and s.parsed.data is not None:  # frozen without its BOM
-            mine.add(hashlib.sha256(s.parsed.data).hexdigest())
-        return not mine & previous[k][1]
+        if s.parsed is not None and s.parsed.data is not None:  # frozen without its BOM, or changed by a class map
+            mine = hashlib.sha256(s.parsed.data).hexdigest()
+        else:
+            mine = s.label[1]
+        return mine not in previous[k][1]  # the label as this snapshot freezes it is not the one frozen last time
 
     relabeled = sum(1 for k, s in samples.items() if k in previous and relabeled_(k, s))
     added = sum(1 for k in samples if k not in previous)

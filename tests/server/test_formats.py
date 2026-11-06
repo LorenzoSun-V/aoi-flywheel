@@ -3,6 +3,7 @@ import io
 import json
 import struct
 from collections import Counter
+from decimal import Decimal
 
 import pytest
 
@@ -95,8 +96,8 @@ def test_clip():
 def test_txt_labels():
     label = formats.parse_txt('0 0.5 0.5 0.2 0.4\n\n1  0.1\t0.1 0.1 0.1\n', CLASSES)
     assert label.names == ['scratch', 'dent'] and label.yolo_rows[1] == (1, 0.1, 0.1, 0.1, 0.1)
-    assert formats.yolo_bytes(label, CLASSES, None) == (b'0 0.500000 0.500000 0.200000 0.400000\n'
-                                                       b'1 0.100000 0.100000 0.100000 0.100000\n')
+    # a txt keeps its coordinates as written (one space between them, LF): rewriting one never moves a box
+    assert formats.yolo_bytes(label, CLASSES, None) == b'0 0.5 0.5 0.2 0.4\n1 0.1 0.1 0.1 0.1\n'
     assert formats.pixel_boxes(label, CLASSES, (200, 100))[0] == (0, 80.0, 30.0, 40.0, 40.0)
     for bad, message in (('2 0.5 0.5 0.1 0.1', '超出类别表'), ('a 0.5 0.5 0.1 0.1', '不是整数'),
                          ('0 0.5 0.5 0.1 0.1 0.3 0.3', '5 个数'), ('0 0.5 0.5 0.1 nan', '0 到 1'),
@@ -132,3 +133,18 @@ def test_remap_json_and_txt():
     assert not formats.remap_txt(same, {}, ['x', 'y'])  # nothing changed: the file is frozen as it is
     other = formats.parse_txt('0 0.5 0.5 0.1 0.1\n', ['y', 'x'])  # its own table: renumbered
     assert formats.remap_txt(other, {}, ['x', 'y']) and other.yolo_rows[0][0] == 1
+
+
+def test_remapping_keeps_numbers_and_coordinates_as_written():
+    # review of #10: rewriting must not move a box or change any number in the file
+    text = ('{"calibration": 0.1234567890123456789, "big": 12345678901234567890123, "e": 1E400, "shapes": '
+            '[{"label": "A", "points": [[1e1, 20.000000000000000001], [50.5, 60]], "shape_type": "rectangle"}]}')
+    new, _ = formats.remap_json(text, {'A': 'B'})
+    doc = json.loads(new, parse_float=Decimal)
+    assert doc['calibration'] == Decimal('0.1234567890123456789') and doc['big'] == 12345678901234567890123
+    assert '1E400' in new and '[\n          1e1,\n          20.000000000000000001\n        ]' in new
+    assert doc['shapes'][0]['label'] == 'B' and formats.remap_json(new, {'B': 'A'})[0] is not None
+    label = formats.parse_txt('1 0.5 0.5 0.0000004 0.2\n', ['B', 'A'])
+    assert formats.remap_txt(label, {}, ['A', 'B'])
+    assert formats.yolo_bytes(label, ['A', 'B'], None) == b'0 0.5 0.5 0.0000004 0.2\n'
+    assert formats.pixel_boxes(label, ["A", "B"], (200, 100))[0][3] > 0  # COCO keeps the same width
