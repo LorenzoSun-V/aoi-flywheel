@@ -351,12 +351,15 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     entries = parse_manifest(api.read_object(version['manifest_sha256']))
     if version.get('kind') == 'trainset':
         fmt = fmt or 'yolo'
+        short = False
         if fmt != 'all':
-            held = api.trainset(name, version['number'])['trainset']['formats']
+            ts = api.trainset(name, version['number'])['trainset']
+            held = ts['formats']
             if fmt not in held:
                 raise FwError(f'{version["ref"]} 里没有 {fmt} 格式（有 {"、".join(held)}）；'
                               f'为什么没有，见建快照时的提示或 trainset.json 的 missing_formats')
-        entries = trainset_layout(entries, fmt)
+            short = (ts.get('rule') or {}).get('paths') == 'short'
+        entries = trainset_layout(entries, fmt, short)
     elif fmt not in (None, 'all'):
         raise FwError(f'{version["ref"]} 不是训练集快照，--format 只用于训练集快照')
     if subpath:

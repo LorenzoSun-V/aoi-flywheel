@@ -73,7 +73,7 @@ def make(api, name, sources, classes=CLASSES, **kw):
 
 
 def splits_of(tree: dict) -> dict:
-    """{key: split} of every image in a snapshot fetched as yolo (the default)."""
+    """{key: split} of every image in a snapshot fetched as it is stored (fetch's default, --format all)."""
     out = {}
     for path in tree:
         if path.startswith('images/'):
@@ -82,7 +82,8 @@ def splits_of(tree: dict) -> dict:
     return out
 
 
-def fetch(api, cache, ref, dest, fmt=None) -> dict:
+def fetch(api, cache, ref, dest, fmt='all') -> dict:
+    """The snapshot as stored (paths keep <site>/<line>/<path in pool>); fmt=None is fw get's default, yolo."""
     ops.get(api, cache, ref, dest, echo=quiet, fmt=fmt)
     return read_tree(dest)
 
@@ -156,17 +157,18 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     assert counts['train']['negatives'] + counts['val']['negatives'] == 3
     assert sum(counts[s]['boxes']['dent'] for s in ('train', 'val')) == 21
 
-    tree = fetch(api, cache, v['ref'], tmp_path / 'yolo')  # yolo is the default
+    tree = fetch(api, cache, v['ref'], tmp_path / 'yolo', fmt=None)  # yolo is the default
     assert tree['classes.txt'] == b'scratch\ndent\n'
     info = json.loads(tree['trainset.json'])
     assert info['format'] == trainsets.FORMAT and info['counts'] == counts and info['classes'] == CLASSES
     assert info['task'] == 'det' and info['formats'] == ['yolo', 'coco', 'json'] and info['missing_formats'] == {}
     assert info['sources'][0]['ref'] == f'{src}@1'
-    assert info['rule'] == {'mode': 'fresh', 'val': 0.25, 'seed': 0, 'test_dirs': ['2026-10'], 'merge_test': False}
+    assert info['rule'] == {'mode': 'fresh', 'val': 0.25, 'seed': 0, 'test_dirs': ['2026-10'], 'merge_test': False,
+                            'paths': 'short'}
     splits = splits_of(tree)
-    assert len(splits) == 29 and all(s == 'test' for k, s in splits.items() if k.startswith('SES/TX/2026-10/'))
+    assert len(splits) == 29 and all(s == 'test' for k, s in splits.items() if k.startswith('2026-10/'))
     for path, data in files.items():
-        key = f'SES/TX/{path}'
+        key = path  # fw get drops <site>/<line>/ (short paths)
         stem = key.rsplit('.', 1)[0]
         if path.endswith(('.png', '.bmp')):
             assert tree[f'images/{splits[key]}/{key}'] == data
@@ -177,7 +179,7 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
                 yolo_line(CLASSES.index(n['label'])) for n in names)
         else:
             assert tree[f'labels/{splits[stem + ".bmp"]}/{stem}.txt'] == data  # YOLO from the pool: as it is
-    assert not any(p.startswith(f'labels/{s}/SES/TX/2026-09/neg') for p in tree for s in ('train', 'val'))
+    assert not any(p.startswith(f'labels/{s}/2026-09/neg') for p in tree for s in ('train', 'val'))
     yaml = tree['data.yaml'].decode()
     assert f'path: "{(tmp_path / "yolo").resolve().as_posix()}"' in yaml
     assert 'train: images/train\nval: images/val\ntest: images/test\n' in yaml and '  1: "dent"' in yaml
@@ -190,18 +192,18 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     assert test['categories'] == [{'id': 0, 'name': 'scratch', 'supercategory': 'none'},
                                   {'id': 1, 'name': 'dent', 'supercategory': 'none'}]
     assert len(test['images']) == 5 and all(coco['test/' + i['file_name']] for i in test['images'])
-    assert test['images'][0] == {'id': 1, 'file_name': 'SES/TX/2026-10/img000.png', 'width': W, 'height': H}
+    assert test['images'][0] == {'id': 1, 'file_name': '2026-10/img000.png', 'width': W, 'height': H}
     assert test['annotations'][0] == {'id': 1, 'image_id': 1, 'category_id': 0, 'bbox': [10, 20, 40, 40],
                                       'area': 1600, 'iscrowd': 0, 'segmentation': []}
     trainval = [json.loads(coco[f'{d}/_annotations.coco.json']) for d in ('train', 'valid')]
     assert sum(len(d['images']) for d in trainval) == 24 and sum(len(d['annotations']) for d in trainval) == 42
-    extra = [(d, i) for d in trainval for i in d['images'] if i['file_name'] == 'SES/TX/2026-09/extra.bmp'][0]
+    extra = [(d, i) for d in trainval for i in d['images'] if i['file_name'] == '2026-09/extra.bmp'][0]
     assert extra[1]['width'] == W and extra[1]['height'] == H  # size from the BMP header
     boxes = [a['bbox'] for a in extra[0]['annotations'] if a['image_id'] == extra[1]['id']]
     assert boxes == [[90.0, 45.0, 20.0, 10.0], [30.0, 15.0, 20.0, 10.0]]
 
     js = fetch(api, cache, v['ref'], tmp_path / 'json', fmt='json')
-    made = json.loads(js[f'{splits["SES/TX/2026-09/extra.bmp"]}/SES/TX/2026-09/extra.json'])
+    made = json.loads(js[f'{splits["2026-09/extra.bmp"]}/2026-09/extra.json'])
     assert made['imagePath'] == 'extra.bmp' and (made['imageWidth'], made['imageHeight']) == (W, H)
     assert [(sh['label'], sh['shape_type'], sh['points'][0], sh['points'][2]) for sh in made['shapes']] == [
         ('scratch', 'rectangle', [90.0, 45.0], [110.0, 55.0]), ('dent', 'rectangle', [30.0, 15.0], [50.0, 25.0])]
@@ -228,8 +230,8 @@ def test_json_layout_opens_in_liteanno(api, cache, tmp_path):
     assert v['trainset']['formats'] == ['yolo', 'coco', 'json']
     tree = fetch(api, cache, v['ref'], tmp_path / 'json', fmt='json')
     assert tree == {'classes.txt': b'scratch\ndent\n', 'trainset.json': tree['trainset.json'],
-                    **{f'train/SES/TX/{p}': d for p, d in files.items()}}
-    ops.get(api, cache, v['ref'], tmp_path / 'sub', fmt='json', subpath='train/SES/TX/a', echo=quiet)
+                    **{f'train/{p}': d for p, d in files.items()}}
+    ops.get(api, cache, v['ref'], tmp_path / 'sub', fmt='json', subpath='train/a', echo=quiet)
     assert read_tree(tmp_path / 'sub') == {k: d for k, d in tree.items() if k.startswith('train/')}
 
 
@@ -345,7 +347,7 @@ def test_split_file(api, cache, tmp_path):
         make(api, name, [f'{src}@1'], split=split, merge_test=True)
     v = make(api, name, [f'{src}@1'], split=split)
     assert splits_of(fetch(api, cache, v['ref'], tmp_path / 'g')) == split
-    assert v['trainset']['rule'] == {'mode': 'split-file', 'split_count': 4}
+    assert v['trainset']['rule'] == {'mode': 'split-file', 'split_count': 4, 'paths': 'short'}
     lines = []
     v2 = ops.create_trainset(api, name, [f'{src}@1'], CLASSES, split=dict(split, **{keys[3]: 'val'}),
                              echo=lines.append)
@@ -394,7 +396,10 @@ def test_bad_sources_and_names(api, tmp_path):
     same = pool(api, tmp_path, {'a.png': b'2'})  # also SES/TX: the same key twice
     with pytest.raises(ops.FwError, match='两个来源都有 SES/TX/a.png'):
         make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{ok}@1', f'{same}@1'])
-    other = pool(api, tmp_path, {'a.png': b'3'}, site='SES', line='TY')
+    other = pool(api, tmp_path, {'a.png': b'3'}, site='SES', line='TY')  # fw get drops SES/TX/ and SES/TY/
+    with pytest.raises(ops.FwError, match='去掉现场/产线.*images/train/a.png'):
+        make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{ok}@1', f'{other}@1'], val=0)
+    other = pool(api, tmp_path, {'b.png': b'3'}, site='SES', line='TY')
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{ok}@1', f'{other}@1'], val=0)
     assert v['trainset']['counts']['train']['samples'] == 2
     assert status_of(lambda: make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{ok}@1'], classes=[])) == 422
@@ -517,14 +522,14 @@ def test_images_folders_inside_the_pool_path(api, cache, tmp_path):
     src = pool(api, tmp_path, files, line='images')
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
     dest = tmp_path / 'g'
-    tree = fetch(api, cache, v['ref'], dest)
+    tree = fetch(api, cache, v['ref'], dest, fmt=None)
     images = sorted(p for p in tree if p.startswith('images/'))
-    assert images == ['images/train/SES/images_/batch/images_/one.png', 'images/train/SES/images_/images__/two.png']
+    assert images == ['images/train/batch/one.png', 'images/train/images__/two.png']  # the last images/ goes
     for image in images:  # where ultralytics (and aoi-deteval) look for the label is where it is
         assert ultralytics_label('/data/' + image)[len('/data/'):] in tree
-    assert tree['labels/train/SES/images_/batch/images_/one.txt'].startswith(b'0 ')
+    assert tree['labels/train/batch/one.txt'].startswith(b'0 ')
     json_tree = fetch(api, cache, v['ref'], tmp_path / 'j', fmt='json')  # only the YOLO layout renames
-    assert 'train/SES/images/batch/images/one.json' in json_tree
+    assert 'train/batch/one.json' in json_tree and 'train/images_/two.json' in json_tree
 
 
 def test_a_yolo_pool_pairs_images_with_labels(api, cache, tmp_path):
@@ -537,10 +542,10 @@ def test_a_yolo_pool_pairs_images_with_labels(api, cache, tmp_path):
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
     train = v['trainset']['counts']['train']
     assert (train['samples'], train['negatives']) == (4, 1)
-    tree = fetch(api, cache, v['ref'], tmp_path / 'g')
-    assert tree['labels/train/SES/TX/b1/images_/a.txt'] == yolo_line(1).encode()
-    assert tree['labels/train/SES/TX/b1/images_/sub/c.txt'] == yolo_line(0).encode()
-    assert tree['labels/train/SES/TX/images_/top.txt'] == yolo_line(0).encode()
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt=None)
+    assert tree['labels/train/b1/a.txt'] == yolo_line(1).encode()  # tx_v8/images/1.bmp -> images/train/1.bmp
+    assert tree['labels/train/b1/sub/c.txt'] == yolo_line(0).encode()
+    assert tree['labels/train/top.txt'] == yolo_line(0).encode() and tree['images/train/top.png']
     assert not any(p.endswith('neg.txt') for p in tree)
     for image in (p for p in tree if p.startswith('images/') and not p.endswith('neg.png')):
         assert ultralytics_label('/data/' + image)[len('/data/'):] in tree
@@ -548,6 +553,69 @@ def test_a_yolo_pool_pairs_images_with_labels(api, cache, tmp_path):
     src = pool(api, tmp_path, {'b1/pics/a.png': png(uuid.uuid4().hex), 'b1/labels/a.txt': yolo_line(0).encode()})
     preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES})
     assert any('没有对应的图片' in p and 'b1/labels/a.txt' in p for p in preview['problems']), preview['problems']
+
+
+def test_short_paths_that_collide_are_refused(api, tmp_path):
+    # fw get drops <site>/<line>/ and the pool's images/ folder: two pools with images/1.png, or one pool with
+    # both images/2.png and 2.png, would land on the same path
+    tx = pool(api, tmp_path, {'images/1.png': png(uuid.uuid4().hex), 'labels/1.txt': yolo_line(0).encode()})
+    rx = pool(api, tmp_path, {'images/1.png': png(uuid.uuid4().hex), 'labels/1.txt': yolo_line(1).encode()},
+              line='RX')
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{tx}@1', f'{rx}@1'],
+                                                                  'classes': CLASSES, 'val': 0})
+    assert any('去掉现场/产线' in p and 'images/train/1.png' in p for p in preview['problems']), preview['problems']
+    one = pool(api, tmp_path, {'images/2.png': png(uuid.uuid4().hex), '2.png': png(uuid.uuid4().hex)})
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{one}@1'], 'classes': CLASSES})
+    assert any('去掉现场/产线' in p for p in preview['problems']), preview['problems']
+    other = pool(api, tmp_path, {'images/3.png': png(uuid.uuid4().hex)}, line='RX')
+    ok = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{tx}@1', f'{other}@1'],
+                                                             'classes': CLASSES})
+    assert ok['problems'] == []
+
+
+def test_short_paths_never_share_a_label(api, tmp_path):
+    # review of #11: images/1.jpg with labels/1.txt and an unlabeled 1.png would both read labels/train/1.txt
+    src = pool(api, tmp_path, {'images/1.jpg': png(uuid.uuid4().hex), 'labels/1.txt': yolo_line(0).encode(),
+                               '1.png': png(uuid.uuid4().hex)})
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES,
+                                                                  'val': 0})
+    assert any('共用一份标注' in p and 'images/train/1.jpg' in p and 'images/train/1.png' in p
+               for p in preview['problems']), preview['problems']
+    # 2nd review: only the case differs (one file on Windows), and many such pairs are grouped in one pass
+    files = {'images/A.jpg': png(uuid.uuid4().hex), 'labels/A.txt': yolo_line(0).encode(),
+             'a.png': png(uuid.uuid4().hex)}
+    src = pool(api, tmp_path, files)
+    preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES,
+                                                                  'val': 0})
+    assert any('共用一份标注' in p and 'images/train/A.jpg' in p and 'images/train/a.png' in p
+               for p in preview['problems']), preview['problems']
+
+
+def test_shared_label_check_is_one_pass(monkeypatch):
+    # 2nd review of #11: every shared stem rescanned the whole list (500 pairs: 1,000,000 _stem calls)
+    calls = []
+    real = trainsets._stem
+    monkeypatch.setattr(trainsets, '_stem', lambda p: calls.append(p) or real(p))
+    entries = []
+    for i in range(500):
+        entries += [(f'images/train/SES/TX/images/{i}.jpg', 'a', 1), (f'images/train/SES/TX/{i}.png', 'b', 1)]
+    problems = trainsets._shared_labels(entries)
+    assert len(problems) == 2 * 500  # every pair, in the yolo and the json layout
+    assert len(calls) == 2 * len(entries)
+
+
+def test_an_old_layout_snapshot_can_be_made_again_with_short_paths(api, tmp_path, monkeypatch):
+    # review of #11: no COCO (size unreadable), so only the layout differs from the snapshot made before 0.2.3
+    src = pool(api, tmp_path, {'a.png': b'no header'})
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    monkeypatch.setattr(trainsets, 'PATHS', None)
+    old = make(api, name, [f'{src}@1'])
+    assert 'paths' not in old['trainset']['rule'] and 'coco' not in old['trainset']['formats']
+    monkeypatch.setattr(trainsets, 'PATHS', 'short')
+    new = make(api, name, [f'{src}@1'])
+    assert new['number'] == 2 and new['trainset']['rule']['paths'] == 'short'
+    preview = api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES})
+    assert any('完全一样' in p for p in preview['problems'])  # the same layout again is unchanged
 
 
 def test_one_label_is_never_given_to_two_images(api, tmp_path):
@@ -573,9 +641,9 @@ def test_label_source_picks_json_or_txt(api, cache, tmp_path):
     for source, first in (('json', b'0 '), ('txt', b'1 ')):  # a.json says scratch (0), a.txt says dent (1)
         v = make(api, f'{name}-{source}', [f'{src}@1'], val=0, label_source=source)
         tree = fetch(api, cache, v['ref'], tmp_path / source)
-        assert tree['labels/train/SES/TX/b1/images_/a.txt'].startswith(first)
-        assert tree['labels/train/SES/TX/b1/images_/only_json.txt'].startswith(b'1 ')  # each still has its own
-        assert tree['labels/train/SES/TX/b1/images_/only_txt.txt'].startswith(b'0 ')
+        assert tree['labels/train/SES/TX/b1/images/a.txt'].startswith(first)
+        assert tree['labels/train/SES/TX/b1/images/only_json.txt'].startswith(b'1 ')  # each still has its own
+        assert tree['labels/train/SES/TX/b1/images/only_txt.txt'].startswith(b'0 ')
         assert json.loads(tree['trainset.json'])['rule']['label_source'] == source
         assert api.trainset(*v['ref'].split('@'))['trainset']['rule']['label_source'] == source
     two = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.txt': yolo_line(0).encode(),
@@ -739,7 +807,7 @@ def test_a_class_map_on_a_json_with_a_lone_surrogate(api, cache, tmp_path):
     src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': raw})
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], ['B'], val=0, class_map={'A': 'B'})
     tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt='json')
-    shape = json.loads(tree['train/SES/TX/a.json'])['shapes'][0]
+    shape = json.loads(tree['train/a.json'])['shapes'][0]
     assert (shape['label'], shape['description']) == ('B', '\udc80')
 
 
@@ -936,4 +1004,4 @@ def test_command_line_and_get_trainset(service, tokens, api, tmp_path, monkeypat
     assert ts['data_yaml'] == str(tmp_path / 'train' / 'data.yaml')
     assert ts['formats'] == ['yolo', 'coco', 'json']
     js = fw.get_trainset(name, tmp_path / 'json', fmt='json')
-    assert 'data_yaml' not in js and (tmp_path / 'json' / 'test' / 'SES' / 'TX' / '2026-10' / 'img000.json').is_file()
+    assert 'data_yaml' not in js and (tmp_path / 'json' / 'test' / '2026-10' / 'img000.json').is_file()

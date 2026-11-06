@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Tuple
 
-from .contract import IMAGE_EXTS, LABEL_EXTS, META_NAMES, collisions, path_problem
+from .contract import IMAGE_EXTS, LABEL_EXTS, META_NAMES, collisions, path_problem, yolo_label_stem
 JUNK_NAMES = {'thumbs.db', 'desktop.ini', '.ds_store'}
 _NAME_SURROGATE = 0x20000000  # Windows reparse tags with this bit lead somewhere else: symlinks, junctions
 
@@ -111,6 +111,7 @@ def scan_folder(folder) -> FolderReport:
     _walk(root, report)
     image_stems: Dict[str, List[str]] = defaultdict(list)
     label_stems = set()
+    txt_stems = set()
     for rel, _ in report.files:
         problem = path_problem(rel)
         if problem:
@@ -125,12 +126,19 @@ def scan_folder(folder) -> FolderReport:
         elif ext in LABEL_EXTS:
             report.labels.append(rel)
             label_stems.add(_stem(rel))
+            if ext == '.txt':
+                txt_stems.add(_stem(rel))
         else:
             report.others.append(rel)
     report.collisions = collisions(rel for rel, _ in report.files)
     report.same_stem_images = [v for v in image_stems.values() if len(v) > 1]
-    report.unlabeled_images = sorted(s for s in image_stems if s not in label_stems)
-    report.orphan_labels = sorted(s for s in label_stems if s not in image_stems)
+    # a label pairs like on the server (trainsets._samples): the same stem in the image's folder, or the .txt
+    # where YOLO looks for it (images/ -> labels/)
+    yolo = {s: yolo_label_stem(s + '.x') for s in image_stems}
+    report.unlabeled_images = sorted(s for s in image_stems if s not in label_stems and yolo[s] not in txt_stems)
+    yolo_found = {y for y in yolo.values() if y in txt_stems}  # only the .txt there is YOLO's
+    report.orphan_labels = sorted({_stem(rel) for rel in report.labels if _stem(rel) not in image_stems and not (
+        _stem(rel) in yolo_found and rel.lower().endswith('.txt'))})
     by_name: Dict[str, List[str]] = defaultdict(list)
     for rel in report.images:
         by_name[PurePosixPath(_stem(rel)).name.lower()].append(rel)

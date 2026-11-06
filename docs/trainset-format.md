@@ -17,7 +17,7 @@ json/<划分>/<现场>/<产线>/<原文件名>.json       数据池里的 LiteAn
 coco/<划分>.json                              这个划分的 COCO 检测标注
 ```
 
-- `<划分>` 是 `train`、`val`、`test`；`<原路径>` 是这张图在来源数据池版本里的路径，原样保留。按 `<现场>/<产线>/` 分目录，几条产线合成一个快照时，同名文件不会互相覆盖。
+- `<划分>` 是 `train`、`val`、`test`；`<原路径>` 是这张图在来源数据池版本里的路径，原样保留。快照里存的（也就是 `--format all` 取回的）按 `<现场>/<产线>/` 分目录；`fw get` 按格式摆出来时去掉这两层，见下文。
 - 三种标注都是**建快照时在服务器上一次转好、和图片一起冻结的**。以后改了转换代码，已有快照的文件也不会变；训练用的就是冻结的那一份。
 - 同一张图在文件库里只存一份，快照不多占图片的空间；多出来的只有转换出来的标注文件。
 
@@ -25,9 +25,11 @@ coco/<划分>.json                              这个划分的 COCO 检测标�
 
 `fw get <快照> --to <目录> --format <格式>`，默认 `yolo`。只改路径，内容就是冻结的文件，每个都按清单核对过。三种格式都带 `classes.txt` 和 `trainset.json`。
 
+**取回的路径比存的短**（0.2.3 起建的快照，`rule` 里有 `"paths": "short"`）：`<原路径>` 前的 `<现场>/<产线>/` 去掉，原路径里**最后一个**叫 `images` 的目录也去掉（数据池按 YOLO 放的 `images/` 层，它的 `labels/` 建快照时已经配好了）。例如数据池 `tx_v8` 的 `images/1.bmp` 取回成 `images/train/1.bmp`、`labels/train/1.txt`，`b1/images/x/2.png` 取回成 `images/train/b1/x/2.png`。去掉后有两张图路径相同（几个来源里有同路径的图，或者一个池里同时有 `images/a.png` 和 `a.png`），或者只差扩展名（`images/1.bmp` 和 `1.png` 会找同一个 `labels/train/1.txt`）时不建快照，预览列出这些路径。0.2.3 以前建的快照取回时仍是 `<现场>/<产线>/<原路径>`。
+
 | 格式 | 摆出来的目录 | 给谁用 |
 |---|---|---|
-| `yolo`（默认） | `images/<划分>/…`、`labels/<划分>/….txt`，另生成 `data.yaml` | ultralytics：`yolo train data=<目录>/data.yaml`。它把图片路径里**最后一个** `images/` 换成 `labels/` 找标注（aoi-deteval 也一样），所以原路径里叫 `images` 的目录在这个格式里改名成 `images_`（原来就叫 `images_`、`images__` 的再多加一个 `_`），例如 `images/val/SES/TX/batch/images_/1.png` 和 `labels/val/SES/TX/batch/images_/1.txt`；别的格式不改名 |
+| `yolo`（默认） | `images/<划分>/…`、`labels/<划分>/….txt`，另生成 `data.yaml` | ultralytics：`yolo train data=<目录>/data.yaml`。它把图片路径里**最后一个** `images/` 换成 `labels/` 找标注（aoi-deteval 也一样），所以原路径里叫 `images` 的目录在这个格式里改名成 `images_`（原来就叫 `images_`、`images__` 的再多加一个 `_`），例如原路径 `a/images/batch/images/1.png` 取回成 `images/val/a/images_/batch/1.png` 和 `labels/val/a/images_/batch/1.txt`；别的格式不改名 |
 | `coco` | `train/`、`valid/`、`test/` 下放图片，每个目录里一个 `_annotations.coco.json` | RF-DETR 等读 Roboflow 式 COCO 目录的训练代码；别的 COCO 代码分别指图片目录和标注文件即可 |
 | `json` | `train/`、`val/`、`test/` 下图片和同名 `.json` 放在一起 | 用 LiteAnno 或 X-AnyLabeling 打开看图、核对标注 |
 | `all` | 和快照里存的一样 | `fw export` 导出时用的就是这个 |
@@ -82,7 +84,7 @@ LiteAnno / X-AnyLabeling JSON：
 
 **COCO**（`coco/<划分>.json`）：
 
-- `images` 按样本标识排序，`id` 从 1 起，`file_name` 是相对这个划分图片目录的路径（`<现场>/<产线>/<原路径>`），`width`、`height` 是图片尺寸；负样本也在里面，只是没有标注。
+- `images` 按样本标识排序，`id` 从 1 起，`file_name` 是相对这个划分图片目录的路径，也就是 `fw get --format coco` 取回的路径（0.2.3 起是上文的短路径，以前是 `<现场>/<产线>/<原路径>`），`width`、`height` 是图片尺寸；负样本也在里面，只是没有标注。
 - `annotations` 的 `bbox` 是像素坐标 `[x, y, 宽, 高]`，`area` 是宽乘高，`iscrowd` 是 0，`segmentation` 是空列表。
 - `categories` 的 `id` **就是 classes.txt 的行号，从 0 起**，和 YOLO 的类别编号一致，没有为背景留 0 号。
 - 要知道每张图的尺寸：没有 JSON 标注的图（负样本、YOLO txt 标注的）读文件头。有图读不出尺寸时不生成 COCO，其余照常。
@@ -95,7 +97,7 @@ LiteAnno / X-AnyLabeling JSON：
 
 ## 样本的标识
 
-每个样本的标识是 `<现场>/<产线>/<原路径>`（图片的路径），例如 `SES/TX/2026-09/0001.png`。同一张图在不同快照里标识不变，接着上一版划分、划分清单、换了划分的统计都按它对；COCO 的 `file_name` 也就是它。
+每个样本的标识是 `<现场>/<产线>/<原路径>`（图片的路径），例如 `SES/TX/2026-09/0001.png`。同一张图在不同快照里标识不变，接着上一版划分、划分清单、换了划分的统计都按它对。标识就是 `--format all` 取回的 `images/<划分>/` 下的路径；`fw get` 按格式摆出来的路径更短，不是标识。
 
 ## classes.txt
 

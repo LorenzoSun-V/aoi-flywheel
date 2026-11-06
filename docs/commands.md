@@ -190,7 +190,7 @@ fw get SES-TX@3 --to D:\fw\v3
 **取训练集快照**：默认摆成 YOLO 的目录，另生成 `data.yaml`，可以直接 `yolo train data=<目录>/data.yaml`。
 
 ```
-fw get SES-TX-det@2 --to D:\train\det2                   # YOLO：images/ labels/ data.yaml
+fw get SES-TX-det@2 --to D:\train\det2                   # YOLO：images/train/1.bmp、labels/train/1.txt、data.yaml
 fw get SES-TX-det@2 --to D:\train\det2-coco --format coco  # COCO：train/ valid/ test/ 各有 _annotations.coco.json
 fw get SES-TX-det@2 --to D:\look\det2 --format json       # 图片和 LiteAnno JSON 放在一起，用 LiteAnno 打开看
 ```
@@ -364,7 +364,7 @@ fw eval show 12
 - 同样的模型版本、测试集和文件再登记一次，返回已有的那份报告。
 - 模型版本只写名称时，先定下是哪个版本（例如 `SES-TX-detr@3`）再登记；网络断了重试，也还是登记在这个版本上。
 - 用 `--deteval` 时，先把整个输出目录复制一份，指标从这份复制里读，归档的也是这份：登记途中评估程序再改、删、加文件都不影响这次登记。
-- 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按现场、产线、原路径分了几层，要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
+- 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按原路径可能分了几层（0.2.3 起取回时已去掉现场、产线两层），要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
 
 ### fw release register、list、current、show
 

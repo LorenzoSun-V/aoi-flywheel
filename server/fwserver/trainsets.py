@@ -39,8 +39,8 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
-from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, manifest_bytes,
-                         path_problem, trainset_layout)
+from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, fold, manifest_bytes,
+                         path_problem, short_paths, trainset_layout, yolo_label_stem)
 
 from . import datasets, formats
 from .datasets import DatasetError
@@ -48,6 +48,7 @@ from .formats import Label, Size
 from .store import Store
 
 FORMAT = 'fw-trainset 1'
+PATHS = 'short'  # how fw get lays out new snapshots (rule 'paths'); None was the layout before 0.2.3
 SPLITS = ('train', 'val', 'test')
 NEW_TO = ('test', 'trainval')
 MAX_CLASSES = 1000
@@ -181,16 +182,6 @@ def _files(conn, version_id: int) -> List[File]:
         (version_id,))]
 
 
-def _yolo_label_stem(image_path: str) -> Optional[str]:
-    """Where ultralytics (and aoi-deteval) look for an image's label: its path with the LAST folder named images
-    turned into labels, e.g. b1/images/x/a.png -> b1/labels/x/a (then .txt). None without such a folder."""
-    parts = image_path.split('/')
-    for i in range(len(parts) - 2, -1, -1):
-        if parts[i] == 'images':
-            return _stem('/'.join(parts[:i] + ['labels'] + parts[i + 1:]))
-    return None
-
-
 LABEL_SOURCES = ('json', 'txt')
 
 
@@ -217,7 +208,7 @@ def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[st
         claimed: Counter = Counter()  # label path -> how many images found it
         for stem in images:
             found = list(labels.get(stem, ()))
-            yolo = _yolo_label_stem(images[stem][0][0])
+            yolo = yolo_label_stem(images[stem][0][0])
             if yolo is not None:
                 found += [f for f in labels.get(yolo, ()) if f[0].lower().endswith('.txt')]
             candidates[stem] = found
@@ -570,6 +561,7 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
 
     entries: List[File] = [made('classes.txt', classes_data), made('trainset.json', info_data)]
     coco = defaultdict(list)
+    short = short_paths(samples)  # COCO names images by where fw get puts them
     for s in sorted(samples.values(), key=lambda s: s.key):
         rest = f'{s.split}/{s.site}/{s.line}/'
         stem = _stem(s.image[0])
@@ -581,14 +573,34 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
             entries.append(made(path, data) if data is not None else (path, file[1], file[2]))
         if available['coco'] is None:
             boxes = formats.pixel_boxes(s.parsed, classes, s.size) if s.parsed is not None else []
-            coco[s.split].append((s.key, s.size, boxes))
+            coco[s.split].append((short[s.key], s.size, boxes))
     for split in SPLITS:
         if coco.get(split):
             entries.append(made(f'coco/{split}.json', formats.coco_bytes(coco[split], classes)))
     problems = [f'{p}：{why}' for p, why in ((e[0], path_problem(e[0])) for e in entries) if why]
     for fmt in TRAINSET_FORMATS:  # every layout fw get can make must work on Windows too
         problems += collisions(e[0] for e in trainset_layout(entries, fmt))
+        short_layout = [e[0] for e in trainset_layout(entries, fmt, short=True)]
+        twins = sorted(p for p, n in Counter(short_layout).items() if n > 1)
+        problems += [f'取回时路径去掉现场/产线和 images 这层目录后重名（{fmt} 格式）：{p}'
+                     for p in twins + collisions(short_layout)]
+    problems += _shared_labels(entries)
     return entries, blobs, sorted(set(problems))
+
+
+def _shared_labels(entries: List[File]) -> List[str]:
+    """An image finds its label by its stem (YOLO: labels/<same path>.txt, LiteAnno: the .json next to it), so two
+    images whose short paths differ only in the extension, or only in case (one file on Windows, see fold), would
+    share one label even when one of them has none. One pass, grouped by the folded stem."""
+    problems = []
+    images = [e for e in entries if e[0].startswith('images/')]
+    for fmt in ('yolo', 'json'):
+        by_label = defaultdict(list)
+        for path, _, _ in trainset_layout(images, fmt, short=True):
+            by_label[fold(_stem(path))].append(path)
+        problems += [f'取回时路径去掉现场/产线和 images 这层目录后，同名不同扩展名的图片会共用一份标注（{fmt} 格式）：'
+                     f'{"、".join(group)}' for group in by_label.values() if len(group) > 1]
+    return problems
 
 
 @dataclass
@@ -633,6 +645,8 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     prev_splits = _previous_splits(conn, previous) if previous is not None else None
     rule, more = _assign(samples, o, prev_splits)
     problems += more
+    if PATHS:
+        rule['paths'] = PATHS  # fw get lays it out with fw.contract.short_paths (older snapshots: full paths)
     if o.label_source is not None:  # how the labels were read: kept with the split rule, for people
         rule['label_source'] = o.label_source
     if o.label_classes is not None:
@@ -666,7 +680,8 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
             'formats': summary['formats'], 'missing_formats': summary['missing_formats']}
     classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
     p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
-    if latest is not None and not p.problems and _same_content(conn, latest, p.entries):
+    if latest is not None and not p.problems and _same_content(conn, latest, p.entries) and \
+            (_previous_rule(conn, latest) or {}).get('paths') == rule.get('paths'):  # a new layout is a change
         p.problems.append(f'和 {latest["ref"]} 完全一样（样本、划分、标注和类别表都没变），不用建新快照')
     return p
 
@@ -674,6 +689,11 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
 def _previous_classes(conn, previous: dict) -> Optional[list]:
     row = conn.execute('SELECT classes FROM trainset_versions WHERE version_id = %s', (previous['id'],)).fetchone()
     return row['classes'] if row else None
+
+
+def _previous_rule(conn, previous: dict) -> Optional[dict]:
+    row = conn.execute('SELECT rule FROM trainset_versions WHERE version_id = %s', (previous['id'],)).fetchone()
+    return row['rule'] if row else None
 
 
 def _same_content(conn, latest: dict, entries: List[File]) -> bool:
