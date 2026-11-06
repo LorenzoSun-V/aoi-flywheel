@@ -134,7 +134,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 产线现在用的模型是部署时间最晚的发布，补登旧的不顶掉新的 | `models.current_release` | `test_releases_and_the_current_model` |
 | 部署账号只能取模型版本的文件，取不了数据；现场实施什么都碰不到 | `app.may_download`、`models.model_objects_only` | `test_roles` |
 | 仓库地址里的账号和令牌不会被记下 | `ops.strip_credentials`，数据库 CHECK 拒绝 `https://…@` | `test_code_commit_from_git`、`test_register_and_get_a_model_version` |
-| 训练代码可以不记，但记了仓库或「有没提交的改动」就一定有提交号；`weights/` 下只有一个文件 | `models.register_model_version`、`models._entries`，CHECK `model_versions_code_needs_commit`（`0004_optional_code.sql`） | `test_the_training_code_is_optional`、`test_the_server_checks_weights_and_code`、`test_what_the_database_refuses` |
+| 训练代码可以不记（数据库 NULL，接口给空字符串，旧客户端照常切片），但记了仓库或「有没提交的改动」就一定有提交号；`weights/` 下只有一个不为空的文件；读 git 时不带 `GIT_*` 环境变量 | `models.register_model_version`、`models._entries`、`ops._git`，CHECK `model_versions_code_needs_commit`、`fileset_files_weights_file`（`0004_optional_code.sql`） | `test_the_training_code_is_optional`、`test_no_training_code_reads_as_an_empty_string`、`test_empty_weights_are_refused`、`test_git_variables_never_redirect_the_code_dir`、`test_the_server_checks_weights_and_code`、`test_what_the_database_refuses` |
 | `fw-server verify` 和追溯链 `--check` 也核对模型版本和评估报告的文件（`--check` 还核对评估用的测试集） | `models.verify_inputs`、`models._check_chain` | `test_chain_from_a_release_down_to_the_pool` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 

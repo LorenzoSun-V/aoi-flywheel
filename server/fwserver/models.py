@@ -117,6 +117,8 @@ def _entries(files: Sequence, required: str, top: Sequence[str], weights: bool =
         if weights and path.startswith(WEIGHTS):
             if '/' in path[len(WEIGHTS):] or any(p.startswith(WEIGHTS) for p in seen):
                 raise DatasetError(400, f'{path}：weights/ 下只能有一个权重文件，不能有子目录')
+            if size == 0:  # frozen, an empty file would also block the retry with the real one (same ONNX)
+                raise DatasetError(400, f'{path}：权重文件是空的，没有登记')
         elif path not in top and not (path.startswith(EXTRA) and len(path) > len(EXTRA)):
             raise DatasetError(400, f'{path}：只能是 {"、".join(top)}' + ('、weights/<权重文件>' if weights else '')
                                     + ' 或 files/ 下的文件')
@@ -295,7 +297,7 @@ def _model_versions(conn, rows: List[dict]) -> List[dict]:
              'file_count': r['file_count'], 'total_bytes': r['total_bytes'],
              'trainset': {'id': r['trainset_id'], 'ref': f'{r["trainset_dataset"]}@{r["trainset_number"]}',
                           'manifest_sha256': r['trainset_manifest']},
-             'classes': r['classes'], 'code_repo': r['code_repo'], 'code_commit': r['code_commit'],
+             'classes': r['classes'], 'code_repo': r['code_repo'], 'code_commit': r['code_commit'] or '',
              'code_dirty': r['code_dirty'], 'metrics': r['metrics'], 'note': r['note'], 'tags': tags[r['id']],
              'created_by': r['created_by'], 'created_at': _stamp(r['created_at'])} for r in rows]
 
@@ -369,7 +371,7 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
         if same:
             old = _model_versions(conn, same)[0]
             if (old['manifest_sha256'], old['trainset']['id'], old['code_commit'], old['code_repo'],
-                    old['code_dirty']) == (manifest, trainset_id, commit, repo, bool(code_dirty)):
+                    old['code_dirty']) == (manifest, trainset_id, commit or '', repo, bool(code_dirty)):
                 return dict(old, existing=True)
             raise DatasetError(409, f'这个 ONNX 已经登记为 {old["ref"]}，但训练集快照、代码或附带的文件不一样；'
                                     '同一个 ONNX 只登记一次')

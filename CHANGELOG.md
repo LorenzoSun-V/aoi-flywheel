@@ -7,7 +7,10 @@
 - `fw model register --weights best.pt`（`fw.register_model(weights=…)`）：权重登记在 `weights/` 下，一个文件，`fw model get` 一起取回。
 - 训练代码改为选填：`--code-dir <目录>` 读那个目录的 git，或者直接写 `--code-commit`（和 `--code-repo`）；都不写就不记，显示「未记录」。**不再自动读当前目录的 git**：当前目录可能是别的仓库。
 - `--metrics` 仍可用，只作参考。
-- 数据库迁移 `0004_optional_code.sql`：训练代码提交号可以为空；记了仓库地址或「有没提交的改动」就必须有提交号。服务启动时自动应用，升级前照常备份。
+- 没记训练代码时接口里 `code_commit` 是空字符串（数据库里是 NULL），旧版 `fw` 照常列出版本。
+- 空的权重文件不登记（`fw` 和服务器都拒绝，数据库也有 CHECK）：冻结后会挡住用真权重重新登记同一个 ONNX。
+- 读训练代码的 git 时不带任何 `GIT_*` 环境变量，`GIT_DIR`、`GIT_WORK_TREE` 不会把 `--code-dir` 指到别的仓库。
+- 数据库迁移 `0004_optional_code.sql`：训练代码提交号可以为空；记了仓库地址或「有没提交的改动」就必须有提交号；`weights/` 下的文件不能为空、不能在子目录里。服务启动时自动应用，升级前照常备份。
 
 ## 0.2.0（未发布）
 

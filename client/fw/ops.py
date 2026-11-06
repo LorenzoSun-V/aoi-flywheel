@@ -640,8 +640,11 @@ def strip_credentials(url: str) -> str:
 
 
 def _git(folder, *args) -> Optional[str]:
+    # GIT_DIR, GIT_WORK_TREE and the like inherited from the shell would point git at another repository than
+    # the folder asked for: run without any GIT_* variable.
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith('GIT_')}
     try:
-        r = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, text=True, timeout=30, env=env)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout.strip() if r.returncode == 0 else None
@@ -804,6 +807,8 @@ def register_model(api: Api, name: str, onnx, trainset, metrics=None, files: Seq
         weights = Path(weights)
         if not weights.is_file():
             raise FwError(f'权重文件 {weights} 不存在（--weights 只收一个文件）')
+        if weights.stat().st_size == 0:
+            raise FwError(f'权重文件 {weights} 是空的，没有登记')
         items.append(('weights/' + weights.name, weights))
     if metrics is not None:
         _read_json_object(metrics, '验证指标文件')

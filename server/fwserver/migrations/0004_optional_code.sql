@@ -4,3 +4,7 @@
 ALTER TABLE model_versions ALTER COLUMN code_commit DROP NOT NULL;
 ALTER TABLE model_versions ADD CONSTRAINT model_versions_code_needs_commit
   CHECK (code_commit IS NOT NULL OR (code_repo = '' AND NOT code_dirty));
+-- weights/ holds the trained weights (.pt / .pth) of a model version: a file, never empty (frozen, an empty
+-- one would also block registering the same ONNX with the real weights). = models._entries.
+ALTER TABLE fileset_files ADD CONSTRAINT fileset_files_weights_file
+  CHECK (path NOT LIKE 'weights/%' OR (size > 0 AND position('/' in substr(path, 9)) = 0));

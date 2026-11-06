@@ -178,7 +178,7 @@ def test_the_training_code_is_optional(api, model, snapshot, tmp_path, monkeypat
     monkeypatch.setattr(ops, 'git_info', lambda folder: pytest.fail('git read without --code-dir'))
     run = files_in(tmp_path)
     mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run / 'best.pt', echo=quiet)
-    assert mv['code_commit'] is None and mv['code_repo'] == '' and not mv['code_dirty']
+    assert mv['code_commit'] == '' and mv['code_repo'] == '' and not mv['code_dirty']
     assert ops.code_text(mv) == '未记录'
     assert {f['path'] for f in api.model_version(model, str(mv['number']))['files']} == \
         {'model.onnx', 'classes.txt', 'weights/best.pt'}
@@ -191,6 +191,59 @@ def test_the_training_code_is_optional(api, model, snapshot, tmp_path, monkeypat
         ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], code_repo='https://g/x.git', echo=quiet)
     with pytest.raises(ops.FwError, match='--weights 只收一个文件'):
         ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run, echo=quiet)
+
+
+def test_no_training_code_reads_as_an_empty_string(api, model, snapshot, tmp_path, capsys):
+    # Re-review 01:37: a client from before 0004 slices code_commit; null made `fw model versions` exit.
+    run = files_in(tmp_path)
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], echo=quiet)
+    assert mv['code_commit'] == ''
+    assert [v['code_commit'] for v in api.model_versions(model)] == ['']
+    assert api.model_version(model, str(mv['number']))['code_commit'] == ''
+    for v in api.model_versions(model):  # what the client of f5320cd does with each row
+        assert (v['code_commit'][:10] + ('*' if v['code_dirty'] else '')) == ''
+    again = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], echo=quiet)
+    assert again['existing'] and again['number'] == mv['number']
+
+
+def test_empty_weights_are_refused(api, model, snapshot, tmp_path):
+    # Re-review 01:37: an empty best.pt was frozen, and the retry with the real file was then refused (409).
+    run = files_in(tmp_path)
+    empty = write(tmp_path / 'empty', 'best.pt', b'')
+    with pytest.raises(ops.FwError, match='是空的'):
+        ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=empty, echo=quiet)
+    rows = ops._send_files(api, [('model.onnx', run / 'best.onnx'), ('weights/best.pt', empty)], 2, quiet)
+    with pytest.raises(ApiError, match='是空的'):
+        api.register_model_version(model, {'trainset_id': snapshot['id'], 'files': rows})
+    assert api.model_versions(model) == []
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run / 'best.pt', echo=quiet)
+    assert mv['number'] == 1 and not mv['existing']
+
+
+def test_git_variables_never_redirect_the_code_dir(api, model, snapshot, tmp_path, monkeypatch):
+    # Re-review 01:37: GIT_DIR / GIT_WORK_TREE inherited from the shell made --code-dir B record repository A.
+    import subprocess
+    env = dict(GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@x', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@x')
+    heads = {}
+    for name in ('a', 'b'):
+        repo = tmp_path / name
+        repo.mkdir()
+        git = lambda *a: subprocess.run(['git', '-C', str(repo), *a], check=True, capture_output=True,  # noqa: E731
+                                        env={**{k: v for k, v in __import__('os').environ.items()
+                                                if not k.startswith('GIT_')}, **env})
+        git('init', '-q')
+        write(repo, 'train.py', name.encode())
+        git('add', 'train.py')
+        git('commit', '-q', '-m', name)
+        git('remote', 'add', 'origin', f'https://git.example.com/{name}.git')
+        heads[name] = git('rev-parse', 'HEAD').stdout.decode().strip()
+    assert heads['a'] != heads['b']
+    monkeypatch.setenv('GIT_DIR', str(tmp_path / 'a' / '.git'))
+    monkeypatch.setenv('GIT_WORK_TREE', str(tmp_path / 'a'))
+    mv = ops.register_model(api, model, files_in(tmp_path) / 'best.onnx', snapshot['ref'], code_dir=tmp_path / 'b',
+                            echo=quiet)
+    assert (mv['code_commit'], mv['code_repo']) == (heads['b'], 'https://git.example.com/b.git')
+    assert ops.git_info(tmp_path) is None  # not a repository, whatever GIT_DIR says
 
 
 def test_the_server_checks_weights_and_code(api, model, snapshot, tmp_path):
@@ -799,6 +852,12 @@ def test_what_the_database_refuses(sql, registered, snapshot):
             fid = fileset(['model.onnx'], frozen=False)
             sql.execute("UPDATE fileset_files SET size = 2 WHERE fileset_id = %s", (fid,))
             sql.execute('UPDATE filesets SET frozen = true WHERE id = %s', (fid,))
+    for path, size in (('weights/best.pt', 0), ('weights/x/best.pt', 5)):  # what models._entries refuses (0004)
+        with pytest.raises(psycopg.Error, match='fileset_files_weights_file'):
+            with sql.transaction():
+                fid = sql.execute('INSERT INTO filesets (manifest_sha256, file_count, total_bytes) VALUES (%s, 1, 1) '
+                                  'RETURNING id', (b'\x01' * 32,)).fetchone()['id']
+                sql.execute('INSERT INTO fileset_files VALUES (%s, %s, %s, %s)', (fid, path, b'\x01' * 32, size))
     for repo, dirty in (('https://git.example.com/t.git', False), ('', True)):  # code without a commit (0004)
         with pytest.raises(psycopg.Error, match='model_versions_code_needs_commit'):
             with sql.transaction():

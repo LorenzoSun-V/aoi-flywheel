@@ -285,7 +285,7 @@ fw model register SES-TX-detr --onnx runs/best.onnx --weights runs/best.pt --tra
 | 选项 | 说明 |
 |---|---|
 | `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
-| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件），登记在 `weights/` 下，用来统一评估 |
+| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，用来统一评估 |
 | `--trainset` | 必填，训练用的训练集快照，例如 `SES-TX-det@2`。追溯链就是从这里接到数据的；类别表也用这个快照的，登记时一起放进模型版本 |
 | `--metrics` | 选填：训练框架自己算的验证指标 JSON（一个 JSON 对象），只作参考；`fw model show`、`fw model compare` 会列出里面的数值 |
 | `--file` | 附件：训练配置等，登记在 `files/` 下；写目录就带上整个目录；可写多次 |
