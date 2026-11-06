@@ -133,7 +133,7 @@ flowchart TB
 | 记录 | 内容 | 谁来写 |
 | --- | --- | --- |
 | 模型 | 名称、现场、产线、任务类型（第二步只有检测） | 算法工程师，`fw model create` |
-| 模型版本 | ONNX、`classes.txt`（从快照复制）、验证指标、附件（按哈希存成一组冻结的文件）；训练集快照、训练代码仓库和提交号、提交后有没有没提交的改动、备注 | 训练脚本 `fw.register_model()` 或 `fw model register` |
+| 模型版本 | ONNX、权重（`.pt`/`.pth`）、`classes.txt`（从快照复制）、可选的训练框架指标、附件（按哈希存成一组冻结的文件）；训练集快照、可选的训练代码仓库和提交号、备注 | 训练脚本 `fw.register_model()` 或 `fw model register` |
 | 标签 | 候选、弃用；只追加，当前状态是每个标签最后一条 | 算法工程师，`fw model tag` |
 | 评估报告 | 模型版本、测试集（训练集快照的某个划分，或一个数据集版本）、指标、报告文件、评估工具和版本 | `fw eval register`，可以直接读 aoi-deteval 的输出目录 |
 | 发布 | 发布 ID（`现场-产线-r序号`）、模型版本、部署仓库地址和提交号、部署成功时间、登记时间、操作人；现场构建引擎用的 GPU、TensorRT 版本、精度，可选引擎文件的哈希和大小 | 部署仓库发布后调 `fw release register` |
@@ -151,8 +151,8 @@ flowchart TB
 import fw
 ts = fw.get_trainset('SES-TX-det@2', '/data/train/SES-TX-det@2')   # 取到本地，返回 id、目录、类别表
 # ……现有训练代码读 ts['path']……
-mv = fw.register_model('SES-TX-detr', onnx='best.onnx', trainset=ts['id'], metrics='val.json')
-# 训练代码的提交号默认从当前目录的 git 读；不在 git 仓库里时要写 code_commit=…
+mv = fw.register_model('SES-TX-detr', onnx='best.onnx', weights='best.pt', trainset=ts['id'])
+# 指标由平台用 aoi-deteval 统一算（第三步），训练框架自己的指标和训练代码提交号都是选填
 ```
 
 ## 预标注和推理任务
@@ -169,6 +169,15 @@ mv = fw.register_model('SES-TX-detr', onnx='best.onnx', trainset=ts['id'], metri
 - 预测集也是评估的输入（第二阶段）：打分不需要 GPU，换指标只要重算。换阈值只能在已保存的预测范围内：预测集按推理时用的最低阈值保存，往高调直接重算；要低于保存时的阈值，就得重新推理。
 - 引擎构建（ONNX 转 FP32、FP16 引擎）也是排队任务，由同一个 worker 调用你们部署仓库里的构建入口。平台记下 ONNX 哈希、部署仓库提交号、构建配置的哈希和构建日志；引擎能在哪些 GPU 和 TensorRT 版本上用，按部署仓库给的规则判断。
 - worker 只访问平台服务的那一个端口，不直连数据库；以后加 GPU 机就是多起一个 worker。
+
+### 统一评估和推理环境（2026-11-06 定）
+
+不同训练框架自己的指标代码不一致，模型好坏以平台用 aoi-deteval（按 ultralytics 的口径）统一算的为准；登记时的训练框架指标只作参考。
+
+- 评估任务：`fw eval run <模型版本> --data <数据池或快照版本> --dirs <目录…> --weights|--engine`。选数据池版本里的几个目录，worker 递归取图，按相对路径对应预测和真值，不用把图摆平。选的目录里有这个模型训练时用过的图（训练集快照的 train/val）就提醒。
+- 权重评估：worker 在模型版本登记的**推理环境**里运行 `deteval predict`，再统一运行 `deteval evaluate`，结果自动登记成评估报告。
+- 推理环境就是部署服务器上搭好的 conda 环境（2026-11-06 选定 conda，不用 Docker），一个框架一个，例如 `yolo26`、`detr-pro`。登记时写环境名和框架源码目录，平台自动记下环境包清单的哈希（`conda list --explicit`）和源码的 git 提交号；有人改了环境或源码，下次评估前能看出来。框架源码留在你们手里，平台不收。迁到别的 GPU 服务器，装好同名环境再登记一次。
+- 引擎评估：引擎由平台在部署服务器上从 ONNX 构建（不收上传的引擎），部署仓库提供两个入口：从 ONNX 构建引擎；用引擎推理并写出 aoi-deteval 格式的预测 JSON。同一张测试集上权重和引擎各评一次，就能看量化后掉了多少点。具体入口拿到推理代码后再定。
 - 试点里 ClearML agent 每个任务除推理外有约 20 秒固定开销（我这边测的）；自研版的这项开销到时候实测。
 
 ## 可靠性、备份和权限

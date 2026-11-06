@@ -94,7 +94,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 `fw model register`（`ops.register_model`）和 `fw.register_model`：
 
-1. 本机先查 ONNX 的开头（ir_version）、指标文件是 JSON 对象、训练集快照存在而且是快照；没写提交号时用 `git_info` 读当前目录的 HEAD、origin（`strip_credentials` 去掉账号和令牌）和有没有没提交的改动。
+1. 本机先查 ONNX 的开头（ir_version）、指标文件是 JSON 对象、训练集快照存在而且是快照；训练代码选填：有 `code_dir` 时用 `git_info` 读那个目录的 HEAD、origin（`strip_credentials` 去掉账号和令牌）和有没有没提交的改动；从不自动读当前目录。
 2. `_send_files`：算哈希、`api.missing`、只上传服务器上没有的。
 3. `api.register_model_version`：服务端 `models.register_model_version` 核对每个文件都在文件库里且大小对，从文件库读 `metrics.json` 和 `model.onnx` 的开头（记下的是存着的文件，不是请求里说的），加上快照的 `classes.txt`，写好文件集的清单并 `store.flush()`；然后一个事务里锁住模型、看同一个 ONNX 是不是登记过（一样就返回已有的，不一样就 409）、插入文件集、冻结、插入模型版本。
 
@@ -134,12 +134,13 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 产线现在用的模型是部署时间最晚的发布，补登旧的不顶掉新的 | `models.current_release` | `test_releases_and_the_current_model` |
 | 部署账号只能取模型版本的文件，取不了数据；现场实施什么都碰不到 | `app.may_download`、`models.model_objects_only` | `test_roles` |
 | 仓库地址里的账号和令牌不会被记下 | `ops.strip_credentials`，数据库 CHECK 拒绝 `https://…@` | `test_code_commit_from_git`、`test_register_and_get_a_model_version` |
+| 训练代码可以不记，但记了仓库或「有没提交的改动」就一定有提交号；`weights/` 下只有一个文件 | `models.register_model_version`、`models._entries`，CHECK `model_versions_code_needs_commit`（`0004_optional_code.sql`） | `test_the_training_code_is_optional`、`test_the_server_checks_weights_and_code`、`test_what_the_database_refuses` |
 | `fw-server verify` 和追溯链 `--check` 也核对模型版本和评估报告的文件（`--check` 还核对评估用的测试集） | `models.verify_inputs`、`models._check_chain` | `test_chain_from_a_release_down_to_the_pool` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
 ## 数据库和迁移
 
-- 表结构只通过 `server/fwserver/migrations/` 里的编号 SQL 文件改：`0002_xxx.sql`、`0003_xxx.sql`……服务启动时按顺序应用没应用过的。
+- 表结构只通过 `server/fwserver/migrations/` 里的编号 SQL 文件改：`0002_xxx.sql`、`0003_xxx.sql`……（已经部署过的迁移不再改，改表结构就加下一个编号）服务启动时按顺序应用没应用过的。
 - **应用过的迁移文件不能再改**：数据库记着每个文件的哈希，改了服务拒绝启动（`test_edited_or_newer_schema_is_refused`）。要改就再加一个新文件。
 - 数据库比程序新时服务也拒绝启动（防止旧程序写新库）。
 - 每个模块管自己的表，只有它写；上层模块可以读下层的表（例如 `models` 读快照的 `trainset_versions`），下层不读上层的（`datasets.verify` 要核对模型文件时由调用方传入 `models.verify_inputs`）。

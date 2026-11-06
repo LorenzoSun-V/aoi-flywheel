@@ -117,7 +117,7 @@ def test_what_a_model_version_must_be(api, model, snapshot, tmp_path):
     with pytest.raises(ApiError, match='还没有'):
         api.register_model_version(model, dict(body, files=[['model.onnx', 'f' * 64, 10]]))
     api.put_file(digest, run / 'best.onnx')
-    for files, message in (([['weights/x.pt', digest, size], ['model.onnx', digest, size]], 'files/'),
+    for files, message in (([['weight/x.pt', digest, size], ['model.onnx', digest, size]], 'files/'),
                            ([['classes.txt', digest, size], ['model.onnx', digest, size]], 'files/'),
                            ([['files/a', digest, size]], '缺 model.onnx'),
                            ([['model.onnx', digest, size], ['model.onnx', digest, size]], '两次'),
@@ -159,15 +159,51 @@ def test_code_commit_from_git(api, model, snapshot, tmp_path, monkeypatch):
     run('remote', 'add', 'origin', 'https://bot:token123@git.example.com/algo/train.git')
     head = run('rev-parse', 'HEAD').stdout.decode().strip()
     write(repo, 'train.py', b'print(2)\n')  # a change not committed
-    monkeypatch.chdir(repo)
     out = []
-    mv = ops.register_model(api, model, files_in(tmp_path) / 'best.onnx', snapshot['ref'], echo=out.append)
+    mv = ops.register_model(api, model, files_in(tmp_path) / 'best.onnx', snapshot['ref'], code_dir=repo,
+                            echo=out.append)
     assert mv['code_commit'] == head and mv['code_dirty']
     assert mv['code_repo'] == 'https://git.example.com/algo/train.git'
     assert '没提交的改动' in out[0] and 'token123' not in ''.join(out)
-    monkeypatch.chdir(tmp_path)
-    with pytest.raises(ops.FwError, match='--code-commit'):
-        ops.register_model(api, model, files_in(tmp_path, 'c') / 'best.onnx', snapshot['ref'], echo=quiet)
+    with pytest.raises(ops.FwError, match='不是 git 仓库'):
+        ops.register_model(api, model, files_in(tmp_path, 'c') / 'best.onnx', snapshot['ref'], code_dir=tmp_path,
+                           echo=quiet)
+    with pytest.raises(ops.FwError, match='只写一个'):
+        ops.register_model(api, model, files_in(tmp_path, 'c') / 'best.onnx', snapshot['ref'], code_dir=repo,
+                           code_commit=COMMIT, echo=quiet)
+
+
+def test_the_training_code_is_optional(api, model, snapshot, tmp_path, monkeypatch, cache):
+    # The current folder's git is never taken unasked (it may be any repository, e.g. this one).
+    monkeypatch.setattr(ops, 'git_info', lambda folder: pytest.fail('git read without --code-dir'))
+    run = files_in(tmp_path)
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run / 'best.pt', echo=quiet)
+    assert mv['code_commit'] is None and mv['code_repo'] == '' and not mv['code_dirty']
+    assert ops.code_text(mv) == '未记录'
+    assert {f['path'] for f in api.model_version(model, str(mv['number']))['files']} == \
+        {'model.onnx', 'classes.txt', 'weights/best.pt'}
+    again = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run / 'best.pt', echo=quiet)
+    assert again['existing'] and again['number'] == mv['number']
+    out = tmp_path / 'got'
+    ops.get_model(api, cache, mv['ref'], out, echo=quiet)
+    assert (out / 'weights' / 'best.pt').read_bytes() == (run / 'best.pt').read_bytes()
+    with pytest.raises(ops.FwError, match='--code-repo 也要写 --code-commit'):
+        ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], code_repo='https://g/x.git', echo=quiet)
+    with pytest.raises(ops.FwError, match='--weights 只收一个文件'):
+        ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run, echo=quiet)
+
+
+def test_the_server_checks_weights_and_code(api, model, snapshot, tmp_path):
+    run = files_in(tmp_path)
+    rows = ops._send_files(api, [('model.onnx', run / 'best.onnx'), ('weights/a.pt', run / 'best.pt'),
+                                 ('weights/b.pt', run / 'val.json'), ('weights/x/c.pt', run / 'best.pt')], 2, quiet)
+    base = {'trainset_id': snapshot['id']}
+    for files, match in (([rows[0], rows[1], rows[2]], '只能有一个权重文件'), ([rows[0], rows[3]], '不能有子目录')):
+        with pytest.raises(ApiError, match=match):
+            api.register_model_version(model, dict(base, files=files))
+    for body in ({'code_repo': 'https://g/x.git'}, {'code_dirty': True}):
+        with pytest.raises(ApiError, match='就要写训练代码的提交号'):
+            api.register_model_version(model, dict(base, files=[rows[0]], **body))
 
 
 def test_tags(api, model, snapshot, tmp_path, sql):
@@ -329,15 +365,14 @@ def test_a_deteval_report_must_be_the_test_set(api, model, snapshot, tmp_path):
 
 
 def test_a_token_in_the_repository_is_never_printed(api, model, snapshot, tmp_path, monkeypatch):
-    monkeypatch.setattr(ops, 'git_info', lambda folder: {'commit': COMMIT, 'repo': '', 'dirty': False})
     run = files_in(tmp_path)
     lines = []
-    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'],
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], code_commit=COMMIT,
                             code_repo='https://bot:ghp_SECRET123@git.example.com/train.git', echo=lines.append)
     assert mv['code_repo'] == 'https://git.example.com/train.git'
     assert lines and not any('SECRET' in line for line in lines)
     lines.clear()  # blanks around the address (re-review 13:47): the token is still caught before it is shown
-    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'],
+    mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], code_commit=COMMIT,
                             code_repo='  https://bot:ghp_SECRET456@git.example.com/train.git\t', echo=lines.append)
     assert mv['code_repo'] == 'https://git.example.com/train.git' and mv['existing']
     assert lines and not any('SECRET' in line for line in lines)
@@ -764,6 +799,13 @@ def test_what_the_database_refuses(sql, registered, snapshot):
             fid = fileset(['model.onnx'], frozen=False)
             sql.execute("UPDATE fileset_files SET size = 2 WHERE fileset_id = %s", (fid,))
             sql.execute('UPDATE filesets SET frozen = true WHERE id = %s', (fid,))
+    for repo, dirty in (('https://git.example.com/t.git', False), ('', True)):  # code without a commit (0004)
+        with pytest.raises(psycopg.Error, match='model_versions_code_needs_commit'):
+            with sql.transaction():
+                sql.execute('INSERT INTO model_versions (model_id, number, fileset_id, onnx_sha256, trainset_id, '
+                            "code_repo, code_dirty, metrics, created_by) VALUES (%s, 99, %s, %s, %s, %s, %s, '{}', %s)",
+                            (mv['model_id'], fileset(['model.onnx']), b'\x01' * 32, snapshot['id'], repo, dirty,
+                             mv['created_by']))
     with pytest.raises(psycopg.Error, match='a split is named'):
         with sql.transaction():
             sql.execute("INSERT INTO eval_reports (model_version_id, testset_id, split, fileset_id, metrics, created_by) "

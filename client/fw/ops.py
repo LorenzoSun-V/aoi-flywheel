@@ -647,6 +647,13 @@ def _git(folder, *args) -> Optional[str]:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def code_text(mv: dict) -> str:
+    """A model version's training code for printing: '<repo> @ <commit>', or that none was recorded."""
+    if not mv.get('code_commit'):
+        return '未记录'
+    return f'{mv["code_repo"] or "（没有登记仓库地址）"} @ {mv["code_commit"]}'
+
+
 def git_info(folder) -> Optional[dict]:
     """The commit checked out in `folder`, its origin URL (without credentials) and whether tracked files
     have changes not committed; None when it is not a git working copy (or git is not installed)."""
@@ -778,10 +785,11 @@ def _trainset(api: Api, trainset) -> dict:
 
 def register_model(api: Api, name: str, onnx, trainset, metrics=None, files: Sequence = (),
                    code_commit: Optional[str] = None, code_repo: Optional[str] = None, note: str = '',
-                   workers: int = 8, echo: Echo = print) -> dict:
-    """Upload the ONNX (and the metrics file and attachments) and register them as the model's next version.
-    Without code_commit the commit checked out in the current folder is used. Registering the same ONNX
-    with the same snapshot, code and files again returns the version that exists (existing: True)."""
+                   workers: int = 8, echo: Echo = print, weights=None, code_dir=None) -> dict:
+    """Upload the ONNX (and the weights, the metrics file and attachments) and register them as the model's
+    next version. The training code is optional: code_commit (and code_repo), or code_dir to take the commit
+    checked out there; neither records none. Registering the same ONNX with the same snapshot, code and files
+    again returns the version that exists (existing: True)."""
     onnx = Path(onnx)
     try:
         with open(onnx, 'rb') as f:
@@ -789,22 +797,32 @@ def register_model(api: Api, name: str, onnx, trainset, metrics=None, files: Seq
     except OSError as e:
         raise FwError(f'读不了 ONNX 文件 {onnx}（{e.strerror or e}）') from None
     if head != b'\x08':
-        raise FwError(f'{onnx} 不像 ONNX 文件；权重（.pt 等）可以用 --file 作为附件一起登记')
+        raise FwError(f'{onnx} 不像 ONNX 文件；权重（.pt、.pth）用 --weights 登记')
     version = _trainset(api, trainset)
     items = [('model.onnx', onnx)]
+    if weights is not None:
+        weights = Path(weights)
+        if not weights.is_file():
+            raise FwError(f'权重文件 {weights} 不存在（--weights 只收一个文件）')
+        items.append(('weights/' + weights.name, weights))
     if metrics is not None:
         _read_json_object(metrics, '验证指标文件')
         items.append(('metrics.json', Path(metrics)))
     items += _attachments(files)
     dirty = False
-    from_git = code_commit is None
+    from_git = code_dir is not None
     if from_git:
-        info = git_info(Path.cwd())
+        if code_commit is not None:
+            raise FwError('--code-dir 和 --code-commit 只写一个')
+        info = git_info(Path(code_dir))
         if info is None:
-            raise FwError('要写训练代码的提交号：加 --code-commit，或者在训练代码的 git 目录里运行')
+            raise FwError(f'{code_dir} 不是 git 仓库（或者没装 git），取不到训练代码的提交号')
         code_commit, dirty = info['commit'], info['dirty']
         code_repo = info['repo'] if code_repo is None else code_repo
     code_repo = strip_credentials(code_repo or '')  # before it is shown or sent: a token is never printed
+    if code_repo and not code_commit:
+        raise FwError('写了 --code-repo 也要写 --code-commit（或者用 --code-dir）')
+    code_commit = code_commit or ''
     if from_git:
         echo(f'训练代码：{code_repo or "（没有 origin 地址）"} @ {code_commit[:12]}'
              + ('；有没提交的改动，会记在这个版本上' if dirty else ''))
@@ -1051,8 +1069,7 @@ def show_chain(echo: Echo, c: dict) -> None:
         echo('还没有发布过')
     echo(f'模型版本 {mv["ref"]}：ONNX {mv["onnx_sha256"][:12]}（{size_text(mv["onnx_size"])}），'
          f'文件清单 {mv["manifest_sha256"][:12]}，{mv["created_by"]} 登记于 {t_(mv["created_at"])}')
-    echo(f'  训练代码 {mv["code_repo"] or "（没有登记仓库地址）"} @ {mv["code_commit"]}'
-         + ('，训练时有没提交的改动' if mv['code_dirty'] else ''))
+    echo('  训练代码 ' + code_text(mv) + ('，训练时有没提交的改动' if mv['code_dirty'] else ''))
     if mv['tags']:
         echo('  标签：' + '、'.join(TAG_NAMES.get(t, t) for t in mv['tags']))
     for e in c['evals']:
@@ -1091,13 +1108,14 @@ def _connected(fn):
 
 def script_register_model(name: str, onnx, trainset, metrics=None, files: Sequence = (),
                           code_commit: Optional[str] = None, code_repo: Optional[str] = None,
-                          note: str = '') -> dict:
+                          note: str = '', weights=None, code_dir=None) -> dict:
     """fw.register_model, for training scripts: register the trained model as the next version of `name` (see
     register_model).
     trainset is what get_trainset returned, its id, or a reference such as 'SES-TX-det@2'. Returns the
     version's record with 'ref' (e.g. SES-TX-detr@3). Progress goes to stderr."""
     return _connected(lambda api: register_model(api, name, onnx, trainset, metrics, files, code_commit, code_repo,
-                                                 note, echo=lambda s: print(s, file=sys.stderr)))
+                                                 note, echo=lambda s: print(s, file=sys.stderr),
+                                                 weights=weights, code_dir=code_dir))
 
 
 def script_get_model(ref: str, dest, link: str = 'auto') -> dict:
