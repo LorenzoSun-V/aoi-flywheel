@@ -715,6 +715,22 @@ def test_switching_the_label_source_counts_as_relabeled(api, tmp_path):
     assert (changes['added'], changes['relabeled']) == (1, 1), changes
 
 
+def test_a_json_that_comes_or_goes_counts_as_relabeled(api, tmp_path):
+    # review 3 of #10: bad.png has no readable size, so a txt-labelled snapshot has no LiteAnno JSON; x.txt is
+    # byte for byte the YOLO made from x.json. json -> txt -> json: x's json/ goes, then comes back
+    files = {'bad.png': b'not an image ' + uuid.uuid4().hex.encode(), 'bad.txt': yolo_line(1).encode(),
+             'b/images/x.png': png(uuid.uuid4().hex), 'b/images/x.json': label('scratch'),
+             'b/labels/x.txt': yolo_line(0).encode()}
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    body = {'sources': [f'{src}@1'], 'classes': CLASSES, 'val': 0}
+    make(api, name, [f'{src}@1'], val=0, label_source='json')
+    for source in ('txt', 'json'):
+        changes = api.preview_trainset(name, dict(body, label_source=source))['changes']
+        assert changes['relabeled'] == 1, (source, changes)
+        make(api, name, [f'{src}@1'], val=0, label_source=source)
+
+
 def test_a_class_map_on_a_json_with_a_lone_surrogate(api, cache, tmp_path):
     # review 2 of #10: "\udc80" has no UTF-8; rewriting the file gave HTTP 500
     doc = json.loads(label('A'))

@@ -545,7 +545,7 @@ def _changes(samples: Dict[str, Sample], previous: Optional[Dict[str, Tuple[str,
             return (hashlib.sha256(data).hexdigest() if data is not None else s.label[1]) not in old.values()
         new = {top: hashlib.sha256(data).hexdigest() if data is not None else file[1]
                for top, (data, file) in s.outputs.items()}
-        return any(new[top] != old[top] for top in new.keys() & old.keys())  # labels/ is always in both
+        return new != old  # a json/ that comes or goes (e.g. no LiteAnno JSON this time) counts too
 
     relabeled = sum(1 for k, s in samples.items() if k in previous and relabeled_(k, s))
     added = sum(1 for k in samples if k not in previous)
