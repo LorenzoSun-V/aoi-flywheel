@@ -87,6 +87,15 @@ sudo docker compose exec server fw-server token revoke 3
 sudo docker compose exec server fw-server user disable zhangsan
 ```
 
+## 网页
+
+浏览器打开 `http://<服务器>:<端口>/`（和 `fw login --server` 是同一个地址），用自己的凭据登录（和 `fw login` 用的同一串，只存在这个浏览器里）。现在能：
+
+- 看数据集和它的版本，按目录浏览版本里的图片（缩略图，绿点表示有 JSON 标注），点开看大图和标注框（矩形、多边形、点、线、圆；预标注显示分数），左右方向键翻图；
+- 比较同一数据集的两个版本：新增、删除、修改、改名的文件，点开就是那张图。
+
+网页由 fw-server 直接提供（`server/fwserver/web/`，原生 JS，不用构建），部署不加东西。模型、评估、任务、预测集和浏览器上传入库在接下来的 PR 里加。
+
 ## fw 命令行
 
 安装（在有仓库副本的机器上；没有的机器把 `client` 目录拷过去再装）：

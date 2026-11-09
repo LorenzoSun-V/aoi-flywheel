@@ -24,7 +24,7 @@ fw-server = "fwserver.cli:main"
 packages = ["fwserver"]
 
 [tool.setuptools.package-data]
-fwserver = ["migrations/*.sql"]
+fwserver = ["migrations/*.sql", "web/*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "fwserver.__version__"}

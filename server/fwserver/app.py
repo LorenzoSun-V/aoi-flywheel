@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -72,6 +73,15 @@ class FinishBody(LeaseBody):
     outcome: str
     result: Optional[dict] = None
     error: str = ''
+
+
+WEB = Path(__file__).with_name('web')
+WEB_FILES = {'app.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}
+# Pages load only their own scripts and styles; images come from the API as blobs. no-cache: a new fw-server
+# version is picked up on the next load.
+WEB_HEADERS = {'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+               'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; object-src 'none'; "
+                                          "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"}
 
 
 def size_text(n: int) -> str:
@@ -669,6 +679,18 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             job = evals.finish(c, store, job_id, body.token, body.outcome, body.result, body.error)
         log.info('job %s finished: %s', job_id, job['status'])
         return job
+
+    # --- web pages (step 4): static files, no build step; they read the API above with the account's token ----
+    @app.get('/', include_in_schema=False)
+    def web_index():
+        return FileResponse(WEB / 'index.html', media_type='text/html; charset=utf-8', headers=WEB_HEADERS)
+
+    @app.get('/web/{name}', include_in_schema=False)
+    def web_file(name: str):
+        kind = WEB_FILES.get(name)
+        if kind is None:
+            raise HTTPException(404, '没有这个文件')
+        return FileResponse(WEB / name, media_type=kind, headers=WEB_HEADERS)
 
     @app.get('/api/v1/diff')
     def diff(old: int, new: int, user: dict = Depends(data_user)):
