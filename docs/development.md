@@ -157,6 +157,8 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 评估报告和它的任务一起成立：交回结果时持有任务行锁，在同一个事务里登记报告、结束任务；租约失效、已取消的不登记；评的张数和清单不一样不登记；数据库只收「正在运行的同一推理环境的评估任务」的报告，快照的划分不带目录；每个任务有自己的报告（结果和别的任务一字不差也是，记各自的任务和推理环境） | `evals.finish`、`models.register_eval`，触发器 `check_eval_report_dirs`（`0006_eval_jobs.sql`） | `test_a_cancelled_or_lost_eval_registers_nothing`、`test_an_eval_that_missed_images_registers_nothing`、`test_the_database_keeps_eval_reports_consistent`、`test_two_jobs_with_the_same_result_keep_a_report_each` |
 | 推理环境变了（包清单或源码）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails` |
 | 加载上传权重的命令（aoi-deteval）只在单独的低权限账号（`FW_RUN_AS`）下用 sudo 运行，环境变量清空，读不到 worker 的令牌；没配就不评；结束或取消时杀掉这个账号的所有进程；任务目录用绝对路径 | `worker.RunAs`、`run_as`、`eval_model`、`work_dir` | `test_model_code_runs_under_its_own_account_with_nothing_of_the_workers`、`test_model_code_cannot_read_the_workers_files_and_is_killed_on_cancel`（要能免密 sudo，CI 上会跑）、`test_a_relative_work_dir` |
+| 模型命令之间不留东西：每条命令新的空 HOME、TMPDIR，`PYTHONNOUSERSITE`；跑之前自检账号写不了家目录、环境、源码，读不了 worker 配置，用不了 cron、at；它写出的文件只按「它自己的普通文件」拷出（不跟链接，核对属主和链接数）再读、再传，预测在 evaluate 之前读下 | `RunAs.check`、`command_env`、`take_output`、`_model_run`、`_eval_in` | `test_nothing_a_model_command_leaves_reaches_the_next_one`、`test_check_refuses_an_account_that_can_reach_what_the_worker_runs`、`test_what_a_model_command_wrote_is_taken_only_as_its_own_plain_files`、`test_a_link_among_the_model_outputs_uploads_nothing` |
+| 数据池上评估时，JSON 标注里的类别名都要在模型的类别表里 | `evals._known_names` | `test_pool_labels_must_name_classes_of_the_model` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
 ## 数据库和迁移

@@ -357,7 +357,7 @@ fw eval run SES-TX-detr@3 --data SES-TX-det@2:test --runner detr-pro --wait
 | `--batch` | 批量（RF-DETR 默认逐张，和部署一致） |
 | `--wait` | 等任务跑完，跟着显示输出，最后给出评估报告编号 |
 
-- 读哪些标注：快照用它的 YOLO 标注，类别编号按快照的类别表；快照的类别表要和模型的完全一样（顺序也一样），不一样就不收（否则对的框会被算成错的类别）。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表（扩展名大小写都认，`x.JSON` 摆成 `x.json` 给 aoi-deteval）；没有标注的图算正常图（没有缺陷）。只有 YOLO txt（`.txt`、`.TXT` 都算）的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
+- 读哪些标注：快照用它的 YOLO 标注，类别编号按快照的类别表；快照的类别表要和模型的完全一样（顺序也一样），不一样就不收（否则对的框会被算成错的类别）。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表，有模型类别表里没有的类别名（包括只差大小写的）就不收（扩展名大小写都认，`x.JSON` 摆成 `x.json` 给 aoi-deteval）；没有标注的图算正常图（没有缺陷）。只有 YOLO txt（`.txt`、`.TXT` 都算）的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
 - 提交时就定下要评哪些图：图片清单存进文件库，任务重试、版本以后再变都还是这些图。评完的张数和清单对不上（有图没读到），不登记，任务算失败。
 - 选的图里有和模型训练集快照 train、val 里内容相同的图（按文件哈希，不看路径），提交时提醒，并写进报告的备注：这些图的成绩会偏好。
 - worker 先核对推理环境还是登记时那样（包清单、源码），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
@@ -505,16 +505,24 @@ WantedBy=multi-user.target
 **跑模型用单独的账号（必配）。** 评估要加载上传的权重，`.pt`、`.pth` 是 pickle，加载时会执行里面的代码，带恶意代码的权重能以运行它的账号做任何事。worker 自己的账号存着 worker 令牌，所以加载权重的命令（aoi-deteval）由 worker 通过 sudo 切到另一个低权限账号运行，环境变量清空（只留 `CUDA_VISIBLE_DEVICES`、`NVIDIA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LANG`、`LC_ALL`、`TZ`）。在 GPU 机上配一次（以 worker 账号 `fwworker`、模型账号 `fwmodel` 为例）：
 
 ```
-sudo useradd --system --create-home --shell /usr/sbin/nologin fwmodel
+sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin fwmodel
 echo 'fwworker ALL=(fwmodel) NOPASSWD: /usr/bin/env' | sudo tee /etc/sudoers.d/fw-worker
 sudo chmod 0440 /etc/sudoers.d/fw-worker && sudo visudo -c
-sudo chmod 0700 /home/fwworker                 # worker 的配置（令牌）和缓存，模型账号读不到
-export FW_RUN_AS=fwmodel                         # 写进 worker 的 systemd 服务
+echo fwmodel | sudo tee -a /etc/cron.deny /etc/at.deny   # 装了 cron、at 时：不让它留定时任务
+sudo usermod -aG video fwmodel                           # 用 GPU（按机器上的设备权限）
+sudo mkdir -p /srv/fw-jobs && sudo chown fwworker: /srv/fw-jobs && sudo chmod 0711 /srv/fw-jobs
+chmod 0700 /home/fwworker                                # worker 的配置（令牌）和缓存，模型账号读不到
 ```
 
-- 模型账号要能读推理环境（conda 环境目录、`--src` 的框架源码）和 GPU（一般要在 `video` 组：`sudo usermod -aG video fwmodel`）。任务目录（`FW_WORK_DIR`）的上级目录要让它能进入（至少 `o+x`），worker 会把权重和图片设成它可读，只有输出目录可写。
+worker 的 systemd 服务里加上 `Environment=FW_RUN_AS=fwmodel` 和 `Environment=FW_WORK_DIR=/srv/fw-jobs`。
+
+- 任务目录（`FW_WORK_DIR`）要放在 worker 家目录以外（家目录是 0700，模型账号进不去），上面的 `/srv/fw-jobs` 就是。conda 和推理环境、`--src` 的框架源码也要放在模型账号能读、但不能写的地方（例如 `/opt/conda`，属主 worker 账号或 root，0755）：它能写的话，可以改掉 worker 运行的 `pip freeze`、`git` 和以后的评估。
+- 模型账号自己的家目录它不能写（上面用的是不存在的 `/nonexistent`）。每条命令另给一个新的空家目录和临时目录（在任务目录里，跑完删掉），并设 `PYTHONNOUSERSITE=1`：一条命令放下的东西（`~/.local` 里的 `.pth`、`~/.condarc`）到不了下一条命令。
+- worker 每次跑模型前自检，有一项不满足就不跑、任务失败并说明：sudo 切得过去；模型账号写不了自己的家目录、读不了 worker 的配置文件、写不了推理环境和框架源码、进得了任务目录；装了 cron、at 时它用不了。
+- 模型命令写出的文件，worker 先拷到自己的目录再读、再上传：只收模型账号自己的普通文件，有链接（指向 worker 令牌的符号链接、硬链接）整次输出都不用，任务失败。evaluate 读的是 worker 拷出的预测文件，上传的预测是 evaluate 运行之前读下的。
 - 一台 worker 用一个专用的模型账号，不要给别的用途：命令结束或取消时，worker 会杀掉这个账号的所有进程（worker 杀不了别的账号的进程，只能这样清理）。
-- 没配 `FW_RUN_AS`、账号不存在、是 root 或 worker 自己、sudo 切不过去，评估任务都直接失败并说明原因。检查任务（`fw runner check`）不加载权重，不需要它。
+- 没配 `FW_RUN_AS`、账号不存在、是 root 或 worker 自己，评估任务都直接失败并说明原因。检查任务（`fw runner check`）不加载权重，不需要它。
+- 权重里自带的类别顺序平台看不到，以模型版本登记的类别表为准；两者不一致时指标会错，由训练时保证（aoi-deteval 以后可以加核对）。
 
 ## 在训练脚本里用
 

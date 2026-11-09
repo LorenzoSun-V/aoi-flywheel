@@ -18,7 +18,7 @@ from typing import Any, List, Optional
 
 from fw.contract import ContractError, eval_dirs, eval_selection, manifest_bytes
 
-from . import datasets, jobs, models, trainsets
+from . import datasets, formats, jobs, models, trainsets
 from .datasets import DatasetError
 from .store import Store, StoreError
 
@@ -82,6 +82,40 @@ def _same_classes(conn, version: dict, mv: dict) -> None:
                                 '不一样（顺序也要一样），快照里 txt 的类别编号会对错类别；用和模型相同的类别表建快照再评')
 
 
+def _known_names(store: Store, files: List[tuple], mv: dict) -> None:
+    """The JSON labels of a dataset version are read by class name: every box must name a class of the model
+    (an unknown name would be dropped or miscounted by deteval), and every label must be readable."""
+    known = set(mv['classes'] or [])
+    unknown: dict = {}
+    bad: List[str] = []
+    seen = set()
+    for path, digest, _ in files:
+        if not path.endswith('.json') or digest in seen:
+            continue
+        seen.add(digest)
+        data = store.read(digest)
+        if data is None:
+            raise DatasetError(503, f'服务器上没有 {path} 的内容，先运行 fw-server verify')
+        try:
+            parsed = formats.parse_json(data.decode('utf-8-sig'))
+        except UnicodeDecodeError:
+            parsed = '不是 UTF-8'
+        if isinstance(parsed, str):
+            bad.append(f'{path}（{parsed}）')
+            continue
+        for box in parsed.boxes:
+            if box.name not in known:
+                unknown.setdefault(box.name, path)
+    problems = []
+    if bad:
+        problems.append(f'{len(bad)} 个标注读不了：{"；".join(bad[:3])}')
+    if unknown:
+        problems.append(f'标注里有模型 {mv["ref"]} 类别表（{"、".join(mv["classes"] or [])}）里没有的类别：'
+                        + '、'.join(f'{n}（例如 {p}）' for n, p in list(unknown.items())[:5]))
+    if problems:
+        raise DatasetError(400, '评不了：' + '；'.join(problems))
+
+
 def submit(conn, store: Store, user: dict, runner: Optional[str], params: Optional[dict]) -> dict:
     """params: model (a model version), data (a dataset version, or a snapshot's split as NAME@N:test), dirs (folders
     of the dataset version; none = all of it), imgsz and batch (passed on to deteval predict)."""
@@ -120,6 +154,8 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
         raise DatasetError(400, f'{version["ref"]}{":" + split if split else ""} 里没有图片')
     if snapshot:
         _same_classes(conn, version, mv)
+    else:
+        _known_names(store, files, mv)
     warnings = [w for w in (_overlap(conn, mv, images),) if w]
     inputs, _ = store.put_bytes(manifest_bytes(files))
     try:

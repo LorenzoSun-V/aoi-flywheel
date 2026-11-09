@@ -91,6 +91,10 @@ def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
     executable(tmp_path / 'conda', '#!/bin/sh\n'
                f'd="{listings}"\n'
                'if [ "$1" = run ] && [ "$4" = python ]; then echo "pip==24.0"; exit 0; fi\n'
+               'if [ "$1" = env ] && [ "$2" = list ]; then\n'
+               '  printf \'{"envs": [\'; sep=; for f in "$d"/*.txt; do\n'
+               '    printf \'%s"%s/envs/%s"\' "$sep" "$d" "$(basename "$f" .txt)"; sep=,; done; echo \']}\'; exit 0\n'
+               'fi\n'
                'if [ "$1" = run ] && [ "$5" = deteval ]; then\n'
                '  [ -f "$d/$3.txt" ] || exit 1\n'
                f'  export FAKE_DETEVAL_LOG="{tmp_path / "deteval.log"}"\n'
@@ -104,10 +108,13 @@ def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
     executable(bin_dir / 'sudo', '#!/bin/sh\n'
                f'echo "$*" >> "{tmp_path / "sudo.log"}"\n'
                'while [ "$1" != -- ]; do shift; done; shift\n'
-               'case " $* " in *" kill -KILL -1 "*) exit 0;; esac\n'  # not every process of the test's account
-               'exec "$@"\n')
+               'case " $* " in *" kill -KILL -1 "*) exit 0;;\n'  # not every process of the test's account
+               '  *fw-probe*) exit 0;;\n'  # the test's account owns everything here: nothing to probe
+               '  *" crontab -l "*|*" atq "*) echo "You are not allowed to use this program" >&2; exit 1;;\n'
+               'esac\n'               'exec "$@"\n')
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
     monkeypatch.setenv('FW_RUN_AS', 'nobody')
+    monkeypatch.setattr(worker.RunAs, 'owner', lambda self: os.getuid())  # the fake sudo does not switch
     monkeypatch.setenv('FW_CONDA', str(tmp_path / 'conda'))
     monkeypatch.setenv('FW_CACHE', str(tmp_path / 'fw-cache'))
     w = make_worker()
@@ -395,3 +402,45 @@ def test_a_relative_work_dir(api, gpu, model, snapshot, tmp_path, monkeypatch): 
     done = api.job(job['id'])
     assert done['status'] == 'done', done['error']
     assert not list((tmp_path / 'jobs').iterdir())
+
+
+def test_pool_labels_must_name_classes_of_the_model(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    data = pool(api, tmp_path, {'A/1.png': png(uuid.uuid4().hex), 'A/1.json': label('Scratch'),
+                                'B/2.png': png(uuid.uuid4().hex), 'B/2.json': label('no-such-class'),
+                                'C/3.png': png(uuid.uuid4().hex), 'C/3.json': label(mv['classes'][0])})
+    for d in ('A', 'B'):
+        with pytest.raises(ApiError) as e:
+            api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1', 'dirs': [d]})
+        assert e.value.status == 400 and '类别表' in e.value.message
+    assert api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1', 'dirs': ['C']})
+
+
+def test_a_link_among_the_model_outputs_uploads_nothing(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """evaluate puts a link to the worker's config among its outputs, or swaps the predictions it was given for
+    one: the job fails, or the predictions read before evaluate ran are what is uploaded; the token never is."""
+    secret = tmp_path / 'worker-config.json'
+    secret.write_text('{"token": "WORKER-TOKEN-123"}')
+    secret.chmod(0o600)
+    with open(tmp_path / 'deteval.py', 'a') as f:
+        f.write('\nif args[0] == "evaluate" and os.path.exists(%r):\n'
+                '    os.symlink(%r, Path(opt("--out")) / "leak.json")\n'
+                'if args[0] == "evaluate":\n'
+                '    p = Path(opt("--preds")); p.unlink(); p.symlink_to(%r)\n'
+                % (str(tmp_path / 'LINK'), str(secret), str(secret)))
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    params = {'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'}
+    (tmp_path / 'LINK').write_text('')
+    job = api.submit_job('eval', runner=r['runner'], params=params)
+    worker.run_worker(gpu, quiet, once=True)
+    j = api.job(job['id'])
+    assert j['status'] == 'failed' and '链接' in j['error'] and api.evals(model) == []
+    (tmp_path / 'LINK').unlink()
+    job = api.submit_job('eval', runner=r['runner'], params=params)
+    worker.run_worker(gpu, quiet, once=True)
+    done = api.job(job['id'])
+    assert done['status'] == 'done', done['error']
+    for f in api.eval(done['result']['eval_id'])['files']:
+        assert b'WORKER-TOKEN-123' not in api.read_object(f['sha256'])

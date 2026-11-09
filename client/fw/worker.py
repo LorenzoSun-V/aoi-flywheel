@@ -450,7 +450,12 @@ class RunAs:
     worker's token or files, with an empty environment except RUN_AS_PASS. The worker's account needs one sudo
     rule: `<worker account> ALL=(<model account>) NOPASSWD: /usr/bin/env` (docs/commands.md). One model account
     per worker: the worker kills every process of that account when a command ends or is cancelled (a process
-    of another account cannot be signalled by the worker; sudo itself runs as root)."""
+    of another account cannot be signalled by the worker; sudo itself runs as root).
+
+    Nothing a command does may reach a later command: each command gets a new empty HOME and TMPDIR in the
+    job's folder (no ~/.local site-packages, no ~/.condarc, PYTHONNOUSERSITE), the account must not be able to
+    write its own home, the framework environment or source, nor use cron or at (check). What it writes is
+    copied out by take_output before the worker reads any of it."""
 
     def __init__(self, user: str):
         import pwd
@@ -462,6 +467,7 @@ class RunAs:
         if entry.pw_uid in (0, os.getuid()):
             raise WorkerError(f'FW_RUN_AS={user} 不能是 root 或 worker 自己的账号：模型要在单独的低权限账号下跑')
         self.home = entry.pw_dir
+        self.uid = entry.pw_uid
         sudo = shutil.which('sudo')
         if not sudo:
             raise WorkerError('没装 sudo：要用 sudo 切到 FW_RUN_AS 的账号跑模型')
@@ -478,19 +484,58 @@ class RunAs:
         extra = [f'{k}={v}' for k, v in (env or {}).items()]
         return self._sudo([*extra, '/bin/sh', '-c', 'umask 022 && exec "$@"', 'sh', *argv])
 
-    def _plain(self, argv: List[str], timeout: float = 60) -> Tuple[int, str]:
+    def owner(self) -> int:
+        """The owner of what its commands write (take_output checks it)."""
+        return self.uid
+
+    def _plain(self, argv: List[str], timeout: float = 60) -> Tuple[int, str, str]:
         try:
             r = subprocess.run(self._sudo(argv), capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError) as e:
-            return 1, str(e)
-        return r.returncode, r.stderr.decode('utf-8', 'replace').strip()[-500:]
+            return 1, '', str(e)
+        return (r.returncode, r.stdout.decode('utf-8', 'replace'),
+                r.stderr.decode('utf-8', 'replace').strip()[-500:])
 
-    def check(self) -> None:
-        code, err = self._plain(['true'])
+    def check(self, conda_env: str, src_dir: str, work_root: Path) -> None:
+        """Before running anything of a job: the account can be switched to, and it cannot keep anything for a
+        later command or read or change what the worker runs (see the class)."""
+        code, _, err = self._plain(['true'])
         if code != 0:
             raise WorkerError(f'切不到账号 {self.user}（sudo -n -u {self.user}）：{err or "返回 " + str(code)}；'
                               f'要在 sudoers 里加 {os.environ.get("USER", "<worker 账号>")} ALL=({self.user}) '
                               'NOPASSWD: /usr/bin/env')
+        from .config import config_path
+        prefix = env_prefix(conda_env)
+        guarded = [prefix, prefix / 'bin', prefix / 'lib', *sorted(prefix.glob('lib/python*/site-packages'))]
+        if src_dir:
+            guarded.append(Path(src_dir))
+        probe = ('h="$HOME"; while [ ! -e "$h" ]; do h=$(dirname "$h"); done; [ -w "$h" ] && echo "home $h"; '
+                 '[ -e "$1" ] && [ -r "$1" ] && echo "config $1"; [ -x "$2" ] || echo "work $2"; shift 2; '
+                 'for d in "$@"; do [ -w "$d" ] && echo "write $d"; done; true  # fw-probe')
+        code, out, err = self._plain(['/bin/sh', '-c', probe, 'sh', str(config_path()), str(work_root),
+                                      *[str(d) for d in guarded]])
+        if code != 0:
+            raise WorkerError(f'检查账号 {self.user} 失败：{err or "返回 " + str(code)}')
+        why = {'home': '能写自己的家目录（{}）：放进去的东西会被后面的命令执行；把家目录设成 root 所有、不可写',
+               'config': '能读 worker 的配置（{}，里面有令牌）：设成 0600，上级目录 0700',
+               'work': '进不了任务目录 {}：设 FW_WORK_DIR 到它能进入的位置，例如 /srv/fw-jobs',
+               'write': '能写 {}：会改掉 worker 和以后的命令用的环境或源码；改成 worker 账号所有、它不可写'}
+        problems = [why[kind].format(path) for kind, _, path in (line.partition(' ') for line in out.splitlines())
+                    if kind in why]
+        for tool, argv in (('crontab', ['crontab', '-l']), ('at', ['atq'])):
+            if shutil.which(argv[0]):
+                code, _, err = self._plain(argv)
+                if code == 0 or not re.search(r'not allowed|permission|denied', err, re.I):
+                    problems.append(f'能用 {tool}（定时任务会在别的任务里执行）：把 {self.user} 加进 /etc/{tool}.deny'
+                                    if tool == 'at' else
+                                    f'能用 {tool}（定时任务会在别的任务里执行）：把 {self.user} 加进 /etc/cron.deny')
+        if problems:
+            raise WorkerError(f'跑模型的账号 {self.user} 隔离得不够，不跑：' + '；'.join(problems))
+
+    def command_env(self, base: Path) -> Dict[str, str]:
+        """A command's own new HOME and TMPDIR (base/home, base/tmp), nothing kept from earlier commands."""
+        return {'HOME': str(base / 'home'), 'TMPDIR': str(base / 'tmp'), 'PYTHONNOUSERSITE': '1',
+                'PYTHONUNBUFFERED': '1'}
 
     def kill_all(self) -> None:
         """Kill every process of the model account (what a command left running included)."""
@@ -500,6 +545,47 @@ class RunAs:
         """Remove what the model account wrote (the worker cannot delete inside its folders)."""
         if paths:
             self._plain(['rm', '-rf', '--', *[str(x) for x in paths]], 300)
+
+
+def env_prefix(name: str) -> Path:
+    """The folder of the conda environment called name."""
+    import json
+    code, out, err = plain_capture([conda_executable(), 'env', 'list', '--json'])
+    try:
+        envs = [Path(e) for e in json.loads(out.decode('utf-8'))['envs']] if code == 0 else []
+    except (ValueError, KeyError, TypeError):
+        envs = []
+    found = [e for e in envs if e.name == name] or (envs[:1] if name == 'base' else [])
+    if not found:
+        raise WorkerError(f'conda env list 里找不到环境 {name} 的目录：{err.decode("utf-8", "replace").strip()[-300:]}')
+    return found[0]
+
+
+def take_output(src: Path, dest: Path, owner: int) -> None:
+    """Copy what a model command wrote into a folder of the worker's own, before the worker reads or uploads any
+    of it: only plain files and folders of the model account (owner), never a link (a symbolic link to the
+    worker's token, a hard link to a file of the worker's). Its processes are all gone by then."""
+    import stat
+    dest.mkdir()
+    for entry in sorted(os.scandir(src), key=lambda e: e.name):
+        st = os.lstat(entry.path)
+        target = dest / entry.name
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == owner:
+            take_output(Path(entry.path), target, owner)
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            raise WorkerError(f'模型命令写出的 {entry.path} 不是普通文件或目录（链接？），这次的输出不用')
+        try:
+            fd = os.open(entry.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        except OSError as e:
+            raise WorkerError(f'读不了模型命令写出的 {entry.path}：{e}') from None
+        with os.fdopen(fd, 'rb') as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != owner or st.st_nlink != 1:
+                raise WorkerError(f'模型命令写出的 {entry.path} 不是它自己的普通文件（属主 {st.st_uid}，'
+                                  f'链接数 {st.st_nlink}），这次的输出不用')
+            with open(target, 'xb') as out:
+                shutil.copyfileobj(f, out, 1 << 20)
 
 
 def run_as() -> RunAs:
@@ -582,7 +668,6 @@ def eval_model(run: JobRun) -> dict:
     p = run.job['params']
     runner, deteval = p['runner'], p['deteval']
     model = run_as()
-    model.check()
     now = check_runner(run, runner)
     if not now['same_env'] or not now['same_src']:
         raise WorkerError('推理环境和登记时不一样了（见上面），没有评估；确认没问题后在这台机器上重新 fw runner register，'
@@ -590,8 +675,9 @@ def eval_model(run: JobRun) -> dict:
     run.check()
     root = work_dir()
     root.mkdir(parents=True, exist_ok=True)
+    model.check(runner['conda_env'], runner['src_dir'], root)
     folder = root / f'job-{run.id}-{run.job["attempt"]}'
-    written = [folder / 'preds', folder / 'results', folder / 'tmp']  # what the model account writes
+    written = [folder / 'run-predict', folder / 'run-evaluate']  # where the model account writes
     run.reaper = model.kill_all
     model.kill_all()  # anything a crashed worker left running
     try:
@@ -603,6 +689,17 @@ def eval_model(run: JobRun) -> dict:
             model.remove([x for x in written if x.exists()])
             shutil.rmtree(folder, ignore_errors=True)
     return result
+
+
+def _model_run(run: JobRun, model: RunAs, base: Path, argv: List[str], what: str) -> None:
+    """One command as the model account, with its own new HOME, TMPDIR and output folder (base/out)."""
+    base.mkdir()
+    for sub in ('home', 'tmp', 'out'):
+        (base / sub).mkdir()
+        os.chmod(base / sub, 0o777)  # the model account writes here, and nowhere else of the job's folder
+    code = run.run(model.argv(argv, model.command_env(base)), cwd=str(base))
+    if code != 0:
+        raise WorkerError(f'{what} 没有成功（返回 {code}），原因见日志')
 
 
 def _eval_in(run: JobRun, p: dict, runner: dict, deteval: dict, model: RunAs, folder: Path,
@@ -634,34 +731,34 @@ def _eval_in(run: JobRun, p: dict, runner: dict, deteval: dict, model: RunAs, fo
     sets = folder / 'eval_sets.yaml'
     sets.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     _readable(folder)
-    for x in written:
-        x.mkdir()
-        os.chmod(x, 0o777)  # the model account writes here (and nothing else of the job's folder)
-    env = {'PYTHONUNBUFFERED': '1', 'TMPDIR': str(folder / 'tmp')}
     name = deteval['name']
     argv = ['deteval', 'predict', '--sets', str(sets), '--weights', str(folder / 'model' / Path(weights[0]).name),
-            '--name', name, '--framework', runner['framework'], '--out', str(folder / 'preds')]
+            '--name', name, '--framework', runner['framework'], '--out', str(written[0] / 'out')]
     if runner['src_dir']:
         argv += ['--src', runner['src_dir']]
     if deteval.get('batch'):
         argv += ['--batch', str(deteval['batch'])]
-    code = run.run(model.argv(conda_run(runner['conda_env'], *argv), env), cwd=str(folder))
-    if code != 0:
-        raise WorkerError(f'deteval predict 没有成功（返回 {code}），原因见日志')
+    _model_run(run, model, written[0], conda_run(runner['conda_env'], *argv), 'deteval predict')
+    take_output(written[0] / 'out', folder / 'preds', model.owner())
+    pred = folder / 'preds' / f'{name}.json'
+    if not pred.is_file():
+        raise WorkerError(f'deteval predict 没有写出 {name}.json')
+    pred_bytes = pred.read_bytes()  # what is uploaded: read before anything else runs
+    _readable(folder / 'preds')
+    # evaluate reads the worker's copy of the predictions and writes into a folder of its own
+    _model_run(run, model, written[1], conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets),
+                                                 '--preds', str(pred), '--out', str(written[1] / 'out'),
+                                                 '--conf-set', 'eval'), 'deteval evaluate')
     results = folder / 'results'
-    code = run.run(model.argv(conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets), '--preds',
-                                        str(folder / 'preds' / f'{name}.json'), '--out', str(results),
-                                        '--conf-set', 'eval'), env), cwd=str(folder))
-    if code != 0:
-        raise WorkerError(f'deteval evaluate 没有成功（返回 {code}），原因见日志')
+    take_output(written[1] / 'out', results, model.owner())
     run.check()
     try:
         metrics = deteval_metrics(results, name, ops)
         info = ops._read_json_object(results / 'run_info.json', 'aoi-deteval 的 run_info', [])
         data = json.dumps(metrics, ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
-        rows = [['metrics.json', run.api.put_bytes(data), len(data)]]
-        items = ops._folder_files(results, 'files/') + [
-            ('files/eval_sets.yaml', sets), (f'files/preds/{name}.json', folder / 'preds' / f'{name}.json')]
+        rows = [['metrics.json', run.api.put_bytes(data), len(data)],
+                [f'files/preds/{name}.json', run.api.put_bytes(pred_bytes), len(pred_bytes)]]
+        items = ops._folder_files(results, 'files/') + [('files/eval_sets.yaml', sets)]
         rows += ops._send_files(run.api, items, 4, run.log)
     except ops.FwError as e:
         raise WorkerError(str(e)) from None

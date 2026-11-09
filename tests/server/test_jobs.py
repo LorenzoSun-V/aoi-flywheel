@@ -791,7 +791,6 @@ def test_model_code_cannot_read_the_workers_files_and_is_killed_on_cancel(
         api, make_worker, fake_conda, monkeypatch):
     import tempfile
     model = model_account()
-    model.check()
     shared = Path(tempfile.mkdtemp(prefix='fw-runas-', dir='/tmp'))
     try:
         shared.chmod(0o755)
@@ -859,3 +858,99 @@ def test_the_worker_rides_out_a_platform_restart(api, make_worker, fake_conda):
     assert worker.run_worker(Flaky(), said.append, poll=0.1, once=True) == 1
     assert api.job(job['id'])['status'] == 'done' and api.job(job['id'])['attempts'] == 1
     assert any('连不上平台' in x for x in said) and said[-1] == f'任务 {job["id"]}：完成'
+
+
+def test_nothing_a_model_command_leaves_reaches_the_next_one(tmp_path):
+    """A model's command puts a .pth into its user site-packages (Python runs it at every start): the next
+    command has a new HOME and does not run it. Persistence in the account's own home is refused by check."""
+    import tempfile
+    model = model_account()
+    if shutil.which('python3') is None:
+        pytest.skip('needs python3')
+    shared = Path(tempfile.mkdtemp(prefix='fw-runas-', dir='/tmp'))
+    try:
+        shared.chmod(0o755)
+
+        def command(name, code):
+            base = shared / name
+            base.mkdir()
+            for sub in ('home', 'tmp', 'out'):
+                (base / sub).mkdir()
+                (base / sub).chmod(0o777)
+            r = subprocess.run(model.argv(['python3', '-c', code], model.command_env(base)), capture_output=True,
+                               timeout=60, cwd=base)
+            return r.stdout.decode() + r.stderr.decode()
+
+        plant = ('import os, site; d = site.getusersitepackages(); os.makedirs(d, exist_ok=True); '
+                 'open(os.path.join(d, "evil.pth"), "w").write("import sys; print(\'PLANTED\')\\n"); print(d)')
+        out_a = command('a', plant)
+        assert '/a/home/' in out_a  # the user site of this command is in its own new HOME
+        out_b = command('b', 'print("metrics")')
+        assert 'metrics' in out_b and 'PLANTED' not in out_b
+    finally:
+        subprocess.run(['sudo', '-n', 'rm', '-rf', str(shared)], capture_output=True)
+
+
+def test_check_refuses_an_account_that_can_reach_what_the_worker_runs(fake_conda, tmp_path, monkeypatch):
+    import tempfile
+    model = model_account()
+    shared = Path(tempfile.mkdtemp(prefix='fw-runas-', dir='/tmp'))
+    try:
+        shared.chmod(0o755)
+        env = shared / 'envs' / 'gpu-env'
+        (env / 'bin').mkdir(parents=True)
+        (env / 'lib').mkdir()
+        for d in (shared / 'envs', env, env / 'bin', env / 'lib'):
+            d.chmod(0o755)
+        conda = shared / 'conda'
+        conda.write_text(f'#!/bin/sh\necho \'{{"envs": ["{shared}/envs/base", "{env}"]}}\'\n')
+        conda.chmod(0o755)
+        monkeypatch.setenv('FW_CONDA', str(conda))
+        config = shared / 'config.json'
+        config.write_text('{"token": "x"}')
+        config.chmod(0o600)
+        monkeypatch.setenv('FW_CONFIG', str(config))
+        work = shared / 'jobs'
+        work.mkdir()
+        work.chmod(0o711)
+        model.check('gpu-env', '', work)  # all fine
+        for change, undo, why in ((lambda: config.chmod(0o644), lambda: config.chmod(0o600), 'worker 的配置'),
+                                  (lambda: (env / 'lib').chmod(0o777), lambda: (env / 'lib').chmod(0o755), '能写'),
+                                  (lambda: work.chmod(0o700), lambda: work.chmod(0o711), '进不了任务目录')):
+            change()
+            with pytest.raises(worker.WorkerError, match=why):
+                model.check('gpu-env', '', work)
+            undo()
+    finally:
+        shutil.rmtree(shared, ignore_errors=True)
+
+
+def test_what_a_model_command_wrote_is_taken_only_as_its_own_plain_files(tmp_path):
+    """A symbolic link (or a hard link) to the worker's token among the outputs: nothing is taken."""
+    import tempfile
+    model = model_account()
+    shared = Path(tempfile.mkdtemp(prefix='fw-runas-', dir='/tmp'))
+    try:
+        shared.chmod(0o755)
+        secret = shared / 'config.json'
+        secret.write_text('{"token": "worker-secret"}')
+        secret.chmod(0o644)  # even a file it can read is not taken: only its own files are
+        out = shared / 'out'
+        out.mkdir()
+        out.chmod(0o777)
+
+        def as_model(script):
+            return subprocess.run(model.argv(['/bin/sh', '-c', script]), capture_output=True, timeout=60).returncode
+
+        assert as_model(f'mkdir {out}/sub && echo ok > {out}/sub/a.json && echo ok > {out}/b.json') == 0
+        worker.take_output(out, shared / 'taken', model.owner())
+        assert (shared / 'taken' / 'sub' / 'a.json').read_text() == 'ok\n'
+        assert as_model(f'ln -s {secret} {out}/pred.json') == 0
+        with pytest.raises(worker.WorkerError, match='链接'):
+            worker.take_output(out, shared / 'taken2', model.owner())
+        assert as_model(f'rm {out}/pred.json') == 0
+        if as_model(f'ln {secret} {out}/hard.json') == 0:  # fs.protected_hardlinks=0 lets it
+            with pytest.raises(worker.WorkerError, match='不是它自己的普通文件'):
+                worker.take_output(out, shared / 'taken3', model.owner())
+    finally:
+        subprocess.run(['sudo', '-n', 'rm', '-rf', str(shared)], capture_output=True)
