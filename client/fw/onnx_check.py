@@ -8,7 +8,7 @@ is refused, before registering and again before an engine is built.
 
 This walks the protobuf by hand (no onnx package needed) through every place a TensorProto can be: the graph's
 initializers and sparse initializers, node attributes (tensor, tensors, sparse tensors, subgraphs of If/Loop/Scan),
-functions, training info. Tensor data (raw_data and the like) is skipped, not read.
+functions (their nodes and attribute defaults), training info. Tensor data (raw_data and the like) is skipped, not read.
 """
 import mmap
 from pathlib import Path
@@ -65,7 +65,7 @@ def _fields(buf, start: int, end: int) -> Iterator[Tuple[int, int, int, int]]:
 _HOLDS = {
     'model': {7: 'graph', 20: 'training', 25: 'function'},
     'training': {1: 'graph', 2: 'graph'},
-    'function': {7: 'node'},
+    'function': {7: 'node', 11: 'attribute'},  # nodes, and attribute defaults (attribute_proto)
     'graph': {1: 'node', 5: 'tensor', 15: 'sparse'},
     'node': {5: 'attribute'},
     'attribute': {5: 'tensor', 6: 'graph', 10: 'tensor', 11: 'graph', 22: 'sparse', 23: 'sparse'},

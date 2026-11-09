@@ -32,6 +32,9 @@ def test_in_functions_and_training_info():
     function = ld(7, ld(5, ld(1, b'value') + ld(5, tensor('f', EXTERNAL))))
     assert external_tensors(vi(1, 8) + ld(25, function)) == ['f']
     assert external_tensors(vi(1, 8) + ld(20, ld(1, ld(5, tensor('t', EXTERNAL))))) == ['t']
+    # review of PR #13 round 5: a local function's attribute default (FunctionProto.attribute_proto, 11)
+    default = ld(11, ld(1, b'value') + ld(5, tensor('d', LOCATION)))
+    assert external_tensors(vi(1, 8) + ld(25, ld(1, b'f') + default)) == ['d']
 
 
 @pytest.mark.parametrize('data', [b'', b'\x08', b'\x08\x07\x3a\x10abc', b'\x08\x07\x0f'])
