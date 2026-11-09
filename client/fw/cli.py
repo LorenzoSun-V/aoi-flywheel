@@ -328,6 +328,33 @@ def cmd_eval_register(args, api: Api) -> None:
                       tool_version=args.tool_version, note=args.note, workers=args.workers)
 
 
+def cmd_eval_run(args, api: Api) -> int:
+    params = {'model': args.model, 'data': args.data, 'dirs': args.dirs or []}
+    if args.imgsz:
+        params['imgsz'] = args.imgsz
+    if args.batch:
+        params['batch'] = args.batch
+    job = api.submit_job('eval', runner=args.runner, params=params)
+    p = job['params']
+    where = p['data']['ref'] + (f':{p["data"]["split"]}' if p['data']['split'] else '')
+    print(f'已提交评估任务 {job["id"]}：{p["model"]["ref"]} 在 {where}'
+          + (f' 的 {"、".join(p["data"]["dirs"])}' if p['data']['dirs'] else '')
+          + f' 上，{p["data"]["images"]} 张图，推理环境 {job["runner"]}；前面还有 {job["queued_ahead"]} 个任务')
+    for w in p['warnings']:
+        print(f'  注意：{w}')
+    if not args.wait:
+        print(f'看进度：fw job log -f {job["id"]}；结果：fw job show {job["id"]}')
+        return 0
+    args.id, args.attempt, args.follow = job['id'], 0, True
+    cmd_job_log(args, api)
+    j = api.job(job['id'])
+    if j['status'] != 'done':
+        print(f'评估任务{j["status_text"]}' + (f'：{j["error"]}' if j['error'] else ''))
+        return 1
+    print(f'已登记评估报告 #{j["result"]["eval_id"]}：fw eval show {j["result"]["eval_id"]}')
+    return 0
+
+
 def cmd_eval_list(args, api: Api) -> None:
     rows = api.evals(args.model or '')
     if not rows:
@@ -341,9 +368,12 @@ def cmd_eval_list(args, api: Api) -> None:
 
 def cmd_eval_show(args, api: Api) -> None:
     e = api.eval(int(args.id.lstrip('#')))
-    print(f'评估报告 #{e["id"]}：{e["model_version"]["ref"]} 在 {e["testset"]["ref"]} 上'
+    print(f'评估报告 #{e["id"]}：{e["model_version"]["ref"]} 在 {e["testset"]["ref"]}'
+          + (f' 的 {"、".join(e["dirs"])}' if e.get('dirs') else '') + ' 上'
           + (f'，{e["tool"]} {e["tool_version"]}' if e['tool'] else '')
           + f'，{e["created_by"]} 登记于 {_when(e["created_at"])}')
+    if e.get('job_id'):
+        print(f'由评估任务 {e["job_id"]} 在推理环境 {e["runner"]} 里算出')
     if e['note']:
         print(f'备注：{e["note"]}')
     print(f'文件（{e["file_count"]} 个，{ops.size_text(e["total_bytes"])}）：')
@@ -356,11 +386,12 @@ def cmd_eval_show(args, api: Api) -> None:
 def _runner_text(r: dict) -> str:
     src = (f'{r["src_dir"]} @ {r["src_commit"][:12]}{"（有未提交的改动）" if r["src_dirty"] else ""}'
            if r['src_dir'] else '（没登记源码）')
-    return f'conda 环境 {r["conda_env"]}（包清单 {r["env_sha256"][:12]}），源码 {src}'
+    return (f'conda 环境 {r["conda_env"]}（包清单 {r["env_sha256"][:12]}），源码 {src}'
+            + (f'，框架 {r["framework"]}' if r.get('framework') else '，没写框架（只能做检查，不能评估）'))
 
 
 def cmd_runner_register(args, api: Api) -> None:
-    r = worker.register_runner(api, args.name, args.env, args.src or '')
+    r = worker.register_runner(api, args.name, args.env, args.src or '', args.framework or '')
     if r['created']:
         print(f'已登记 {r["ref"]}（在 {r["worker"]} 上）：{_runner_text(r)}')
     else:
@@ -419,6 +450,10 @@ def _print_job(j: dict) -> None:
         if j['kind'] == 'check':
             r = j['result']
             print('结果：包清单' + ('没变' if r['same_env'] else '变了') + '，源码' + ('没变' if r['same_src'] else '变了'))
+        elif j['kind'] == 'eval':
+            m = j['result']['metrics']
+            print(f'结果：评估报告 #{j["result"]["eval_id"]}（fw eval show {j["result"]["eval_id"]}），'
+                  f'{m.get("images")} 张图，mAP50 {m.get("mAP50")}，mAP50-95 {m.get("mAP50-95")}')
         else:
             print(f'结果：{j["result"]}')
 
@@ -632,8 +667,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--check', action='store_true', help='同时核对链上每个文件都还在文件库里')
     s.set_defaults(func=cmd_model_chain)
 
-    ev = sub.add_parser('eval', help='评估报告：register、list、show').add_subparsers(
+    ev = sub.add_parser('eval', help='评估：run、register、list、show').add_subparsers(
         dest='action', required=True, metavar='操作')
+    s = ev.add_parser('run', help='排一个评估任务：GPU 机在推理环境里跑 aoi-deteval，结果自动登记成评估报告')
+    s.add_argument('model', help='模型版本，例如 SES-TX-detr@3（要登记过权重）')
+    s.add_argument('--data', required=True,
+                   help='在哪个数据集版本上评，例如 SES-TX@5；训练集快照写划分，例如 SES-TX-det@2:test')
+    s.add_argument('--dirs', nargs='+', metavar='目录',
+                   help='只评版本里的这几个目录（包括下面的子目录），例如 SES/TX/test_1015；不写就是整个版本')
+    s.add_argument('--runner', required=True, help='推理环境，例如 detr-pro 或 detr-pro@2（fw runner list 看有哪些）')
+    s.add_argument('--imgsz', type=int, help='推理尺寸（RF-DETR 以训练分辨率为准，不用写）')
+    s.add_argument('--batch', type=int, help='批量（RF-DETR 默认逐张，和部署一致）')
+    s.add_argument('--wait', action='store_true', help='等任务跑完，跟着显示输出')
+    s.set_defaults(func=cmd_eval_run)
     s = ev.add_parser('register', help='登记一个模型版本在测试集上的评估结果')
     s.add_argument('model', help='模型版本，例如 SES-TX-detr@3')
     s.add_argument('--testset', required=True,
@@ -690,6 +736,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('name', help='推理环境名，例如 yolo26、detr-pro')
     s.add_argument('--env', required=True, help='conda 环境名')
     s.add_argument('--src', help='框架源码目录（git 仓库）；用 pip 装的官方版框架就不写')
+    s.add_argument('--framework', choices=['ultralytics', 'rfdetr'],
+                   help='aoi-deteval 用哪个框架推理；评估用的环境要写，环境里要装好 aoi-deteval')
     s.set_defaults(func=cmd_runner_register)
     s = rn.add_parser('list', help='列出推理环境（每个的最新版本）')
     s.set_defaults(func=cmd_runner_list)

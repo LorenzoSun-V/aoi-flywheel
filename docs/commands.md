@@ -338,6 +338,33 @@ fw model chain SES-TX-detr@3           # 从一个模型版本查起
 
 `--check` 顺便核对链上每个文件都还在文件库里、大小对（模型文件、评估报告的文件、快照和数据池版本的每个文件）；有问题时列出来，退出码 1。重算哈希用 `fw-server verify --rehash`。
 
+### fw eval run
+
+```
+fw eval run SES-TX-detr@3 --data SES-TX@5 --dirs SES/TX/test_1015 SES/TX/test_1016 --runner detr-pro
+fw eval run SES-TX-detr@3 --data SES-TX-det@2:test --runner detr-pro --wait
+```
+
+排一个评估任务：推理环境所在的 GPU 机用模型版本登记的权重（`weights/`），在那个 conda 环境里跑 `deteval predict` 和 `deteval evaluate`，结果自动登记成评估报告（`fw eval show` 看）。指标以平台用 aoi-deteval 算的为准。
+
+| 选项 | 说明 |
+|---|---|
+| `模型版本` | 例如 `SES-TX-detr@3`；只写名称就是最新版，提交时定下。要登记过权重（`fw model register --weights`）；RF-DETR 登记时用 `--file training_config.json` 带上训练配置，worker 把它放在权重旁边，aoi-deteval 从里面读训练分辨率 |
+| `--data` | 在哪个版本上评。数据集版本（数据池、测试集）直接写，例如 `SES-TX@5`；训练集快照写划分，例如 `SES-TX-det@2:test` |
+| `--dirs` | 只评数据集版本里的这几个目录（连同下面所有子目录），写版本里的相对路径；不写就是整个版本。快照按划分评，不用写 |
+| `--runner` | 推理环境，例如 `detr-pro` 或 `detr-pro@2`；登记时要写了 `--framework`，环境里要装好 aoi-deteval |
+| `--imgsz` | 推理尺寸（ultralytics 用；RF-DETR 以训练分辨率为准） |
+| `--batch` | 批量（RF-DETR 默认逐张，和部署一致） |
+| `--wait` | 等任务跑完，跟着显示输出，最后给出评估报告编号 |
+
+- 读哪些标注：快照用它的 YOLO 标注，类别编号就是快照的类别表，也就是模型的。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表；没有标注的图算正常图（没有缺陷）。只有 YOLO txt 的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
+- 提交时就定下要评哪些图：图片清单存进文件库，任务重试、版本以后再变都还是这些图。评完的张数和清单对不上（有图没读到），不登记，任务算失败。
+- 选的图里有和模型训练集快照 train、val 里内容相同的图（按文件哈希，不看路径），提交时提醒，并写进报告的备注：这些图的成绩会偏好。
+- worker 先核对推理环境还是登记时那样（包清单、源码），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
+- aoi-deteval 一个集合只读一层目录，按文件名对应预测和真值，所以 worker 把每个有图的目录作为一个集合（`d1`、`d2`…），再把它们合成一组 `eval`；登记的指标是 `eval` 这一组的（只有一个目录时就是那个目录）。工作点阈值（f1 等）也是在这一组上定的，看 mAP 不受影响，看阈值类指标时要知道这一点。
+- 报告的文件：`metrics.json`，`files/` 下是 aoi-deteval 的整个输出目录、用的集合配置（`eval_sets.yaml`）和预测 JSON（`preds/`）。`fw eval show` 会写明是哪个评估任务、哪个推理环境算的。
+- 取消、租约失效的评估不登记报告。
+
 ### fw eval register、list、show
 
 ```
@@ -400,7 +427,7 @@ fw release show SES-TX-r3                  # 这次发布和它的追溯链
 推理环境就是 GPU 机上搭好的 conda 环境，一个框架一个（例如 `yolo26`、`detr-pro`）。平台只做 TensorRT 推理，推理环境都在 NVIDIA GPU 机上。评估、推理任务（第三步后面几个 PR）在模型登记的推理环境里跑。
 
 ```
-fw runner register detr-pro --env detr-pro --src ~/code/rf-detr-pro    # 在 GPU 机上，用 worker 账号
+fw runner register detr-pro --env detr-pro --src ~/code/rf-detr-pro --framework rfdetr   # 在 GPU 机上，用 worker 账号
 fw runner list
 fw runner show detr-pro
 fw runner check detr-pro                                              # 算法工程师：提交一个检查任务
@@ -410,7 +437,8 @@ fw runner check detr-pro                                              # 算法�
 |---|---|
 | `名称` | 推理环境名：字母、数字和 `. _ -`，全平台唯一 |
 | `--env` | conda 环境名 |
-| `--src` | 框架源码目录（git 仓库），团队改过框架时写；用 pip 装的官方版就不写 |
+| `--src` | 框架源码目录（git 仓库），团队改过框架时写；用 pip 装的官方版就不写。评估时传给 `deteval predict --src` |
+| `--framework` | `ultralytics` 或 `rfdetr`：aoi-deteval 用哪个框架推理。要用来评估的环境必须写，环境里要装好 aoi-deteval；改了也是新版本 |
 
 - 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
 - 用 `pip install -e` 装的包，pip 的清单只记它的位置，不记它的代码；这样装的框架源码用 `--src` 登记，改动才看得出来。
@@ -673,6 +701,8 @@ FW_SERVER=http://<平台>:8000 FW_TOKEN=<凭据> python tools/bench.py --pairs 1
 | `FW_CONFIG` | 设置文件的位置 |
 | `FW_CACHE` | 本机缓存的位置 |
 | `FW_CONDA` | `fw runner`、`fw worker` 用的 conda 可执行文件；不设就找 PATH 里的 `conda`，再找 `CONDA_EXE` |
+| `FW_WORK_DIR` | `fw worker` 摆放任务文件（权重、图片、输出）的目录，默认是缓存目录下的 `jobs/`；每个任务一个子目录，跑完删掉 |
+| `FW_KEEP_WORK` | 设了（例如 `1`）就不删跑完的任务目录，查问题时用 |
 
 默认位置：
 

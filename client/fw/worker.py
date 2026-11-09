@@ -134,13 +134,15 @@ def source_info(src_dir: str) -> Dict[str, object]:
             'src_state_sha256': state}
 
 
-def register_runner(api: Api, name: str, env: str, src_dir: str = '') -> dict:
+def register_runner(api: Api, name: str, env: str, src_dir: str = '', framework: str = '') -> dict:
     """Run on the GPU machine with its worker account: records the environment's package listing (uploaded to
-    the store, so a later change can be compared) and the source commit as the runner's next version."""
+    the store, so a later change can be compared), the source commit and the aoi-deteval framework adapter
+    (ultralytics, rfdetr; '' = the runner is not used for evaluations) as the runner's next version."""
     listing = conda_listing(env)
     digest = api.put_bytes(listing)  # the platform makes it durable before it records the runner
     src = source_info(src_dir)
-    return api.register_runner({'name': name, 'conda_env': env, 'env_sha256': digest, **src})
+    return api.register_runner({'name': name, 'conda_env': env, 'env_sha256': digest, 'framework': framework,
+                                **src})
 
 
 class JobRun:
@@ -317,8 +319,17 @@ class JobRun:
             self._send_log()
             if self.lost.is_set():
                 return 'lost'
-            self.api.finish(self.id, self.token, outcome, result if outcome == 'done' else None,
-                            error if outcome == 'failed' else '')
+            try:
+                self.api.finish(self.id, self.token, outcome, result if outcome == 'done' else None,
+                                error if outcome == 'failed' else '')
+            except ApiError as e:
+                if outcome != 'done' or e.status != 400:
+                    raise
+                # the platform refused the result (e.g. the report does not add up): the job failed, and why
+                outcome = 'failed'
+                self.log(f'失败：平台没有收下结果：{e.message}')
+                self._send_log()
+                self.api.finish(self.id, self.token, 'failed', None, f'平台没有收下结果：{e.message}')
         except ApiError as e:
             if e.status == 409:
                 self.echo(f'任务 {self.id} 的租约已失效，结果没交上：{e.message}')
@@ -361,9 +372,9 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 # --- job kinds ----------------------------------------------------------------------------------------
-def check_runner(run: JobRun) -> dict:
+def check_runner(run: JobRun, p: Optional[dict] = None) -> dict:
     """Is the runner on this machine still what was registered? Compares the package listing and the source."""
-    p = run.job['params']
+    p = p if p is not None else run.job['params']
     run.log(f'检查 conda 环境 {p["conda_env"]}')
     listing = conda_listing(p['conda_env'], run.capture)
     digest = hashlib.sha256(listing).hexdigest()
@@ -381,8 +392,124 @@ def check_runner(run: JobRun) -> dict:
             'src_state_sha256': src['src_state_sha256'], 'same_env': same_env, 'same_src': same_src}
 
 
+def work_dir() -> Path:
+    """Where jobs lay out their files: FW_WORK_DIR, else jobs/ in the fw cache folder (the same disk as the cache,
+    so laying out can use reflinks)."""
+    if os.environ.get('FW_WORK_DIR'):
+        return Path(os.environ['FW_WORK_DIR'])
+    from .config import cache_dir
+    return cache_dir() / 'jobs'
+
+
+def conda_run(env: str, *argv: str) -> List[str]:
+    return [conda_executable(), 'run', '-n', env, '--no-capture-output', *argv]
+
+
+def deteval_sets(data: Path, images: List[str], classes: List[str], imgsz: Optional[int]) -> dict:
+    """The aoi-deteval sets config: one set per folder that holds images (deteval reads a set's folder without
+    going into the folders below it, and tells images apart by file name), and the group 'eval' of all of them;
+    with one folder, that folder is the set 'eval'. JSON, which YAML reads as it is."""
+    folders = sorted({str(Path(p).parent.as_posix()) for p in images})
+    if len(folders) == 1:
+        sets = {'eval': str(data / folders[0])}
+        groups = {}
+    else:
+        width = len(str(len(folders)))
+        sets = {f'd{i + 1:0{width}d}': str(data / f) for i, f in enumerate(folders)}
+        groups = {'eval': list(sets)}
+    cfg = {'root': str(data), 'names': list(classes), 'sets': sets}
+    if groups:
+        cfg['groups'] = groups
+    if imgsz:
+        cfg['imgsz'] = imgsz
+    return cfg
+
+
+def eval_model(run: JobRun) -> dict:
+    """Evaluate a model version: check the runner is what was registered, lay out the weights and the test
+    images, run deteval predict and deteval evaluate in the runner's conda environment, upload the output
+    and hand it to the platform, which registers the evaluation report."""
+    import json
+    from . import ops
+    from .cache import Cache
+    from .contract import IMAGE_EXTS, parse_manifest
+
+    p = run.job['params']
+    runner, deteval = p['runner'], p['deteval']
+    now = check_runner(run, runner)
+    if not now['same_env'] or not now['same_src']:
+        raise WorkerError('推理环境和登记时不一样了（见上面），没有评估；确认没问题后在这台机器上重新 fw runner register，'
+                          '再提交评估')
+    run.check()
+    folder = work_dir() / f'job-{run.id}-{run.job["attempt"]}'
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True)
+    cache = Cache()
+    try:
+        weights = [(path, d, s) for path, d, s in p['model']['files'] if path.startswith('weights/')][0]
+        model_files = [(Path(path).name, d, s) for path, d, s in p['model']['files']]
+        ops._lay_out(run.api, cache, p['model']['ref'], model_files, folder / 'model', 'auto', 4, run.log)
+        run.check()
+        entries = parse_manifest(run.api.read_object(p['data']['inputs_sha256']))
+        images = [e[0] for e in entries if Path(e[0]).suffix.lower() in IMAGE_EXTS]
+        if len(images) != p['data']['images']:
+            raise WorkerError(f'输入清单里有 {len(images)} 张图，提交时是 {p["data"]["images"]} 张')
+        ops._lay_out(run.api, cache, p['data']['ref'], entries, folder / 'data', 'auto', 8, run.log)
+        run.check()
+    finally:
+        cache.close()
+    cfg = deteval_sets(folder / 'data', images, p['model']['classes'], deteval.get('imgsz'))
+    sets = folder / 'eval_sets.yaml'
+    sets.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    env = dict(os.environ, PYTHONUNBUFFERED='1')
+    name = deteval['name']
+    argv = ['deteval', 'predict', '--sets', str(sets), '--weights', str(folder / 'model' / Path(weights[0]).name),
+            '--name', name, '--framework', runner['framework'], '--out', str(folder / 'preds')]
+    if runner['src_dir']:
+        argv += ['--src', runner['src_dir']]
+    if deteval.get('batch'):
+        argv += ['--batch', str(deteval['batch'])]
+    code = run.run(conda_run(runner['conda_env'], *argv), cwd=str(folder), env=env)
+    if code != 0:
+        raise WorkerError(f'deteval predict 没有成功（返回 {code}），原因见日志')
+    results = folder / 'results'
+    code = run.run(conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets), '--preds',
+                             str(folder / 'preds' / f'{name}.json'), '--out', str(results), '--conf-set', 'eval'),
+                   cwd=str(folder), env=env)
+    if code != 0:
+        raise WorkerError(f'deteval evaluate 没有成功（返回 {code}），原因见日志')
+    run.check()
+    try:
+        metrics = deteval_metrics(results, name, ops)
+        info = ops._read_json_object(results / 'run_info.json', 'aoi-deteval 的 run_info', [])
+        data = json.dumps(metrics, ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
+        rows = [['metrics.json', run.api.put_bytes(data), len(data)]]
+        items = ops._folder_files(results, 'files/') + [
+            ('files/eval_sets.yaml', sets), (f'files/preds/{name}.json', folder / 'preds' / f'{name}.json')]
+        rows += ops._send_files(run.api, items, 4, run.log)
+    except ops.FwError as e:
+        raise WorkerError(str(e)) from None
+    run.log(f'评了 {metrics.get("images")} 张图，mAP50 {metrics.get("mAP50")}，mAP50-95 {metrics.get("mAP50-95")}')
+    if not os.environ.get('FW_KEEP_WORK'):
+        shutil.rmtree(folder, ignore_errors=True)
+    return {'files': rows, 'tool_version': str(info.get('deteval_version', ''))}
+
+
+def deteval_metrics(results: Path, name: str, ops) -> dict:
+    """The result of the set (or group) 'eval' for this model, with the model's thresholds and settings."""
+    undefined: List[str] = []
+    summary = ops._read_json_object(results / 'summary.json', 'aoi-deteval 的结果', undefined)
+    model = summary.get(name)
+    if not isinstance(model, dict) or not isinstance(model.get('eval'), dict):
+        raise WorkerError(f'aoi-deteval 的结果里没有模型 {name} 在 eval 上的指标')
+    metrics = {k: model[k] for k in ops.DETEVAL_META if k in model}
+    metrics.update(model['eval'])
+    return metrics
+
+
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}
-HANDLERS: Dict[str, Callable[[JobRun], dict]] = {'check': check_runner}
+HANDLERS: Dict[str, Callable[[JobRun], dict]] = {'check': check_runner, 'eval': eval_model}
 
 
 def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,

@@ -4,6 +4,13 @@
 
 第三步之一：任务队列和 GPU worker。后面的评估、预标注、引擎构建都是在这上面排队的任务。
 
+第三步之二：统一评估。
+
+- `fw eval run <模型版本> --data <数据集版本 | 快照:划分> [--dirs <目录…>] --runner <推理环境>`：GPU 机在推理环境里用模型版本的权重跑 `deteval predict` 和 `deteval evaluate`，结果自动登记成评估报告，报告记下评估任务、推理环境和评了哪些目录。`--wait` 跟到跑完。
+- 提交时定下评哪些图（清单存进文件库）。数据集版本读图旁边的 JSON 标注（按类别名），快照读它的 YOLO 标注；只有 YOLO txt 的图不收，先建快照。选的图和模型训练集 train、val 里的图内容相同时提醒，并写进报告备注。
+- 推理环境登记时加 `--framework ultralytics|rfdetr`（aoi-deteval 用哪个框架推理）；评估前 worker 核对环境和源码没变。
+- 数据库迁移 0006（推理环境的框架、评估任务、评估报告的目录和任务）。
+
 - 新角色 `worker`（GPU worker）：每台 GPU 机一个账号，`fw-server user add gpu-01 --role worker`。
 - 推理环境：`fw runner register <名称> --env <conda 环境> [--src <框架源码>]` 在 GPU 机上登记，记下 `conda list --explicit` 的包清单（传到平台）和源码的 git 提交号；变了再登记就是新版本。`fw runner list`、`show`；`fw runner check` 提交一个任务，在那台机器上检查环境和源码有没有变。
 - 任务队列：`fw job list`、`show`、`log [-f]`、`cancel`。任务按提交顺序排队，只发给推理环境所在的机器。
