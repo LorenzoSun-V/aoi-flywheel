@@ -1105,7 +1105,8 @@ def get_predictions(api: Api, cache: Cache, set_id: int, dest, threshold: Option
                     replace: bool = False, link: str = 'auto', workers: int = 8, echo: Echo = print) -> dict:
     """Lay out the images of a prediction set in an empty folder, with a LiteAnno label next to each image that
     has boxes scoring at least threshold (default 0.3; not below the set's conf, which is what was kept). An
-    image that already has a JSON label in the version keeps it (laid out as it is) unless replace. classes.txt
+    image that already has a JSON label in the version keeps it (laid out as it is) unless replace; with replace,
+    its label still stays when the model has no box above the threshold for it. classes.txt
     (the model's class table) is written at the top unless the version has one there."""
     _check_link(link)
     s = api.prediction_set(set_id)
@@ -1130,26 +1131,34 @@ def get_predictions(api: Api, cache: Cache, set_id: int, dest, threshold: Option
     if missing:
         raise FwError(f'{version["ref"]} 里没有预测集的图 {missing[0]}')
     laid = [by_path[p] for p in images]
-    kept = []
-    for p in images:
+    existing = {}
+    for p in images:  # every existing label is laid out: with replace, it stays where no pre-label is written
         label = labels.get(os.path.splitext(p)[0])
-        if label is not None and not replace:
+        if label is not None:
             laid.append(label)
-            kept.append(p)
+            existing[p] = label[0]
     dest = Path(dest)
     _lay_out(api, cache, version['ref'], laid, dest, link, workers, echo)
     source = {'prediction_set': s['id'], 'model': s['model_version']['ref'], 'runner': s['runner'],
               'threshold': threshold}
-    kept_set = set(kept)
-    written = boxes = 0
+    written = boxes = replaced = 0
+    kept = []
     for p in images:
-        if p in kept_set:
+        if p in existing and not replace:
+            kept.append(p)
             continue
         row = doc['images'][p]
         label = prelabel_json(PurePosixPath(p).name, row['size'], row['boxes'], classes, threshold, source)
         if label is None:
+            if p in existing:
+                kept.append(p)  # nothing above the threshold: the person's label is not dropped
             continue
         target = _local(dest, os.path.splitext(p)[0] + '.json')
+        if p in existing:
+            replaced += 1
+            # removed, not written over: laid out with --link hardlink it is the cache's own file (and x.JSON
+            # would otherwise stay next to the new x.json)
+            remove_file(_local(dest, existing[p]))
         with open(target, 'w', encoding='utf-8', newline='\n') as f:
             f.write(json.dumps(label, ensure_ascii=False, indent=2))
         written += 1
@@ -1158,10 +1167,13 @@ def get_predictions(api: Api, cache: Cache, set_id: int, dest, threshold: Option
         with open(dest / 'classes.txt', 'w', encoding='utf-8', newline='\n') as f:
             f.write(''.join(c + '\n' for c in classes))
     echo(f'{len(images)} 张图：{written} 张写了预标注（{boxes} 个框，分数不低于 {threshold:g}，未确认）'
-         + (f'，{len(kept)} 张已有标注、保留原样（要覆盖就加 --replace）' if kept else '')
+         + (f'，其中 {replaced} 张换掉了原来的标注' if replaced else '')
+         + (f'，{len(kept)} 张保留原来的标注' + ('（这些图没有够阈值的框）' if replace else '（要覆盖就加 --replace）')
+            if kept else '')
          + f'，{len(images) - written - len(kept)} 张没有框')
     echo(f'用 LiteAnno 打开 {dest} 就能改')
-    return {'path': str(dest), 'images': len(images), 'prelabeled': written, 'boxes': boxes, 'kept': len(kept)}
+    return {'path': str(dest), 'images': len(images), 'prelabeled': written, 'boxes': boxes, 'kept': len(kept),
+            'replaced': replaced}
 
 
 def flatten_metrics(doc: dict, prefix: str = '') -> List[Tuple[str, float]]:

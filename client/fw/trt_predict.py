@@ -9,7 +9,8 @@ it imports only what that environment has (OpenCV and the deploy code's inferenc
 
 The predictions file is aoi-deteval's (schema_version 1): {"sets": {set: {image file name: [[x1, y1, x2, y2,
 score, class], ...]}}}, with every image of every set present (an image without boxes has []). Classes the
-engine has beyond the model's class table (--nc) are left out and counted; --stats gets the counts
+engine has beyond the model's class table (--nc) are left out and counted, boxes scoring below --conf left out
+(whatever threshold the deploy code applies itself); --stats gets the counts
 ({"images", "boxes", "dropped"}), --sizes the size of every image ({set: {image file name: [width, height]}}).
 Exit status 3: the engine could not be loaded (fw worker builds it again once).
 """
@@ -68,6 +69,8 @@ def main(argv=None) -> int:
                 kept = []
                 for x1, y1, x2, y2, score, cls in detect(image):
                     cls = int(cls)
+                    if float(score) < args.conf:  # the deploy code's own threshold need not be exactly >=
+                        continue
                     if not 0 <= cls < args.nc:
                         dropped += 1
                         continue

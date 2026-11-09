@@ -26,7 +26,7 @@ from .store import Store, StoreError
 
 DEFAULT_CONF = 0.1
 PREDICTIONS, ENGINE = 'predictions.json', 'engine.json'
-MAX_PREDICTIONS = 1 << 30
+MAX_PREDICTIONS = 256 << 20  # parsed whole while the job row is held
 _SET = """
 SELECT p.id, p.model_version_id, m.name AS model, mv.number AS model_number, p.dataset_version_id,
        d.name AS dataset, v.number AS dataset_number, p.dirs, encode(p.inputs_sha256, 'hex') AS inputs_sha256,
@@ -124,7 +124,8 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     with conn.transaction():
         conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))', (key,))
         same = conn.execute("SELECT id FROM jobs WHERE kind = 'predict' AND params->>'key' = %s "
-                            "AND status IN ('queued', 'running', 'done') ORDER BY id DESC LIMIT 1",
+                            "AND status IN ('queued', 'running', 'done') AND NOT cancel_requested "
+                            'ORDER BY id DESC LIMIT 1',
                             (key,)).fetchone()
         if same:
             return dict(jobs.get_job(conn, same['id']), reused=True)

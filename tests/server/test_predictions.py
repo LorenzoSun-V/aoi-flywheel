@@ -60,7 +60,8 @@ def test_pre_labels_from_a_prediction_set(api, gpu, setup, tmp_path):  # noqa: F
     assert [x['id'] for x in api.prediction_sets(mv['model'])] == [s['id']]
 
     out = get(api, s['id'], tmp_path / 'out')
-    assert out == {'path': str(tmp_path / 'out'), 'images': 4, 'prelabeled': 2, 'boxes': 2, 'kept': 2}
+    assert out == {'path': str(tmp_path / 'out'), 'images': 4, 'prelabeled': 2, 'boxes': 2, 'kept': 2,
+                   'replaced': 0}
     for i in range(2):  # labeled images keep their label as it is
         assert (tmp_path / 'out' / f'A/img{i:03}.json').read_bytes() == files[f'A/img{i:03}.json']
         doc = json.loads((tmp_path / 'out' / f'A/new/new{i}.json').read_text(encoding='utf-8'))
@@ -184,3 +185,63 @@ def test_the_database_keeps_prediction_sets(sql, api, gpu, setup):  # noqa: F811
                         'VALUES (%s, %s, %s, %s, 0.5, 1, 0, %s, %s, %s)',
                         (row['model_version_id'], row['runner_version_id'], row['dataset_version_id'],
                          row['inputs_sha256'], row['fileset_id'], row['job_id'], row['created_by']))
+
+
+# --- review of PR #14, round 1 ---------------------------------------------------------------------------
+def test_boxes_below_conf_from_the_deploy_code_are_left_out(api, gpu, setup, tmp_path):  # noqa: F811
+    """The deploy code applies conf its own way (> instead of >=, float16 scores): trt_predict filters again,
+    so one box just under conf does not throw the whole GPU run away."""
+    mv, data, r, _ = setup
+    m = tmp_path / 'modules' / 'py_rfdetr.py'
+    m.write_text(m.read_text().replace("return [[1.0, 2.0, 29.0, 38.0, 0.9, 0], [5.0, 5.0, 10.0, 10.0, 0.8, 99]]",
+                                       "return [[1.0, 2.0, 29.0, 38.0, 0.9, 0], [3.0, 3.0, 9.0, 9.0, 0.0999999, 0]]"))
+    job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': data, 'dirs': ['A']})
+    s = api.prediction_set(run_job(api, gpu, job)['result']['prediction_set'])
+    assert s['images'] == 4 and s['boxes'] == 4
+
+
+def test_replace_keeps_a_label_where_the_model_finds_nothing(api, gpu, setup, tmp_path):  # noqa: F811
+    mv, data, r, files = setup
+    job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': data, 'dirs': ['A']})
+    s = run_job(api, gpu, job)['result']['prediction_set']
+    out = get(api, s, tmp_path / 'out', threshold=0.95, replace=True)
+    assert out['prelabeled'] == 0 and out['kept'] == 2 and out['replaced'] == 0
+    for i in range(2):
+        assert (tmp_path / 'out' / f'A/img{i:03}.json').read_bytes() == files[f'A/img{i:03}.json']
+    out = get(api, s, tmp_path / 'all', replace=True)
+    assert out['prelabeled'] == 4 and out['replaced'] == 2 and out['kept'] == 0
+
+
+def test_replace_does_not_write_into_the_cache_or_leave_two_labels(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    mv = trained(api, model, snapshot, tmp_path)
+    old = json.dumps({'version': '3.1', 'flags': {}, 'shapes': [], 'imagePath': 'u.png', 'imageData': None}).encode()
+    data = pool(api, tmp_path, {'C/u.png': png('u-' + os.urandom(4).hex()), 'C/u.JSON': old})
+    r = add_runner(gpu)
+    job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1'})
+    s = run_job(api, gpu, job)['result']['prediction_set']
+    out = get(api, s, tmp_path / 'linked', replace=True, link='hardlink')
+    assert out['replaced'] == 1
+    assert sorted(p.name for p in (tmp_path / 'linked' / 'C').iterdir()) == ['u.json', 'u.png']
+    assert json.loads((tmp_path / 'linked' / 'C/u.json').read_text())['shapes'][0]['score'] == 0.9
+    get(api, s, tmp_path / 'again')  # the cache still has the old label as it was
+    assert (tmp_path / 'again' / 'C/u.JSON').read_bytes() == old
+
+
+def test_a_job_being_cancelled_is_not_reused(api, gpu, setup):  # noqa: F811
+    mv, data, r, _ = setup
+    params = {'model': mv['ref'], 'data': data, 'dirs': ['B']}
+    first = api.submit_job('predict', runner=r['runner'], params=params)
+    assert gpu.claim()['id'] == first['id']
+    api.cancel_job(first['id'])
+    again = api.submit_job('predict', runner=r['runner'], params=params)
+    assert not again['reused'] and again['id'] != first['id']
+
+
+def test_verify_names_prediction_sets(sql, api, gpu, setup):  # noqa: F811
+    from fwserver import models
+    mv, data, r, _ = setup
+    job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': data, 'dirs': ['B']})
+    s = api.prediction_set(run_job(api, gpu, job)['result']['prediction_set'])
+    _, wanted, _ = models.verify_inputs(sql)
+    assert wanted[s['inputs_sha256']] == (None, f'预测集 #{s["id"]} 的图片清单')
+    assert all(wanted[f['sha256']][1] == f'预测集 #{s["id"]}' for f in s['files'])
