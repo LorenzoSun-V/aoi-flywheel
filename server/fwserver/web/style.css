@@ -64,4 +64,15 @@ td.mark { width: 6px; padding: 0; }
 .error { background: #fef2f2; border: 1px solid #fecaca; color: var(--bad); padding: 10px 12px; border-radius: 6px;
          margin-bottom: 12px; white-space: pre-wrap; }
 .tag { display: inline-block; padding: 0 6px; border-radius: 4px; background: #eef2ff; color: #3730a3; font-size: 12px; }
+table.narrow { width: auto; min-width: 360px; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.warn { color: var(--warn); }
+.forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+.form h2 { margin-top: 0; }
+.form label { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 8px; margin-bottom: 10px; }
+.form input, .form select { width: 100%; }
+pre.log { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; max-height: 60vh; overflow: auto;
+          white-space: pre-wrap; word-break: break-all; font-size: 12px; min-height: 3em; }
+th .muted { font-weight: 400; }
+input[type=range] { width: 200px; }
 @media (max-width: 900px) { .viewer { grid-template-columns: 1fr; } }

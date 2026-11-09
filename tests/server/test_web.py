@@ -12,6 +12,9 @@ import httpx
 import pytest
 
 from test_trainsets import label, pool
+from test_evals import gpu  # noqa: F401  (fixture)
+from test_jobs import make_worker  # noqa: F401
+from test_models import model, snapshot  # noqa: F401
 
 
 def real_png(w: int, h: int, seed: int) -> bytes:
@@ -78,5 +81,63 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert seen['tiles'] == 4 and seen['labeled'] == 3
     assert 'scratch × 1' in seen['image'] and 'dent × 1' in seen['image'] and '未确认' in seen['image']
     assert seen['canvas'] == [200, 100]
+    assert seen['hashchanges'] == 1  # one arrow key, one page: not one per image page seen before
     assert '新增 1' in seen['diff'] and '修改 1' in seen['diff']
+    assert seen['errors'] == []
+
+
+@pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
+def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    from test_evals import add_runner, trained
+    from fw import worker
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    files = {f'A/img{i:03}.png': real_png(200, 100, seed + i) for i in range(2)}
+    files.update({f'A/img{i:03}.json': label('scratch') for i in range(2)})
+    files['A/new.png'] = real_png(200, 100, seed + 5)
+    files['B/b.png'] = real_png(200, 100, seed + 6)
+    data = f'{pool(api, tmp_path, files)}@1'
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+
+    def run(job_id):
+        assert worker.run_worker(gpu, quiet, once=True) == 1
+        j = api.job(job_id)
+        assert j['status'] == 'done', j['error']
+        return j
+
+    for _ in range(2):  # two reports to compare
+        run(api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': data, 'dirs': ['A']})['id'])
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+
+    def walk(phase, *args):
+        p = subprocess.run(['node', str(WEB_TESTS / 'models.cjs'), service.url + '/', tokens['algo'], phase, mv['ref'],
+                           str(shots), *args], capture_output=True, text=True, timeout=120, cwd=WEB_TESTS)
+        assert p.returncode == 0, p.stdout + p.stderr
+        return json.loads(p.stdout.strip().splitlines()[-1])
+
+    seen = walk('submit', data, r['ref'])  # other tests' runners are listed too
+    assert seen['nav'] == ['数据集', '模型', '任务', '预测集']
+    assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
+    assert len(seen['evals']) == 2
+    assert 'nope' in seen['refused']
+    job_id = int(seen['job'].split('/')[-1])
+    assert seen['job'] == f'/job/{job_id}' and '排队' in seen['jobText'] and data in seen['jobText'] and seen['cancel']
+    job = api.job(job_id)
+    assert job['kind'] == 'predict' and job['params']['data']['dirs'] == ['A'] and job['params']['conf'] == 0.1
+    assert job['runner'] == r['ref']
+    assert job['submitted_by'] == tokens['algo_name'] and job['status'] == 'queued', job
+    set_id = run(job_id)['result']['prediction_set']
+
+    seen = walk('view', str(set_id))
+    assert 'images' in seen['compare'] and 'boxes' in seen['compare']
+    assert seen['jobs'][0] == '完成' and len(seen['jobs']) >= 3
+    assert f'预测集 #{set_id}' in seen['result'] and '推理了' in seen['log']
+    assert [t.split()[-1] for t in seen['tiles']] == ['A/img000.png', 'A/img001.png', 'A/new.png']
+    assert all(t.startswith('1 框') for t in seen['tiles'])
+    assert '3 个框，3 张图有框，0 张没有' in seen['summary']
+    assert 'scratch × 1' in seen['image'] and '预测（虚线' in seen['image']
+    assert seen['imageHash'].startswith('/img/') and f'pred={set_id}' in seen['imageHash']
+    assert 'A%2Fimg001.png' in seen['next'] and f'pred={set_id}' in seen['next']
     assert seen['errors'] == []

@@ -1,7 +1,9 @@
 // node --test tests/web/helpers.test.mjs: the parts of the web pages that do not need a browser.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hrefOf, labelIndex, listDir, outline, parseManifest, route, sizeText } from '../../server/fwserver/web/app.js';
+import {
+  flattenMetrics, hrefOf, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText,
+} from '../../server/fwserver/web/app.js';
 
 const files = parseManifest('fw-manifest 1\nA/a.png\taa\t10\nA/a.JSON\tbb\t5\nA/x/b.jpg\tcc\t7\nA/x/y/c.png\tdd\t1\nr.bmp\tee\t2\nnote.txt\tff\t1\n');
 
@@ -43,4 +45,27 @@ test('shapes', () => {
 test('sizes', () => {
   assert.equal(sizeText(512), '512 B');
   assert.equal(sizeText(1536), '1.5 KB');
+});
+
+test('metrics are flattened like fw does', () => {
+  const rows = flattenMetrics({ map: 0.5, per_class: { a: { ap: 0.25 }, b: { ap: 1 } }, ok: true, list: [1], note: 'x' });
+  assert.deepEqual(rows, [['map', 0.5], ['per_class.a.ap', 0.25], ['per_class.b.ap', 1]]);
+  assert.equal(numberText(0.123456), '0.1235');
+  assert.equal(numberText(0.5), '0.5');
+  assert.equal(numberText(3), '3');
+  assert.equal(numberText(undefined), '-');
+});
+
+test('predicted boxes of an image at a threshold', () => {
+  const doc = { classes: ['scratch', 'dent'], images: { 'A/a.png': { size: [10, 10], boxes: [[1, 2, 3, 4, 0.9, 1], [0, 0, 1, 1, 0.2, 0]] } } };
+  assert.deepEqual(predictedShapes(doc, 'A/a.png', 0.3),
+    [{ label: 'dent', score: 0.9, shape_type: 'rectangle', points: [[1, 2], [3, 4]] }]);
+  assert.equal(predictedShapes(doc, 'A/a.png', 0.1).length, 2);
+  assert.deepEqual(predictedShapes(doc, 'B/none.png', 0.1), []);
+});
+
+test('TIFF is not shown by browsers', () => {
+  assert.equal(shownByBrowsers('A/a.TIF'), false);
+  assert.equal(shownByBrowsers('A/a.tiff'), false);
+  assert.equal(shownByBrowsers('A/a.bmp'), true);
 });

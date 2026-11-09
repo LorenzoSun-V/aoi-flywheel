@@ -38,8 +38,16 @@ const { chromium } = require('playwright');
   await page.waitForFunction(() => document.querySelector('.viewer dl') !== null);
   seen.image = await page.textContent('.viewer .panel');
   seen.canvas = await page.$eval('canvas', (c) => [c.width, c.height]);
+  const at = (n) => page.waitForFunction((k) => document.querySelector('.row .muted') && document.querySelector('.row .muted').textContent.startsWith(`${k} /`), n);
+  for (const [button, n] of [['下一张', 2], ['上一张', 1], ['下一张', 2], ['上一张', 1]]) {  // pages seen before must not keep their keys
+    await page.click(`button:has-text("${button}")`);
+    await at(n);
+  }
+  await page.evaluate(() => { window.hashchanges = 0; window.addEventListener('hashchange', () => { window.hashchanges += 1; }); });
   await page.keyboard.press('ArrowRight');
-  await page.waitForFunction(() => document.querySelector('.row .muted') && document.querySelector('.row .muted').textContent.startsWith('2 /'));
+  await at(2);
+  await page.waitForTimeout(300);
+  seen.hashchanges = await page.evaluate(() => window.hashchanges);
   await page.screenshot({ path: `${out}/image.png` });
   await page.goto(`${url}#/d/${encodeURIComponent(dataset)}`);
   await page.waitForSelector('select#old');
