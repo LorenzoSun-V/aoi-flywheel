@@ -14,6 +14,13 @@
 - 显卡按 `CUDA_VISIBLE_DEVICES` 的第一块，`CUDA_DEVICE_ORDER=PCI_BUS_ID`，和 `nvidia-smi` 编号一致。
 - `engine.json` 记下推理计数；超出类别表的框比留下的还多时评估失败。
 - 数据库迁移 0006（推理环境的框架、评估任务、评估报告的目录和任务）。
+
+第三步之三：预测集和预标注。
+
+- `fw predict run <模型版本> --data <数据集版本> [--dirs …] --runner <推理环境> [--conf 0.1]`：GPU 机用本机的 TensorRT 引擎跑选中的图，结果存成不可变的预测集；同样的模型版本、推理环境、图片和最低分数再提交直接复用，不再占 GPU。
+- `fw predict get <编号> <目录> [--threshold 0.3] [--replace]`：取出图片，按阈值写 LiteAnno / X-AnyLabeling 预标注（矩形框带分数，`checked=false`，顶层 `flywheel` 记来源），已有标注默认保留，附 `classes.txt`；LiteAnno 直接打开。
+- `fw predict list`、`fw predict show`；`fw job show` 显示预测集编号。
+- 数据库迁移 0007（推理任务、预测集）。
 - 复审后修正（合并前）：测试快照的类别表和模型不同（包括只是顺序不同）时不收；数据池里 `x.JSON` 这样大写扩展名的标注照常读，只有 `labels/x.TXT` 的图和只有 `.txt` 的一样不收；两个任务结果完全相同时各自登记报告；`FW_WORK_DIR` 可以写相对路径。
 - 第二轮审查后修正：数据池上评估时，标注里有模型类别表里没有的类别名就不收。
 

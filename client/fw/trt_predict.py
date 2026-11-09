@@ -10,7 +10,8 @@ it imports only what that environment has (OpenCV and the deploy code's inferenc
 The predictions file is aoi-deteval's (schema_version 1): {"sets": {set: {image file name: [[x1, y1, x2, y2,
 score, class], ...]}}}, with every image of every set present (an image without boxes has []). Classes the
 engine has beyond the model's class table (--nc) are left out and counted; --stats gets the counts
-({"images", "boxes", "dropped"}). Exit status 3: the engine could not be loaded (fw worker builds it again once).
+({"images", "boxes", "dropped"}), --sizes the size of every image ({set: {image file name: [width, height]}}).
+Exit status 3: the engine could not be loaded (fw worker builds it again once).
 """
 import argparse
 import json
@@ -43,6 +44,7 @@ def main(argv=None) -> int:
     ap.add_argument('--conf', type=float, default=0.001)
     ap.add_argument('--out', required=True)
     ap.add_argument('--stats', help='where to write the counts (JSON)')
+    ap.add_argument('--sizes', help='where to write the image sizes (JSON)')
     args = ap.parse_args(argv)
 
     import cv2
@@ -52,10 +54,10 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001  (the deploy code raises RuntimeError and the like)
         print(f'加载不了引擎 {args.engine}：{type(e).__name__}: {e}', file=sys.stderr)
         return 3
-    out_sets, images, boxes, dropped = {}, 0, 0, 0
+    out_sets, sizes, images, boxes, dropped = {}, {}, 0, 0, 0
     try:
         for set_name, folder in cfg['sets'].items():
-            rows = {}
+            rows, set_sizes = {}, {}
             for path in sorted(Path(folder).iterdir()):
                 if not path.is_file() or path.suffix.lower() not in IMAGE_EXTS:
                     continue
@@ -71,9 +73,11 @@ def main(argv=None) -> int:
                         continue
                     kept.append([float(x1), float(y1), float(x2), float(y2), float(score), cls])
                 rows[path.name] = kept
+                set_sizes[path.name] = [int(image.shape[1]), int(image.shape[0])]
                 images += 1
                 boxes += len(kept)
             out_sets[set_name] = rows
+            sizes[set_name] = set_sizes
     finally:
         release()
     pred = {'schema_version': 1, 'name': args.name, 'framework': f'{args.framework}-tensorrt',
@@ -82,6 +86,8 @@ def main(argv=None) -> int:
     tmp = out.with_name(out.name + '.tmp')
     tmp.write_text(json.dumps(pred, ensure_ascii=False), encoding='utf-8')
     os.replace(tmp, out)
+    if args.sizes:
+        Path(args.sizes).write_text(json.dumps(sizes), encoding='utf-8')
     if args.stats:
         Path(args.stats).write_text(json.dumps({'images': images, 'boxes': boxes, 'dropped': dropped}),
                                     encoding='utf-8')

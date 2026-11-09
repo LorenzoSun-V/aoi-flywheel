@@ -351,6 +351,66 @@ def cmd_eval_run(args, api: Api) -> int:
     return 0
 
 
+def cmd_predict_run(args, api: Api) -> int:
+    params = {'model': args.model, 'data': args.data, 'dirs': args.dirs or []}
+    if args.conf is not None:
+        params['conf'] = args.conf
+    job = api.submit_job('predict', runner=args.runner, params=params)
+    p = job['params']
+    dirs = f' 的 {"、".join(p["data"]["dirs"])}' if p['data']['dirs'] else ''
+    what = (f'{p["model"]["ref"]} 在 {p["data"]["ref"]}{dirs} 上，{p["data"]["images"]} 张图，推理环境 {job["runner"]}，'
+            f'保留分数不低于 {p["conf"]:g} 的框')
+    if job.get('reused'):
+        print(f'同样的推理（同一模型版本、推理环境、图片和最低分数）已经有了：任务 {job["id"]}（{job["status_text"]}），不再排队')
+    else:
+        print(f'已提交推理任务 {job["id"]}：{what}；前面还有 {job["queued_ahead"]} 个任务')
+    if job['status'] == 'done':
+        print(f'预测集 #{job["result"]["prediction_set"]}：fw predict get {job["result"]["prediction_set"]} <目录>')
+        return 0
+    if not args.wait:
+        print(f'看进度：fw job log -f {job["id"]}；结果：fw job show {job["id"]}')
+        return 0
+    args.id, args.attempt, args.follow = job['id'], 0, True
+    cmd_job_log(args, api)
+    j = api.job(job['id'])
+    if j['status'] != 'done':
+        print(f'推理任务{j["status_text"]}' + (f'：{j["error"]}' if j['error'] else ''))
+        return 1
+    print(f'预测集 #{j["result"]["prediction_set"]}：fw predict get {j["result"]["prediction_set"]} <目录>')
+    return 0
+
+
+def cmd_predict_list(args, api: Api) -> None:
+    rows = api.prediction_sets(args.model or '')
+    if not rows:
+        print('还没有预测集')
+        return
+    _table(['编号', '模型版本', '数据', '图片', '框', '最低分数', '推理环境', '时间'],
+           [[f'#{r["id"]}', r['model_version']['ref'],
+             r['data']['ref'] + (f' {"、".join(r["dirs"])}' if r['dirs'] else ''), str(r['images']), str(r['boxes']),
+             f'{r["conf"]:g}', r['runner'], _when(r['created_at'])] for r in rows])
+
+
+def cmd_predict_show(args, api: Api) -> None:
+    r = api.prediction_set(int(args.id.lstrip('#')))
+    print(f'预测集 #{r["id"]}：{r["model_version"]["ref"]} 在 {r["data"]["ref"]}'
+          + (f' 的 {"、".join(r["dirs"])}' if r['dirs'] else '') + f' 上，{r["images"]} 张图，{r["boxes"]} 个框'
+          f'（分数不低于 {r["conf"]:g}）')
+    print(f'由推理任务 {r["job_id"]} 在推理环境 {r["runner"]} 里算出，{r["created_by"]} 提交，{_when(r["created_at"])}')
+    for f in r['files']:
+        print(f'  {f["path"]}  {f["sha256"][:12]}  {ops.size_text(f["size"])}')
+
+
+def cmd_predict_get(args, api: Api) -> None:
+    from .cache import Cache
+    cache = Cache()
+    try:
+        ops.get_predictions(api, cache, int(args.id.lstrip('#')), args.dest, threshold=args.threshold,
+                            replace=args.replace, link=args.link, workers=args.workers)
+    finally:
+        cache.close()
+
+
 def cmd_eval_list(args, api: Api) -> None:
     rows = api.evals(args.model or '')
     if not rows:
@@ -451,6 +511,10 @@ def _print_job(j: dict) -> None:
         if j['kind'] == 'check':
             r = j['result']
             print('结果：包清单' + ('没变' if r['same_env'] else '变了') + '，源码' + ('没变' if r['same_src'] else '变了'))
+        elif j['kind'] == 'predict':
+            r = j['result']
+            print(f'结果：预测集 #{r["prediction_set"]}，{r["images"]} 张图，{r["boxes"]} 个框'
+                  f'（fw predict get {r["prediction_set"]} <目录>）')
         elif j['kind'] == 'eval':
             m = j['result']['metrics']
             print(f'结果：评估报告 #{j["result"]["eval_id"]}（fw eval show {j["result"]["eval_id"]}），'
@@ -668,6 +732,30 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--check', action='store_true', help='同时核对链上每个文件都还在文件库里')
     s.set_defaults(func=cmd_model_chain)
 
+    pr = sub.add_parser('predict', help='推理和预标注：run、list、show、get').add_subparsers(
+        dest='action', required=True, metavar='操作')
+    s = pr.add_parser('run', help='排一个推理任务：GPU 机用模型的 TensorRT 引擎跑选中的图，结果存成预测集')
+    s.add_argument('model', help='模型版本，例如 SES-TX-detr@3')
+    s.add_argument('--data', required=True, help='数据集版本（数据池），例如 SES-TX@6')
+    s.add_argument('--dirs', nargs='+', metavar='目录', help='只推理版本里的这几个目录（包括子目录）；不写就是整个版本')
+    s.add_argument('--runner', required=True, help='推理环境，例如 detr-pro（fw runner list 看有哪些）')
+    s.add_argument('--conf', type=float, help='保留的最低分数，默认 0.1；预标注阈值只能在它之上调')
+    s.add_argument('--wait', action='store_true', help='等任务跑完，跟着显示输出')
+    s.set_defaults(func=cmd_predict_run)
+    s = pr.add_parser('list', help='列出预测集')
+    s.add_argument('model', nargs='?', help='只列这个模型的')
+    s.set_defaults(func=cmd_predict_list)
+    s = pr.add_parser('show', help='看一个预测集')
+    s.add_argument('id', help='预测集编号，例如 3 或 #3')
+    s.set_defaults(func=cmd_predict_show)
+    s = pr.add_parser('get', help='取出预测集的图片和预标注（LiteAnno 能直接打开的目录）')
+    s.add_argument('id', help='预测集编号，例如 3 或 #3')
+    s.add_argument('dest', help='放到哪个目录（要是空的或不存在）')
+    s.add_argument('--threshold', type=float, help='分数阈值，默认 0.3，不能低于推理时的最低分数')
+    s.add_argument('--replace', action='store_true', help='已有标注的图也写预标注（默认保留已有标注）')
+    s.add_argument('--link', default='auto', choices=['auto', 'copy', 'hardlink'], help='同 fw get')
+    s.add_argument('--workers', type=int, default=8)
+    s.set_defaults(func=cmd_predict_get)
     ev = sub.add_parser('eval', help='评估：run、register、list、show').add_subparsers(
         dest='action', required=True, metavar='操作')
     s = ev.add_parser('run', help='排一个评估任务：GPU 机在推理环境里跑 aoi-deteval，结果自动登记成评估报告')

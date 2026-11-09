@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
                          frame_header)
 
-from . import __version__, auth, datasets, db, evals, jobs, models, trainsets
+from . import __version__, auth, datasets, db, evals, jobs, models, predictions, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -551,6 +551,16 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         with conn() as c:
             return models.get_eval(c, eval_id)
 
+    @app.get('/api/v1/predictions')
+    def list_prediction_sets(model: str = '', user: dict = Depends(data_user)):
+        with conn() as c:
+            return {'prediction_sets': predictions.list_sets(c, model)}
+
+    @app.get('/api/v1/predictions/{set_id}')
+    def get_prediction_set(set_id: int, user: dict = Depends(data_user)):
+        with conn() as c:
+            return predictions.get_set(c, set_id)
+
     @app.get('/api/v1/releases')
     def list_releases(site: str = '', line: str = '', user: dict = Depends(model_reader)):
         with conn() as c:
@@ -613,6 +623,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         with conn() as c:
             if body.kind == 'eval':
                 job = evals.submit(c, store, user, body.runner, body.params)
+            elif body.kind == 'predict':
+                job = predictions.submit(c, store, user, body.runner, body.params)
             else:
                 job = jobs.submit(c, user, body.kind, body.runner, body.params)
         log.info('job %s (%s) submitted by %s', job['id'], job['kind'], user['name'])

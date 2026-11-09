@@ -161,6 +161,8 @@ mv = fw.register_model('SES-TX-detr', onnx='best.onnx', weights='best.pt', train
 
 平台上的模型只做 TensorRT 推理（NVIDIA GPU），不支持 Ascend、Rockchip 等其他硬件（2026-11-09 定）。部署代码（onnx2engine、各框架的 TRT 推理）由你们提供，先接 RF-DETR，以后的新模型再给源码。
 
+已实现（第三步之三，迁移 0007）：`fw predict run` 排推理任务，结果是不可变的预测集（`predictions.json` 里每张图的宽高和框，加 `engine.json`），同一模型版本、推理环境版本、图片清单和最低分数再提交直接复用已有任务；`fw predict get` 按阈值把预测集写成 LiteAnno 能直接打开的目录（预标注 `checked=false`，已有标注默认保留）。写回批次等批次复核做好再接。下面第 5 条的「每张图一个 JSON」改成了一个 `predictions.json`，JSON 在取出时按阈值生成。
+
 已实现（第三步之一，迁移 0005）：任务表、`worker` 角色、推理环境登记（`fw runner`）、`fw worker`、`fw job`。下面第 2、3 条就是现在的做法：领取用 `FOR UPDATE SKIP LOCKED`，每次领取一个新令牌（库里只存 sha256），租约默认 60 秒、每 20 秒续一次，过期的领取改不了任务；同一任务领取 3 次都失联算失败；取消运行中的任务在下次续租时生效。任务类型现在只有「检查推理环境」，评估、预标注、引擎构建在后面的 PR 里加。
 
 1. 提交：网页或 `fw job prelabel --batch <批次> --model <模型版本>`。复用已有的预测集要四样都相同：输入图片清单的哈希、引擎哈希、推理代码版本（部署仓库提交号）、实际生效的推理配置的哈希（阈值、NMS 等）。四样都相同就直接复用，不再占 GPU；任何一样不同都重新跑。

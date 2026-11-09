@@ -263,6 +263,12 @@ class Api:
         """Like register_model_version: the same report again returns the existing one."""
         return self._json(_retry(lambda: self.http.post(f'/models/{name}/versions/{number}/evals', json=body)))
 
+    def prediction_sets(self, model: str = ''):
+        return self.get('/predictions', model=model)['prediction_sets']
+
+    def prediction_set(self, set_id: int):
+        return self.get(f'/predictions/{int(set_id)}')
+
     def evals(self, model: str = ''):
         return self.get('/evals', model=model)
 
