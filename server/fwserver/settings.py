@@ -19,6 +19,7 @@ class Settings:
     workers: int = 4  # FW_WORKERS: server processes
     pool_size: int = 8  # FW_POOL_SIZE: database connections per process
     max_object_bytes: int = 64 * 1024 ** 3  # FW_MAX_OBJECT_GB
+    job_lease_seconds: int = 60  # FW_JOB_LEASE_SECONDS: a worker that stops renewing loses its job after this
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -29,4 +30,5 @@ class Settings:
         return cls(dsn=env['FW_DSN'], store=Path(env['FW_STORE']), host=env.get('FW_HOST', '0.0.0.0'),
                    port=int(env.get('FW_PORT', 8000)), workers=int(env.get('FW_WORKERS', 4)),
                    pool_size=int(env.get('FW_POOL_SIZE', 8)),
-                   max_object_bytes=int(float(env.get('FW_MAX_OBJECT_GB', 64)) * 1024 ** 3))
+                   max_object_bytes=int(float(env.get('FW_MAX_OBJECT_GB', 64)) * 1024 ** 3),
+                   job_lease_seconds=int(env.get('FW_JOB_LEASE_SECONDS', 60)))

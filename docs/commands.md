@@ -395,6 +395,84 @@ fw release show SES-TX-r3                  # 这次发布和它的追溯链
 - 现场和产线只能用汉字、英文字母、数字、`_` 和 `.`（见 `fw model create`）。
 - 只有部署账号和管理员能登记发布；算法工程师能看。
 
+### fw runner register、list、show、check
+
+推理环境就是 GPU 机上搭好的 conda 环境，一个框架一个（例如 `yolo26`、`detr-pro`）。平台只做 TensorRT 推理，推理环境都在 NVIDIA GPU 机上。评估、推理任务（第三步后面几个 PR）在模型登记的推理环境里跑。
+
+```
+fw runner register detr-pro --env detr-pro --src ~/code/rf-detr-pro    # 在 GPU 机上，用 worker 账号
+fw runner list
+fw runner show detr-pro
+fw runner check detr-pro                                              # 算法工程师：提交一个检查任务
+```
+
+| 选项 | 说明 |
+|---|---|
+| `名称` | 推理环境名：字母、数字和 `. _ -`，全平台唯一 |
+| `--env` | conda 环境名 |
+| `--src` | 框架源码目录（git 仓库），团队改过框架时写；用 pip 装的官方版就不写 |
+
+- 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希（包清单里网址带的账号密码、`?token=...` 这类参数和 conda 的 `/t/<token>/` 先去掉再传，私有源的凭据不会被别的账号看到；包的哈希保留）；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
+- 用 `pip install -e` 装的包，pip 的清单只记它的位置，不记它的代码；这样装的框架源码用 `--src` 登记，改动才看得出来。
+- 包清单、源码提交号或改动、所在机器有任何一样和最新一版不同，就登记成新版本（`detr-pro@2`）；完全一样就说「没有新版本」。版本只增不改。
+- 迁到别的 GPU 机：在那台机器装好同名环境，用它的 worker 账号再登记一次，新版本记的是新机器；以后的任务都发给那台机器。
+- `fw runner check` 提交一个任务：那台 GPU 机上的 worker 重新读包清单和源码，和登记的比，结果用 `fw job show` 看（「包清单没变 / 变了」「源码没变 / 变了」）。有人在环境里装了包、改了源码，这样就能看出来；要以新状态为准就再 `register` 一次。
+
+### fw job list、show、log、cancel
+
+```
+fw job list                      # 最新的在前；--status queued|running|done|failed|cancelled
+fw job show 12                   # 状态、每次领取（哪台机器、怎么结束的）、结果或失败原因
+fw job log 12 -f                 # 看输出，-f 一直跟到任务结束；--attempt 2 看第 2 次领取的输出
+fw job cancel 12
+```
+
+- 任务按提交顺序排队，绑定了推理环境的任务只发给那个环境所在的机器。`fw job list` 里排队的会写「前面 N 个」。
+- 取消：排队中的立即取消；运行中的，worker 在下次续租时（默认 20 秒内）停下正在跑的命令（连同它启动的子进程），报告「已取消」。取消受理以后，即使命令恰好在这之前跑完、worker 交了结果，任务也记成已取消。
+- `fw job log -f` 跟到任务被重新领取时，接着显示新一次领取的输出（前面有一行「第 N 次领取」）。
+- 领取次数：worker 掉线、死机或被停掉，租约（默认 60 秒）到期后任务自动回到队列，换一次领取；同一个任务领取 3 次都失联就算失败。worker 自己报告的失败（命令出错）不重试，看 `fw job show` 的原因，改好再提交。
+- 状态：排队、运行中、完成、失败、已取消。结束的任务不会再变。
+
+### fw worker
+
+在 GPU 机上常驻，一个接一个领任务、运行、交回结果：
+
+```
+fw login --server http://<平台服务器>:8000          # 用 worker 账号的凭据
+fw worker
+```
+
+| 选项 | 说明 |
+|---|---|
+| `--poll` | 没有任务时隔几秒问一次，默认 5 |
+| `--once` | 把这台机器能做的任务做完就退出（测试、手动跑时用） |
+
+- 要用 worker 账号（`fw-server user add gpu-01 --role worker`）。worker 只领任务、续租、传日志、交结果，不能提交任务。
+- 每次领取有自己的令牌和租约；worker 每 20 秒续一次。平台说租约已收回，或者连不上平台、按这台机器的时钟租约已经到期，worker 就停下正在跑的命令（连同子进程），这次的结果不交；平台那边同时把任务放回队列，所以同一个任务不会在两处同时跑。
+- 命令自己结束时，它留下还在跑的子进程也一起杀掉，任务不会被它们拖住。
+- 平台重启、网络断开时 worker 不退出：领任务连不上就每隔 `--poll` 秒再试；交结果连不上或平台返回 5xx 就重试并续租，最多 10 分钟，交不上就不再续租，租约到期后任务回到队列（重试期间收到取消就改交「已取消」）。只有凭据失效这类问题才退出。
+- Ctrl+C 立即退出；正在跑的任务在租约到期后回到队列。
+
+常驻运行用 systemd（以 worker 账号 `fwworker` 为例，写到 `/etc/systemd/system/fw-worker.service`）：
+
+```
+[Unit]
+Description=fw worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fwworker
+ExecStart=/home/fwworker/.local/bin/fw worker
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`sudo systemctl daemon-reload && sudo systemctl enable --now fw-worker`；看输出用 `journalctl -u fw-worker -f`。`ExecStart` 写 `which fw` 给出的路径。`Restart=always` 保证 worker 万一退出（升级、出错）也会重新起来。
+
 ## 在训练脚本里用
 
 ```python
@@ -471,10 +549,13 @@ fw-server user enable zhangsan         # 恢复账号；旧凭据仍然作废，
 
 | 角色 | 能做的 |
 |---|---|
-| `admin` 管理员 | 算法工程师和部署能做的都能做 |
+| `admin` 管理员 | 算法工程师和部署能做的都能做（不能领任务，那是 worker 的事） |
 | `algo` 算法工程师 | 建数据集、导入、取回、对比、导出；建训练集快照；建模型、登记模型版本和评估报告、打标签；看发布和追溯链 |
 | `field` 现场实施 | 现在还不能用平台的数据和模型（以后用网页做复核） |
 | `deploy` 部署 | 看模型、评估和发布，取模型版本的文件（取不了数据集）；登记发布；看追溯链 |
+| `worker` GPU worker | 一台 GPU 机一个：登记推理环境、领取和运行任务、上传结果；为了任务能取数据集和模型的文件；不能提交任务、不能建数据集和模型 |
+
+算法工程师和管理员提交、取消任务；算法工程师、管理员和 worker 能看任务和推理环境。
 
 ### 凭据
 
@@ -612,6 +693,7 @@ FW_SERVER=http://<平台>:8000 FW_TOKEN=<凭据> python tools/bench.py --pairs 1
 | `FW_TOKEN` | 凭据，同上。脚本、CI 里用；注意不要打印到日志 |
 | `FW_CONFIG` | 设置文件的位置 |
 | `FW_CACHE` | 本机缓存的位置 |
+| `FW_CONDA` | `fw runner`、`fw worker` 用的 conda 可执行文件；不设就找 PATH 里的 `conda`，再找 `CONDA_EXE` |
 
 默认位置：
 
@@ -632,6 +714,7 @@ FW_SERVER=http://<平台>:8000 FW_TOKEN=<凭据> python tools/bench.py --pairs 1
 | `FW_WORKERS` | `4` | 服务进程数 |
 | `FW_POOL_SIZE` | `8` | 每个进程的数据库连接数 |
 | `FW_MAX_OBJECT_GB` | `64` | 单个文件大小上限 |
+| `FW_JOB_LEASE_SECONDS` | `60` | 任务租约：worker 这么久没续租，任务回到队列 |
 
 部署时这些由 `deploy/docker-compose.yml` 和 `deploy/.env` 给出；`FW_POOL_SIZE`、`FW_MAX_OBJECT_GB` 要改的话，在 `docker-compose.yml` 的 `server.environment` 里加上。
 

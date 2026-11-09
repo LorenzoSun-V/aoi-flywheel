@@ -6,7 +6,7 @@ import re
 import secrets
 from typing import List, Optional, Tuple
 
-ROLES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'deploy': '部署'}
+ROLES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'deploy': '部署', 'worker': 'GPU worker'}
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
 
 

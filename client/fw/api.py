@@ -284,3 +284,45 @@ class Api:
 
     def chain(self, ref: str, check: bool = False):
         return self.get('/chain', ref=ref, check=str(check).lower())
+
+    # --- runners and jobs ------------------------------------------------------------------------
+    def post_retried(self, path: str, body: dict):
+        """For calls the server makes safe to repeat (renewing, logging by sequence number, finishing)."""
+        return self._json(_retry(lambda: self.http.post(path, json=body)))
+
+    def runners(self):
+        return self.get('/runners')['runners']
+
+    def runner(self, name: str):
+        return self.get(f'/runners/{quote(name, safe="")}')['versions']
+
+    def register_runner(self, body: dict):
+        return self.post_retried('/runners', body)  # registering the same thing again returns it
+
+    def jobs(self, status: str = '', limit: int = 50):
+        return self.get('/jobs', status=status, limit=limit)['jobs']
+
+    def job(self, job_id: int):
+        return self.get(f'/jobs/{int(job_id)}')
+
+    def submit_job(self, kind: str, runner: Optional[str] = None, params: Optional[dict] = None):
+        return self.post('/jobs', {'kind': kind, 'runner': runner, 'params': params})
+
+    def cancel_job(self, job_id: int):
+        return self.post_retried(f'/jobs/{int(job_id)}/cancel', {})
+
+    def job_log(self, job_id: int, attempt: int = 0, after: int = -1):
+        return self.get(f'/jobs/{int(job_id)}/log', attempt=attempt, after=after)
+
+    def claim(self):
+        return self.post('/worker/claim', {})['job']  # not retried: a lost answer leaves a claim nobody renews
+
+    def renew(self, job_id: int, token: str):
+        return self.post_retried(f'/jobs/{int(job_id)}/renew', {'token': token})
+
+    def add_log(self, job_id: int, token: str, seq: int, text: str):
+        return self.post_retried(f'/jobs/{int(job_id)}/log', {'token': token, 'seq': seq, 'text': text})
+
+    def finish(self, job_id: int, token: str, outcome: str, result: Optional[dict] = None, error: str = ''):
+        return self.post_retried(f'/jobs/{int(job_id)}/finish', {'token': token, 'outcome': outcome,
+                                                                 'result': result, 'error': error})

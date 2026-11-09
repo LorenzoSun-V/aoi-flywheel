@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
                          frame_header)
 
-from . import __version__, auth, datasets, db, models, trainsets
+from . import __version__, auth, datasets, db, jobs, models, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -25,6 +25,9 @@ DATA_ROLES = ('admin', 'algo')  # only these roles see or change datasets (desig
 MODEL_READERS = ('admin', 'algo', 'deploy')  # see models, evaluations, releases and the trace chain
 MODEL_WRITERS = ('admin', 'algo')            # register models, model versions, evaluations; set tags
 RELEASE_WRITERS = ('admin', 'deploy')        # register releases
+UPLOADERS = DATA_ROLES + ('worker',)         # upload files; a worker sends runner listings and job outputs
+JOB_READERS = ('admin', 'algo', 'worker')    # see jobs, their logs and the runners
+JOB_WRITERS = ('admin', 'algo')              # submit and cancel jobs
 MISSING_LIMIT = 20000
 BUFFER = 1 << 20
 BATCH_BODY_MAX = 512 << 20   # one batch upload request
@@ -35,6 +38,37 @@ STORE_GROUP = 4 << 20        # batch uploads are written to the store in groups 
 
 class MissingBody(BaseModel):
     objects: List[Tuple[str, int]] = Field(max_length=MISSING_LIMIT)  # (sha256, size)
+
+
+class RunnerBody(BaseModel):
+    name: str
+    conda_env: str
+    env_sha256: str
+    src_dir: str = ''
+    src_commit: Optional[str] = None
+    src_dirty: bool = False
+    src_state_sha256: Optional[str] = None
+
+
+class JobBody(BaseModel):
+    kind: str
+    runner: Optional[str] = None
+    params: Optional[dict] = None
+
+
+class LeaseBody(BaseModel):
+    token: str = Field(max_length=200)
+
+
+class LogBody(LeaseBody):
+    seq: int
+    text: str
+
+
+class FinishBody(LeaseBody):
+    outcome: str
+    result: Optional[dict] = None
+    error: str = ''
 
 
 def size_text(n: int) -> str:
@@ -199,6 +233,26 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看或修改数据集')
         return user
 
+    def uploader(user: dict = Depends(current_user)) -> dict:
+        if user['role'] not in UPLOADERS:
+            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能上传文件')
+        return user
+
+    def job_reader(user: dict = Depends(current_user)) -> dict:
+        if user['role'] not in JOB_READERS:
+            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看任务')
+        return user
+
+    def job_writer(user: dict = Depends(current_user)) -> dict:
+        if user['role'] not in JOB_WRITERS:
+            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能提交或取消任务')
+        return user
+
+    def worker(user: dict = Depends(current_user)) -> dict:
+        if user['role'] != 'worker':
+            raise HTTPException(403, '只有 worker 账号（GPU 机）能登记推理环境、领取和交回任务')
+        return user
+
     def model_reader(user: dict = Depends(current_user)) -> dict:
         if user['role'] not in MODEL_READERS:
             raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看模型、评估和发布')
@@ -215,8 +269,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return user
 
     def may_download(user: dict, digests: List[str]) -> None:
-        """Datasets roles download anything; the deploy role only the files of model versions."""
-        if user['role'] in DATA_ROLES:
+        """Datasets roles and workers (which fetch a job's images and models) download anything; the deploy role
+        only the files of model versions."""
+        if user['role'] in DATA_ROLES + ('worker',):
             return
         if user['role'] == 'deploy':
             with conn() as c:
@@ -240,19 +295,19 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- objects --------------------------------------------------------------------------------
     @app.post('/api/v1/objects/missing')
-    def missing(body: MissingBody, user: dict = Depends(data_user)):
+    def missing(body: MissingBody, user: dict = Depends(uploader)):
         """Which of these (sha256, size) the store lacks; an object with another size counts as missing."""
         return {'missing': [check_digest(d) for d, size in body.objects if store.size(check_digest(d)) != size]}
 
     @app.post('/api/v1/objects/flush')
-    def flush(user: dict = Depends(data_user)):
+    def flush(user: dict = Depends(uploader)):
         """Make every object uploaded so far durable. Creating a version does this itself; a client that only
         brought back files an existing version lacked calls it before saying the repair is done."""
         store.flush()
         return {'ok': True}
 
     @app.put('/api/v1/objects/{digest}')
-    async def put_object(digest: str, request: Request, user: dict = Depends(data_user)):
+    async def put_object(digest: str, request: Request, user: dict = Depends(uploader)):
         check_digest(digest)
         length = request.headers.get('content-length')
         if length is None or not length.isdigit():
@@ -280,7 +335,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return {'sha256': digest, 'size': writer.size, 'created': created}
 
     @app.post('/api/v1/objects/batch')
-    async def put_objects(request: Request, user: dict = Depends(data_user)):
+    async def put_objects(request: Request, user: dict = Depends(uploader)):
         """Many small objects in one fw-objects body (fw.contract); each one is checked against its own hash.
         Objects before a bad one stay stored (they are content-addressed, so that is harmless)."""
         length = request.headers.get('content-length')
@@ -523,6 +578,78 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def chain(ref: str, check: bool = False, user: dict = Depends(model_reader)):
         with conn() as c:
             return models.chain(c, store, ref, check)
+
+    # --- runners and jobs ------------------------------------------------------------------------
+    @app.get('/api/v1/runners')
+    def list_runners(user: dict = Depends(job_reader)):
+        with conn() as c:
+            return {'runners': jobs.list_runners(c)}
+
+    @app.post('/api/v1/runners', status_code=201)
+    def register_runner(body: RunnerBody, user: dict = Depends(worker)):
+        with conn() as c:
+            r = jobs.register_runner(c, store, user, body.name, body.conda_env, body.env_sha256, body.src_dir,
+                                     body.src_commit, body.src_dirty, body.src_state_sha256)
+        if r['created']:
+            log.info('runner %s registered by %s', r['ref'], user['name'])
+        return r
+
+    @app.get('/api/v1/runners/{name}')
+    def get_runner(name: str, user: dict = Depends(job_reader)):
+        with conn() as c:
+            return {'versions': jobs.runner_versions(c, name)}
+
+    @app.get('/api/v1/jobs')
+    def list_jobs(status: str = '', limit: int = 50, user: dict = Depends(job_reader)):
+        with conn() as c:
+            return {'jobs': jobs.list_jobs(c, status, limit)}
+
+    @app.post('/api/v1/jobs', status_code=201)
+    def submit_job(body: JobBody, user: dict = Depends(job_writer)):
+        with conn() as c:
+            job = jobs.submit(c, user, body.kind, body.runner, body.params)
+        log.info('job %s (%s) submitted by %s', job['id'], job['kind'], user['name'])
+        return job
+
+    @app.get('/api/v1/jobs/{job_id}')
+    def get_job(job_id: int, user: dict = Depends(job_reader)):
+        with conn() as c:
+            return jobs.get_job(c, job_id)
+
+    @app.post('/api/v1/jobs/{job_id}/cancel')
+    def cancel_job(job_id: int, user: dict = Depends(job_writer)):
+        with conn() as c:
+            return jobs.cancel(c, job_id)
+
+    @app.get('/api/v1/jobs/{job_id}/log')
+    def get_job_log(job_id: int, attempt: int = 0, after: int = -1, user: dict = Depends(job_reader)):
+        with conn() as c:
+            return jobs.job_log(c, job_id, attempt or None, after)
+
+    @app.post('/api/v1/worker/claim')
+    def claim_job(user: dict = Depends(worker)):
+        with conn() as c:
+            job = jobs.claim(c, user, settings.job_lease_seconds)
+        if job is not None:
+            log.info('job %s attempt %s claimed by %s', job['id'], job['attempt'], user['name'])
+        return {'job': job}
+
+    @app.post('/api/v1/jobs/{job_id}/renew')
+    def renew_job(job_id: int, body: LeaseBody, user: dict = Depends(worker)):
+        with conn() as c:
+            return jobs.renew(c, job_id, body.token, settings.job_lease_seconds)
+
+    @app.post('/api/v1/jobs/{job_id}/log')
+    def add_job_log(job_id: int, body: LogBody, user: dict = Depends(worker)):
+        with conn() as c:
+            return jobs.add_log(c, job_id, body.token, body.seq, body.text)
+
+    @app.post('/api/v1/jobs/{job_id}/finish')
+    def finish_job(job_id: int, body: FinishBody, user: dict = Depends(worker)):
+        with conn() as c:
+            job = jobs.finish(c, job_id, body.token, body.outcome, body.result, body.error)
+        log.info('job %s finished: %s', job_id, job['status'])
+        return job
 
     @app.get('/api/v1/diff')
     def diff(old: int, new: int, user: dict = Depends(data_user)):

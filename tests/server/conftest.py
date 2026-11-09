@@ -99,7 +99,7 @@ def tokens(database):
     """One account and token per role."""
     out = {}
     with db.connect(database) as c:
-        for role in ('admin', 'algo', 'field', 'deploy'):
+        for role in ('admin', 'algo', 'field', 'deploy', 'worker'):
             name = f'{role}-{uuid.uuid4().hex[:6]}'
             auth.add_user(c, name, role)
             out[role] = auth.create_token(c, name, f'{role} test')[0]

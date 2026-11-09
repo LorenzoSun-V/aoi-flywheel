@@ -11,7 +11,7 @@ from fw import ops
 from fw.contract import sha256_file
 from fwserver import cli
 from fwserver import datasets as ds
-from fwserver import db, models
+from fwserver import db
 from fwserver.store import Store, StoreError
 
 
@@ -26,7 +26,7 @@ def version(api, tmp_path):
 
 def run_verify(database, store, **kw):
     with db.connect(database) as c:
-        return ds.verify(c, store, echo=quiet, more=models.verify_inputs, **kw)
+        return ds.verify(c, store, echo=quiet, more=cli.verify_inputs, **kw)
 
 
 def test_verify_finds_and_repairs(api, version, service, database, tmp_path):

@@ -27,6 +27,8 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
   cache.py           本机缓存：按哈希存的文件 + SQLite 索引（大小、修改时间）
   layout.py          把缓存里的文件摆成版本的目录：reflink、复制、硬链接，每个文件摆完都核对哈希
   pool.py            并行跑一组任务（上传、下载）：出错或 Ctrl+C 时取消还没开始的，不等手上的
+  worker.py          fw worker 和 fw runner：领任务、续租、传日志、在 conda 环境里跑命令、交结果；读 conda
+                     包清单和源码提交号
   ops.py             每条命令真正做的事（import_folder、get、export、verify、diff、get_version、
                      create_trainset、get_trainset、register_model、get_model、register_eval、
                      register_release、show_chain）
@@ -35,6 +37,7 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
 server/fwserver/     fw-server：只支持 Linux
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
+  jobs.py            任务队列（领取、租约令牌、续租、过期回队、取消、日志）和推理环境的登记
   models.py          模型、模型版本、评估报告、发布、标签、追溯链；部署账号能下载哪些文件
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
   formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
@@ -52,7 +55,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 
 ### 分层（`lint-imports` 检查）
 
-- 服务端只能往下调：`cli`、`app` → `models` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
+- 服务端只能往下调：`cli`、`app` → `jobs`、`models` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
 - 客户端永远不 import 服务端。
 - `fw.contract` 不依赖 `fw` 里的任何其他模块：服务端也 import 它，它必须保持纯粹。
 
@@ -140,6 +143,15 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 仓库地址里的账号和令牌不会被记下 | `ops.strip_credentials`，数据库 CHECK 拒绝 `https://…@` | `test_code_commit_from_git`、`test_register_and_get_a_model_version` |
 | 训练代码可以不记（数据库 NULL，接口给空字符串，旧客户端照常切片），但记了仓库或「有没提交的改动」就一定有提交号；`weights/` 下只有一个不为空的文件；读 git 时不带 `GIT_*` 环境变量 | `models.register_model_version`、`models._entries`、`ops._git`，CHECK `model_versions_code_needs_commit`、`fileset_files_weights_file`（`0004_optional_code.sql`） | `test_the_training_code_is_optional`、`test_no_training_code_reads_as_an_empty_string`、`test_empty_weights_are_refused`、`test_git_variables_never_redirect_the_code_dir`、`test_the_server_checks_weights_and_code`、`test_what_the_database_refuses` |
 | `fw-server verify` 和追溯链 `--check` 也核对模型版本和评估报告的文件（`--check` 还核对评估用的测试集） | `models.verify_inputs`、`models._check_chain` | `test_chain_from_a_release_down_to_the_pool` |
+| 一个任务同一时刻只在一次领取手里：领取用 `FOR UPDATE SKIP LOCKED`；每次领取一个新令牌（只存 sha256）；续租、日志、交结果都要这次领取的令牌而且租约没到期（拿到行锁之后按 `clock_timestamp()` 判断，等锁期间到期的也拒绝）；租约过期的领取再也改不了任务，任务回队（取消过的就结束，领取 3 次都失联就失败） | `jobs.claim`、`_held`、`expire_leases` | `test_two_workers_never_get_the_same_job`、`test_a_lost_lease_goes_back_to_the_queue_and_its_token_is_refused`、`test_tried_too_often_fails`、`test_cancelled_while_its_worker_is_gone`、`test_a_request_that_waited_for_the_lock_past_its_lease_is_refused` |
+| 平台受理了取消，worker 后交的结果（完成或失败）不会盖掉它：任务记成已取消，失败原因保留；worker 按平台记下的结果显示（「已取消」） | `jobs.finish`、`worker.JobRun.execute` | `test_an_accepted_cancel_is_never_overwritten_by_a_result`、`test_the_worker_says_cancelled_when_the_cancel_won` |
+| worker 连不上平台时按自己的时钟算租约（领取请求发出时起算，每次续租成功从那次请求发出时重算），到期就停下命令、作废这次领取，不会和平台重新派出的领取并跑 | `worker.JobRun.expired`、`_keep`、`_spawn` | `test_a_worker_cut_off_from_the_platform_stops_when_its_lease_runs_out` |
+| 推理环境的包清单包括 conda 包和 `pip freeze --all`；源码有未提交的改动时记改动内容（`git diff HEAD` 和没被忽略的新文件）的哈希，再改一次也看得出；包清单先落盘再登记，`fw-server verify` 也核对它；包清单里网址的账号密码、`?` 后的参数（token、签名）和 conda 的 `/t/<token>/` 去掉再存（别的账号能读到包清单），`#` 后的哈希保留 | `worker.conda_listing`、`redact`、`source_state`、`jobs.register_runner`、`jobs.verify_inputs`、`cli.verify_inputs` | `test_a_runner_sees_a_second_uncommitted_change_and_pip_packages`、`test_a_runner_listing_is_durable_and_verified`、`test_a_runner_listing_keeps_no_credentials` |
+| 结束的任务不再变，任务不能删；推理环境的版本只增不改 | 数据库触发器（`0005_jobs.sql`） | `test_finish_is_safe_to_repeat_and_final` |
+| 交结果、发日志可以安全重发（同一次领取、同样的结束方式返回已有的，两个同时到也一样：先拿行锁再查；同一序号的日志只存一次）；日志每段编号一次，没收到回应就带原编号重发，下一段不会占用它；同一时刻只有一个线程发日志，任务结束时等续租线程还没回来的请求，不并发重发同一段；`fw job log -f` 遇到重新领取时从新一次的开头读 | `jobs.finish`、`add_log`，`Api.post_retried`，`worker.JobRun._send_log`，`cli.cmd_job_log` | `test_finish_is_safe_to_repeat_and_final`、`test_two_identical_finishes_at_once_both_get_the_job`、`test_the_end_of_a_job_waits_for_a_log_request_still_on_its_way`、`test_a_log_piece_whose_answer_was_lost_keeps_its_number`、`test_following_the_log_across_a_second_claim` |
+| worker 收到取消或租约失效时，杀掉正在跑的命令和它启动的子进程（单独的进程组，读包清单的 conda、读源码的 git 也一样）；命令自己结束时，它留在组里的进程也杀掉，不会占着输出管道拖住任务；租约失效时不交结果 | `worker.JobRun._spawn`、`capture`、`_ended`、`_kill`、`execute` | `test_cancel`、`test_worker_stops_when_its_lease_is_taken_back`、`test_cancel_stops_a_real_check_with_its_children`、`test_what_a_command_leaves_running_never_holds_up_the_job`、`test_cancel_stops_a_check_whose_git_hangs` |
+| 平台重启、网络断开时 worker 不退出：领任务失败就等一会儿再领；交结果失败就重试并续租，最多 `FINISH_RETRY_SECONDS`（10 分钟），之后不再续租让租约到期，期间收到取消就交已取消；一个任务出错不影响下一个 | `worker.run_worker`、`JobRun._finish`、`transient` | `test_the_worker_rides_out_a_platform_restart`、`test_a_result_the_platform_keeps_refusing_with_5xx_does_not_hang_the_worker` |
+| 任务只发给推理环境所在的机器 | `jobs.claim` | `test_jobs_go_only_to_the_runners_machine` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
 ## 数据库和迁移
