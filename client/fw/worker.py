@@ -250,22 +250,29 @@ class JobRun:
                 self.echo(f'续租或发日志失败，稍后再试：{e.__class__.__name__}: {e}')
 
     def _finish(self, outcome: str, result: Optional[dict], error: str) -> Optional[dict]:
-        """Send the result; while the platform cannot be reached (restarting, network down), keep trying and keep
-        the lease alive, until it answers or the lease runs out by this machine's clock (None)."""
+        """Send the result; while the platform cannot take it (restarting, network down, 5xx), keep trying and keep
+        the lease alive for at most FINISH_RETRY_SECONDS, then stop renewing and let the lease run out (None):
+        the job goes back to the queue instead of hanging as running. A cancel heard meanwhile is sent instead."""
         delay = 2.0
+        give_up = time.monotonic() + FINISH_RETRY_SECONDS
         while True:
             try:
                 return self.api.finish(self.id, self.token, outcome, result, error)
             except Exception as e:  # noqa: BLE001
                 if not transient(e):
                     raise
-                self.echo(f'任务 {self.id}：交结果时连不上平台（{e}），{delay:g} 秒后再试')
+                self.echo(f'任务 {self.id}：交结果没成功（{e}），{delay:g} 秒后再试')
+            if time.monotonic() + delay >= give_up:
+                self.echo(f'任务 {self.id}：{FINISH_RETRY_SECONDS:g} 秒内一直交不上结果，不再续租，任务到期后回到队列')
+                return None
             time.sleep(delay)
             delay = min(delay * 2, 30.0)
             try:
                 sent = time.monotonic()
                 answer = self.api.renew(self.id, self.token)
                 self.deadline = sent + answer.get('lease_seconds', self.lease_seconds)
+                if answer.get('cancel') and outcome != 'cancelled':
+                    outcome, result, error = 'cancelled', None, ''  # cancelled meanwhile: that is what is sent
             except Exception as e:  # noqa: BLE001
                 if not transient(e):
                     raise
@@ -781,6 +788,9 @@ def deteval_metrics(results: Path, name: str, ops) -> dict:
 def transient(e: BaseException) -> bool:
     """The platform could not be reached or is restarting: worth trying again later."""
     return isinstance(e, httpx.TransportError) or (isinstance(e, ApiError) and (e.status >= 500 or e.status == 429))
+
+
+FINISH_RETRY_SECONDS = 600.0  # how long a result the platform cannot take is retried
 
 
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}

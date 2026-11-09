@@ -954,3 +954,42 @@ def test_what_a_model_command_wrote_is_taken_only_as_its_own_plain_files(tmp_pat
                 worker.take_output(out, shared / 'taken3', model.owner())
     finally:
         subprocess.run(['sudo', '-n', 'rm', '-rf', str(shared)], capture_output=True)
+
+
+def test_a_result_the_platform_keeps_refusing_with_5xx_does_not_hang_the_worker(api, make_worker, fake_conda,
+                                                                                monkeypatch):
+    """finish keeps answering 503 while renewing works: the worker stops after FINISH_RETRY_SECONDS instead of
+    renewing forever; a cancel heard meanwhile is what it sends."""
+    monkeypatch.setattr(worker, 'FINISH_RETRY_SECONDS', 3.0)
+    w = make_worker()
+    r = runner(w, fake_conda)
+
+    class Refusing:
+        def __init__(self, cancelled_only=False):
+            self.cancelled_only = cancelled_only
+
+        def __getattr__(self, name):
+            real = getattr(w, name)
+            if name != 'finish':
+                return real
+
+            def finish(job_id, token, outcome, *a, **k):
+                if outcome == 'cancelled' and self.cancelled_only:
+                    return real(job_id, token, outcome, *a, **k)
+                raise ApiError(503, '文件库停写')
+            return finish
+
+    job = api.submit_job('check', runner=r['runner'])
+    t0 = time.monotonic()
+    said = []
+    assert worker.run_worker(Refusing(), said.append, once=True) == 1
+    assert time.monotonic() - t0 < 30 and said[-1].endswith('租约失效，没交结果')
+    assert api.job(job['id'])['status'] == 'running'  # its lease runs out; the platform takes it back
+    api.cancel_job(job['id'])
+    job = api.submit_job('check', runner=r['runner'])
+    refusing = Refusing(cancelled_only=True)
+    claimed = w.claim()
+    run = worker.JobRun(refusing, claimed, said.append)
+    api.cancel_job(job['id'])
+    assert run._finish('done', {'env_sha256': '0' * 64, 'same_env': True, 'same_src': True}, '')['status'] == \
+        'cancelled'
