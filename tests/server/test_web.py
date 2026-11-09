@@ -169,6 +169,13 @@ def test_the_folder_check_is_the_one_of_fw_dataset_import(service, tokens, tmp_p
                          json={'paths': sorted(files), 'allow_other_files': True, 'force': True}).json()
     assert allowed['reasons'] == local.blocking(True, True) == ['有只差大小写、或同名的文件和目录，在 Windows 上会互相覆盖，先改名']
 
+    def post(paths):
+        return httpx.post(service.url + '/api/v1/folder-check', json={'paths': paths}, timeout=60,
+                          headers={'Authorization': f'Bearer {tokens["algo"]}'})
+
+    assert post(['a/' + 'x' * 1025]).status_code == 422  # one path longer than a path may be
+    assert post([f'{i}.png' for i in range(300_001)]).status_code == 422  # more than the web page checks
+
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
@@ -208,3 +215,21 @@ def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
     for folder, v in ((one, v1), (two, v2)):
         mine = ops.import_folder(api, other, folder, allow_other_files=True, echo=quiet)
         assert mine['manifest_sha256'] == v['manifest_sha256']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_an_older_folder_check_answer_is_not_used(service, tokens, api, tmp_path):
+    """Folder A's check answers late, after folder B was picked: B (an other file, no check box) must not be
+    offered for upload with A's report (review of #17)."""
+    seed = int.from_bytes(os.urandom(2), 'big')
+    a = write_tree(tmp_path / 'a', {'x/a.png': real_png(32, 32, seed)})
+    b = write_tree(tmp_path / 'b', {'y/b.png': real_png(32, 32, seed + 1), 'readme.docx': b'notes',
+                                    'y/Thumbs.db': b'junk'})
+    name = f'R-{os.urandom(4).hex()}'
+    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    r = subprocess.run(['node', str(WEB_TESTS / 'race.cjs'), service.url + '/', tokens['algo'], name, str(a), str(b)],
+                       capture_output=True, text=True, timeout=120, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert not seen['go'] and seen['puts'] == 0
+    assert '图片和标注以外的文件' in seen['shown'] and '2 个文件' in seen['shown']

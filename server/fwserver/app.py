@@ -6,15 +6,15 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Annotated, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser,
-                         ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
+from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, MAX_PATH_BYTES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError,
+                         FrameParser, ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
 
 from . import __version__, auth, datasets, db, evals, jobs, models, predictions, trainsets
 from .datasets import DatasetError, check_digest
@@ -30,7 +30,7 @@ UPLOADERS = DATA_ROLES + ('worker',)         # upload files; a worker sends runn
 JOB_READERS = ('admin', 'algo', 'worker')    # see jobs, their logs and the runners
 JOB_WRITERS = ('admin', 'algo')              # submit and cancel jobs
 MISSING_LIMIT = 20000
-FOLDER_LIMIT = 1_000_000   # files of one folder checked from the web page
+FOLDER_LIMIT = 300_000     # files of one folder checked from the web page (bigger ones: fw dataset import)
 FOLDER_EXAMPLES = 50       # how many of each problem the check lists
 BUFFER = 1 << 20
 BATCH_BODY_MAX = 512 << 20   # one batch upload request
@@ -40,7 +40,7 @@ STORE_GROUP = 4 << 20        # batch uploads are written to the store in groups 
 
 
 class FolderCheckBody(BaseModel):
-    paths: List[str] = Field(max_length=FOLDER_LIMIT)  # relative posix paths of every file in the folder
+    paths: List[Annotated[str, Field(max_length=MAX_PATH_BYTES)]] = Field(max_length=FOLDER_LIMIT)  # every file's path
     allow_other_files: bool = False
     force: bool = False
 

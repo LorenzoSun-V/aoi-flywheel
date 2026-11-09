@@ -993,12 +993,22 @@ async function uploadPage(name) {
     el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, Array.isArray(x) ? x.join('  ') : x))),
     part.count > part.examples.length ? el('p', { class: 'muted' }, `只列出前 ${part.examples.length} 个`) : null) : null);
 
+  // Each pick or check box starts a new round; an answer, hashing or plan of an older round is dropped, and the
+  // controls stay locked while hashing and uploading, so what is uploaded is always what was checked.
+  let round = 0;
+  const lock = (on) => { for (const c of [picker, allowOther, force]) c.disabled = on; };
+
   const check = async () => {
     if (!files.length) return;
-    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${files.length} 个文件…`));
-    const r = await api.folderCheck(paths, allowOther.checked, force.checked);
+    const mine = ++round;
+    const picked = files;
+    const pickedPaths = paths;
+    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
+    if (mine !== round) return;
     const junk = new Set(r.junk);
-    const keep = files.map((f, i) => [f, paths[i]]).filter(([, p]) => !junk.has(p));
+    const keep = picked.map((f, i) => [f, pickedPaths[i]]).filter(([, p]) => !junk.has(p));
+    const folder = (picked[0].webkitRelativePath || '').split('/')[0];
     const report = [
       el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
         + (r.junk.length ? `；系统文件 ${r.junk.length} 个不入库` : '')),
@@ -1010,18 +1020,22 @@ async function uploadPage(name) {
       result.replaceChildren(...present([report, el('div', { class: 'error' }, '不能入库：\n' + r.reasons.join('\n'))]));
       return;
     }
-    const go = el('button', { class: 'primary', onclick: () => hashAndCompare(keep, report) }, '算哈希，和最新版本比较');
+    const go = el('button', { class: 'primary', onclick: () => hashAndCompare(mine, keep, folder, report)
+      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '算哈希，和最新版本比较');
     result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
   };
 
-  const hashAndCompare = async (keep, report) => {
+  const hashAndCompare = async (mine, keep, folder, report) => {
+    if (mine !== round) return;
     const progress = bar();
     result.replaceChildren(...present([report, progress]));
     uploading = true;
+    lock(true);
     let digests;
     try {
       digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
-    } finally { uploading = false; }
+    } finally { uploading = false; lock(false); }
+    if (mine !== round) return;
     const entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
     const text = manifestText(entries);
     const manifest = new Blob([text]);
@@ -1034,7 +1048,8 @@ async function uploadPage(name) {
     }
     const change = diffManifests(old, entries);
     const number = (latest ? latest.number : 0) + 1;
-    const start = el('button', { class: 'primary', onclick: () => send(entries, manifest, manifestDigest, number, report) }, `上传并建 ${d.name}@${number}`);
+    if (mine !== round) return;
+    const start = el('button', { class: 'primary', onclick: () => send(mine, entries, manifest, manifestDigest, number, folder, report) }, `上传并建 ${d.name}@${number}`);
     result.replaceChildren(...present([report,
       el('p', {}, latest ? `相比 ${latest.ref}：新增 ${change.added.length}，删除 ${change.deleted.length}，修改 ${change.modified.length}` : `这是 ${d.name} 的第一个版本`),
       change.deleted.length ? el('div', { class: 'error' }, `会删掉 ${latest.ref} 里的 ${change.deleted.length} 个文件（新版本只含这个目录里的文件），例如：\n`
@@ -1043,10 +1058,13 @@ async function uploadPage(name) {
       el('div', { class: 'row' }, start)]));
   };
 
-  const send = async (entries, manifest, manifestDigest, number, report) => {
+  const send = async (mine, entries, manifest, manifestDigest, number, folder, report) => {
+    if (mine !== round) return;
+    const here = location.hash;
     const progress = bar();
     result.replaceChildren(...present([report, progress]));
     uploading = true;
+    lock(true);
     try {
       const unique = new Map();
       for (const e of entries) if (!unique.has(e.sha256)) unique.set(e.sha256, e);
@@ -1065,14 +1083,13 @@ async function uploadPage(name) {
         progress.set(sent, bytes, `上传 ${sizeText(sent)} / ${sizeText(bytes)}`);
       });
       await api.putObject(manifestDigest, manifest);
-      const folder = (files[0].webkitRelativePath || '').split('/')[0];
       const v = await api.createVersion(d.name, { manifest_sha256: manifestDigest, parent_id: latest ? latest.id : null,
         expect_latest_id: latest ? latest.id : null, source: `网页上传 ${folder}`, note: note.value.trim() });
       uploading = false;
-      location.hash = hrefOf(['v', d.name, String(v.number)]);
+      if (location.hash === here) location.hash = hrefOf(['v', d.name, String(v.number)]);  // not if they went elsewhere
     } catch (e) {
       result.replaceChildren(...present([report, errorBox(e)]));
-    } finally { uploading = false; }
+    } finally { uploading = false; lock(false); }
   };
 
   picker.addEventListener('change', () => {
@@ -1084,7 +1101,8 @@ async function uploadPage(name) {
   show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传'),
     el('h1', {}, `上传到 ${d.name}`),
     el('p', { class: 'muted' }, `选一个目录：目录里的全部文件成为新版本（${latest ? `父版本 ${latest.ref}；目录里没有的文件在新版本里就是删除` : '第一个版本'}）。`
-      + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'),
+      + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
+      + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
     el('div', { class: 'panel form' },
       el('label', {}, '目录', picker),
       el('label', {}, '备注', note),
