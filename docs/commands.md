@@ -479,7 +479,28 @@ fw worker
 - 要用 worker 账号（`fw-server user add gpu-01 --role worker`）。worker 只领任务、续租、传日志、交结果，不能提交任务。
 - 每次领取有自己的令牌和租约；worker 每 20 秒续一次。平台说租约已收回，或者连不上平台、按这台机器的时钟租约已经到期，worker 就停下正在跑的命令（连同子进程），这次的结果不交；平台那边同时把任务放回队列，所以同一个任务不会在两处同时跑。
 - 命令自己结束时，它留下还在跑的子进程也一起杀掉，任务不会被它们拖住。
-- Ctrl+C 立即退出；正在跑的任务在租约到期后回到队列。常驻运行用 systemd，见[部署](#部署备份恢复)。
+- 平台重启、网络断开时 worker 不退出：领任务连不上就每隔 `--poll` 秒再试；交结果连不上就一直重试并续租，直到交上或租约按本机时钟到期（那时任务回到队列）。只有凭据失效这类问题才退出。
+- Ctrl+C 立即退出；正在跑的任务在租约到期后回到队列。
+
+常驻运行用 systemd（以 worker 账号 `fwworker` 为例，写到 `/etc/systemd/system/fw-worker.service`）：
+
+```
+[Unit]
+Description=fw worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fwworker
+ExecStart=/home/fwworker/.local/bin/fw worker
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`sudo systemctl daemon-reload && sudo systemctl enable --now fw-worker`；看输出用 `journalctl -u fw-worker -f`。`ExecStart` 写 `which fw` 给出的路径。`Restart=always` 保证 worker 万一退出（升级、出错）也会重新起来。
 
 **跑模型用单独的账号（必配）。** 评估要加载上传的权重，`.pt`、`.pth` 是 pickle，加载时会执行里面的代码，带恶意代码的权重能以运行它的账号做任何事。worker 自己的账号存着 worker 令牌，所以加载权重的命令（aoi-deteval）由 worker 通过 sudo 切到另一个低权限账号运行，环境变量清空（只留 `CUDA_VISIBLE_DEVICES`、`NVIDIA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LANG`、`LC_ALL`、`TZ`）。在 GPU 机上配一次（以 worker 账号 `fwworker`、模型账号 `fwmodel` 为例）：
 
