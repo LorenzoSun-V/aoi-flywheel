@@ -288,12 +288,12 @@ fw model register SES-TX-detr --onnx runs/best.onnx --weights runs/best.pt --tra
   --file configs/train.yaml
 ```
 
-把 ONNX 和权重传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。模型好不好以平台用 aoi-deteval 统一算的指标为准（第三步由 GPU worker 用权重和从 ONNX 构建的引擎评估），不看各训练框架自己算的指标，所以指标和训练代码都是选填。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
+把 ONNX 和权重传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。模型好不好以平台用 aoi-deteval 统一算的指标为准（第三步由 GPU worker 用从 ONNX 构建的 TensorRT 引擎评估），不看各训练框架自己算的指标，所以指标和训练代码都是选填。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
 
 | 选项 | 说明 |
 |---|---|
-| `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
-| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，用来统一评估 |
+| `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`）；有张量把数据放在别的文件里（external data）也拒绝，平台只收单个文件的 ONNX（2GB 以下的模型 `torch.onnx.export` 默认就是单文件） |
+| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，只作存档（以后接着训练、对照用）；平台从不加载它，评估、推理都用 ONNX 建的引擎 |
 | `--trainset` | 必填，训练用的训练集快照，例如 `SES-TX-det@2`。追溯链就是从这里接到数据的；类别表也用这个快照的，登记时一起放进模型版本 |
 | `--metrics` | 选填：训练框架自己算的验证指标 JSON（一个 JSON 对象），只作参考；`fw model show`、`fw model compare` 会列出里面的数值 |
 | `--file` | 附件：训练配置等，登记在 `files/` 下；写目录就带上整个目录；可写多次 |
@@ -337,6 +337,38 @@ fw model chain SES-TX-detr@3           # 从一个模型版本查起
 追溯链一级一级打印：发布（部署仓库和提交号、现场怎么构建的引擎）→ 模型版本（ONNX 哈希、训练代码提交号、标签、评估报告）→ 训练集快照（清单哈希、类别、各划分张数）→ 数据池版本（清单哈希、从哪里导入、备注）。每一级都有编号、哈希、登记人和时间。
 
 `--check` 顺便核对链上每个文件都还在文件库里、大小对（模型文件、评估报告的文件、快照和数据池版本的每个文件）；有问题时列出来，退出码 1。重算哈希用 `fw-server verify --rehash`。
+
+### fw eval run
+
+```
+fw eval run SES-TX-detr@3 --data SES-TX@5 --dirs SES/TX/test_1015 SES/TX/test_1016 --runner detr-pro
+fw eval run SES-TX-detr@3 --data SES-TX-det@2:test --runner detr-pro --wait
+```
+
+排一个评估任务：推理环境所在的 GPU 机用模型版本的 `model.onnx` 在本机建 TensorRT 引擎（onnx2engine，FP16），用部署代码的推理模块跑完全部测试图，写成 aoi-deteval 的预测文件，再跑 `deteval evaluate`，结果自动登记成评估报告（`fw eval show` 看）。指标以平台用 aoi-deteval 算的为准，量的就是部署时那条 TensorRT 推理。
+
+| 选项 | 说明 |
+|---|---|
+| `模型版本` | 例如 `SES-TX-detr@3`；只写名称就是最新版，提交时定下。评的是它的 `model.onnx`（输入尺寸由 ONNX 定） |
+| `--data` | 在哪个版本上评。数据集版本（数据池、测试集）直接写，例如 `SES-TX@5`；训练集快照写划分，例如 `SES-TX-det@2:test` |
+| `--dirs` | 只评数据集版本里的这几个目录（连同下面所有子目录），写版本里的相对路径；不写就是整个版本。快照按划分评，不用写 |
+| `--runner` | 推理环境，例如 `detr-pro` 或 `detr-pro@2`；登记时要写了 `--framework` 和 `--onnx2engine` |
+| `--wait` | 等任务跑完，跟着显示输出，最后给出评估报告编号 |
+
+- 读哪些标注：快照用它的 YOLO 标注，类别编号按快照的类别表；快照的类别表要和模型的完全一样（顺序也一样），不一样就不收（否则对的框会被算成错的类别）。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表，有模型类别表里没有的类别名（包括只差大小写的）就不收（扩展名大小写都认，`x.JSON` 摆成 `x.json` 给 aoi-deteval）；没有标注的图算正常图（没有缺陷）。只有 YOLO txt（`.txt`、`.TXT` 都算）的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
+- 提交时就定下要评哪些图：图片清单存进文件库，任务重试、版本以后再变都还是这些图。评完的张数和清单对不上（有图没读到），不登记，任务算失败。
+- 选的图里有和模型训练集快照 train、val 里内容相同的图（按文件哈希，不看路径），提交时提醒，并写进报告的备注：这些图的成绩会偏好。
+- worker 先核对推理环境还是登记时那样（包清单、源码、onnx2engine 程序），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
+- 本机的引擎只是缓存：按 ONNX、onnx2engine 程序、环境、显卡和驱动存在 fw 缓存目录的 `engines/` 下，同一台机器同一个 ONNX 只建一次；不上传、不发布。发布到现场的是 ONNX，现场用同一个 onnx2engine 自己建引擎（本机建的引擎换了显卡或 TensorRT 版本不一定能用；同样的显卡和版本，TensorRT 每次建 FP16 引擎挑的算子实现也可能不同，所以现场的引擎和本机的结果会有很小的差别）。报告的 `files/engine.json` 记下引擎的哈希、显卡和驱动、TensorRT 版本、精度（精度是 onnx2engine 自己设的 FP16，平台没有从引擎里读出来核对，所以记成 `precision_from: onnx2engine`）和推理计数（`predict`：图数、留下的框、去掉的框）。
+- 引擎写进缓存前先落盘（fsync）再改名，最后写旁边的 `<名字>.engine.sha256`；用缓存前核对，对不上（比如断电留下的空文件、被改过）就删掉重建。推理模块加载不了引擎时也删掉重建一次再试。
+- 只收单文件 ONNX：worker 建引擎前再查一遍 ONNX 里有没有 external data（TensorRT 解析 ONNX 时会按模型里写的路径去读那个文件），有就不建；ONNX 单独复制到一个空目录里给 onnx2engine。
+- 缓存不会自己清：`engines/` 下的文件随时可以删（删了下次评估再建），换显卡、换环境以后旧引擎就用不上了，可以定期清掉。
+- 用哪块显卡：`CUDA_VISIBLE_DEVICES` 的第一块，没设就是 0 号；worker 跑 onnx2engine 和推理时设 `CUDA_DEVICE_ORDER=PCI_BUS_ID`，这样 CUDA 和 `nvidia-smi` 的编号一致，引擎缓存按的显卡就是实际跑的那块。
+- 推理时置信度下限 0.001（算 mAP 要几乎所有框，和 `deteval predict` 一样）；引擎输出的类别超出模型类别表的框不计入，日志和 `engine.json` 里写去掉了多少个；去掉的比留下的还多时任务失败（ONNX 和登记的类别表多半对不上），不登记报告。
+- aoi-deteval 一个集合只读一层目录，按文件名对应预测和真值，所以 worker 把每个有图的目录作为一个集合（`d1`、`d2`…），再把它们合成一组 `eval`；登记的指标是 `eval` 这一组的（只有一个目录时就是那个目录）。工作点阈值（f1 等）也是在这一组上定的，看 mAP 不受影响，看阈值类指标时要知道这一点。
+- 报告的文件：`metrics.json`，`files/` 下是 aoi-deteval 的整个输出目录、用的集合配置（`eval_sets.yaml`）、预测 JSON（`preds/`）和引擎信息（`engine.json`）。`fw eval show` 会写明是哪个评估任务、哪个推理环境算的。
+- 取消、租约失效的评估不登记报告。两个任务算出的结果一字不差时，各自登记一份报告（文件只存一份），报告里各记各的任务和推理环境。
+- 平台从不加载上传的权重（`.pt`、`.pth` 是 pickle，加载时会执行里面的代码）：worker 只拿到 ONNX，ONNX 里没有能执行的代码。
 
 ### fw eval register、list、show
 
@@ -400,7 +432,7 @@ fw release show SES-TX-r3                  # 这次发布和它的追溯链
 推理环境就是 GPU 机上搭好的 conda 环境，一个框架一个（例如 `yolo26`、`detr-pro`）。平台只做 TensorRT 推理，推理环境都在 NVIDIA GPU 机上。评估、推理任务（第三步后面几个 PR）在模型登记的推理环境里跑。
 
 ```
-fw runner register detr-pro --env detr-pro --src ~/code/rf-detr-pro    # 在 GPU 机上，用 worker 账号
+fw runner register detr-pro --env detr-pro --framework rfdetr --onnx2engine /opt/deploy/onnx2engine   # 在 GPU 机上，用 worker 账号
 fw runner list
 fw runner show detr-pro
 fw runner check detr-pro                                              # 算法工程师：提交一个检查任务
@@ -410,13 +442,17 @@ fw runner check detr-pro                                              # 算法�
 |---|---|
 | `名称` | 推理环境名：字母、数字和 `. _ -`，全平台唯一 |
 | `--env` | conda 环境名 |
-| `--src` | 框架源码目录（git 仓库），团队改过框架时写；用 pip 装的官方版就不写 |
+| `--src` | 框架源码目录（git 仓库），要记下哪个提交时写；不写也行 |
+| `--framework` | 用哪个部署代码的推理模块跑 TensorRT 引擎，现在只有 `rfdetr`（`py_rfdetr`）。要用来评估的环境必须写；改了也是新版本 |
+| `--onnx2engine` | 部署代码的 onnx2engine 程序（`onnx2engine model.onnx` 在旁边写出 `model.engine`），和 `--framework` 一起写；登记它的路径和文件哈希，程序换了（重新编译）就是新版本。建议放在 `--src` 指的部署仓库里编译：哈希只管程序文件本身，它用到的动态库（TensorRT、自家的 .so）在环境或仓库里，这样 `fw runner check` 能一起看出变化 |
+
+评估用的环境里要有：`tensorrt`（Python 包，读版本用）、OpenCV（`cv2`）、部署代码的推理模块（`py_rfdetr`，能 `import`）、aoi-deteval（只用 `deteval evaluate`）。onnx2engine 在这个环境里运行（`conda run`），所以它找得到环境里的 TensorRT 库；机器上要有 `nvidia-smi`。
 
 - 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希（包清单里网址带的账号密码、`?token=...` 这类参数和 conda 的 `/t/<token>/` 先去掉再传，私有源的凭据不会被别的账号看到；包的哈希保留）；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
 - 用 `pip install -e` 装的包，pip 的清单只记它的位置，不记它的代码；这样装的框架源码用 `--src` 登记，改动才看得出来。
 - 包清单、源码提交号或改动、所在机器有任何一样和最新一版不同，就登记成新版本（`detr-pro@2`）；完全一样就说「没有新版本」。版本只增不改。
 - 迁到别的 GPU 机：在那台机器装好同名环境，用它的 worker 账号再登记一次，新版本记的是新机器；以后的任务都发给那台机器。
-- `fw runner check` 提交一个任务：那台 GPU 机上的 worker 重新读包清单和源码，和登记的比，结果用 `fw job show` 看（「包清单没变 / 变了」「源码没变 / 变了」）。有人在环境里装了包、改了源码，这样就能看出来；要以新状态为准就再 `register` 一次。
+- `fw runner check` 提交一个任务：那台 GPU 机上的 worker 重新读包清单和源码，和登记的比（onnx2engine 程序算在环境里），结果用 `fw job show` 看（「包清单没变 / 变了」「源码没变 / 变了」）。有人在环境里装了包、改了源码，这样就能看出来；要以新状态为准就再 `register` 一次。
 
 ### fw job list、show、log、cancel
 
@@ -694,6 +730,8 @@ FW_SERVER=http://<平台>:8000 FW_TOKEN=<凭据> python tools/bench.py --pairs 1
 | `FW_CONFIG` | 设置文件的位置 |
 | `FW_CACHE` | 本机缓存的位置 |
 | `FW_CONDA` | `fw runner`、`fw worker` 用的 conda 可执行文件；不设就找 PATH 里的 `conda`，再找 `CONDA_EXE` |
+| `FW_WORK_DIR` | `fw worker` 摆放任务文件（权重、图片、输出）的目录，默认是缓存目录下的 `jobs/`；相对路径按启动 worker 时的当前目录算；每个任务一个子目录，跑完删掉 |
+| `FW_KEEP_WORK` | 设了（例如 `1`）就不删跑完的任务目录，查问题时用 |
 
 默认位置：
 

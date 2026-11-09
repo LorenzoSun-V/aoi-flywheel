@@ -849,6 +849,11 @@ def register_model(api: Api, name: str, onnx, trainset, metrics=None, files: Seq
         raise FwError(f'读不了 ONNX 文件 {onnx}（{e.strerror or e}）') from None
     if head != b'\x08':
         raise FwError(f'{onnx} 不像 ONNX 文件；权重（.pt、.pth）用 --weights 登记')
+    from .onnx_check import OnnxError, check_self_contained
+    try:
+        check_self_contained(onnx)
+    except OnnxError as e:
+        raise FwError(f'{onnx}：{e}') from None
     version = _trainset(api, trainset)
     items = [('model.onnx', onnx)]
     if weights is not None:

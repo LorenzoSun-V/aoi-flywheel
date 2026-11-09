@@ -152,13 +152,37 @@ def source_info(src_dir: str, capture: Optional[Capture] = None) -> Dict[str, ob
             'src_state_sha256': state}
 
 
-def register_runner(api: Api, name: str, env: str, src_dir: str = '') -> dict:
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def onnx2engine_info(path: str) -> Tuple[str, str]:
+    """The onnx2engine program (from the deploy code) as registered: its absolute path and sha256."""
+    found = shutil.which(path) if os.sep not in path else path
+    program = Path(found or path).expanduser()
+    if not program.is_file() or not os.access(program, os.X_OK):
+        raise WorkerError(f'找不到能运行的 onnx2engine：{path}')
+    return str(program.resolve()), file_sha256(program)
+
+
+def register_runner(api: Api, name: str, env: str, src_dir: str = '', framework: str = '',
+                    onnx2engine: str = '') -> dict:
     """Run on the GPU machine with its worker account: records the environment's package listing (uploaded to
-    the store, so a later change can be compared) and the source commit as the runner's next version."""
+    the store, so a later change can be compared), the source commit, the TensorRT inference adapter (rfdetr;
+    '' = the runner only runs checks) and the onnx2engine program that builds engines, as the runner's next
+    version."""
+    if bool(framework) != bool(onnx2engine):
+        raise WorkerError('--framework 和 --onnx2engine 要一起写：评估时用 onnx2engine 从 ONNX 建引擎，再用框架的推理模块跑')
+    tool, tool_sha = onnx2engine_info(onnx2engine) if onnx2engine else ('', None)
     listing = conda_listing(env)
     digest = api.put_bytes(listing)  # the platform makes it durable before it records the runner
     src = source_info(src_dir)
-    return api.register_runner({'name': name, 'conda_env': env, 'env_sha256': digest, **src})
+    return api.register_runner({'name': name, 'conda_env': env, 'env_sha256': digest, 'framework': framework,
+                                'onnx2engine': tool, 'onnx2engine_sha256': tool_sha, **src})
 
 
 class JobRun:
@@ -376,7 +400,17 @@ class JobRun:
                 self.echo(f'任务 {self.id}：最后一段日志没传上：{e}')
             if self.lost.is_set():
                 return 'lost'
-            job = self._finish(outcome, result if outcome == 'done' else None, error if outcome == 'failed' else '')
+            try:
+                job = self._finish(outcome, result if outcome == 'done' else None,
+                                   error if outcome == 'failed' else '')
+            except ApiError as e:
+                if outcome != 'done' or e.status != 400:
+                    raise
+                # the platform refused the result (e.g. the report does not add up): the job failed, and why
+                outcome = 'failed'
+                self.log(f'失败：平台没有收下结果：{e.message}')
+                self._send_log()
+                job = self._finish('failed', None, f'平台没有收下结果：{e.message}')
             if job is None:
                 self.echo(f'任务 {self.id}：租约到期前一直连不上平台，结果没交上，任务会回到队列')
                 return 'lost'
@@ -424,9 +458,9 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 # --- job kinds ----------------------------------------------------------------------------------------
-def check_runner(run: JobRun) -> dict:
+def check_runner(run: JobRun, p: Optional[dict] = None) -> dict:
     """Is the runner on this machine still what was registered? Compares the package listing and the source."""
-    p = run.job['params']
+    p = p if p is not None else run.job['params']
     run.log(f'检查 conda 环境 {p["conda_env"]}')
     listing = conda_listing(p['conda_env'], run.capture)
     digest = hashlib.sha256(listing).hexdigest()
@@ -434,6 +468,14 @@ def check_runner(run: JobRun) -> dict:
     src = source_info(p['src_dir'], run.capture)
     run.check()
     same_env = digest == p['env_sha256']
+    if p.get('onnx2engine'):
+        try:
+            tool = file_sha256(Path(p['onnx2engine']))
+        except OSError as e:
+            tool = f'读不了（{e.strerror or e}）'
+        same_tool = tool == p['onnx2engine_sha256']
+        run.log(f'onnx2engine {p["onnx2engine"]}' + ('和登记时一样' if same_tool else f'变了：现在 {tool[:12]}'))
+        same_env = same_env and same_tool  # the program is part of what the environment runs
     same_src = (src['src_commit'], src['src_state_sha256']) == (p['src_commit'], p.get('src_state_sha256'))
     run.log('包清单' + ('和登记时一样' if same_env else f'变了：现在 {digest[:12]}，登记时 {p["env_sha256"][:12]}'))
     if p['src_dir']:
@@ -442,6 +484,272 @@ def check_runner(run: JobRun) -> dict:
         run.log('源码' + ('和登记时一样' if same_src else f'变了：现在 {now}，登记时 {then}'))
     return {'env_sha256': digest, 'src_commit': src['src_commit'], 'src_dirty': src['src_dirty'],
             'src_state_sha256': src['src_state_sha256'], 'same_env': same_env, 'same_src': same_src}
+
+
+def work_dir() -> Path:
+    """Where jobs lay out their files: FW_WORK_DIR, else jobs/ in the fw cache folder (the same disk as the cache,
+    so laying out can use reflinks)."""
+    if os.environ.get('FW_WORK_DIR'):
+        return Path(os.environ['FW_WORK_DIR']).expanduser().resolve()  # commands run with the job's folder as cwd
+    from .config import cache_dir
+    return (cache_dir() / 'jobs').resolve()
+
+
+def conda_run(env: str, *argv: str) -> List[str]:
+    return [conda_executable(), 'run', '-n', env, '--no-capture-output', *argv]
+
+
+def deteval_sets(data: Path, images: List[str], classes: List[str]) -> dict:
+    """The aoi-deteval sets config: one set per folder that holds images (deteval reads a set's folder without
+    going into the folders below it, and tells images apart by file name), and the group 'eval' of all of them;
+    with one folder, that folder is the set 'eval'. JSON, which YAML reads as it is."""
+    folders = sorted({str(Path(p).parent.as_posix()) for p in images})
+    if len(folders) == 1:
+        sets = {'eval': str(data / folders[0])}
+        groups = {}
+    else:
+        width = len(str(len(folders)))
+        sets = {f'd{i + 1:0{width}d}': str(data / f) for i, f in enumerate(folders)}
+        groups = {'eval': list(sets)}
+    cfg = {'root': str(data), 'names': list(classes), 'sets': sets}
+    if groups:
+        cfg['groups'] = groups
+    return cfg
+
+
+ENGINE_PRECISION = 'fp16'  # what onnx2engine says it builds (its own setting, not read back from the engine)
+PREDICT_CONF = 0.001  # the lowest score kept in predictions (mAP needs nearly all of them, as deteval predict)
+ENGINE_LOAD_FAILED = 3  # trt_predict.py's exit status when the engine cannot be loaded
+
+
+def gpu_device() -> str:
+    """The GPU the inference module's device 0 is: the first of CUDA_VISIBLE_DEVICES (an index or a UUID), else 0.
+    The commands run with CUDA_DEVICE_ORDER=PCI_BUS_ID (gpu_env), so CUDA counts the GPUs in nvidia-smi's order."""
+    first = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')[0].strip()
+    return first or '0'
+
+
+def gpu_env() -> dict:
+    return dict(os.environ, CUDA_DEVICE_ORDER='PCI_BUS_ID', PYTHONUNBUFFERED='1')
+
+
+def gpu_info(run: JobRun) -> str:
+    """The GPU the engine is built for and runs on (gpu_device) and its driver."""
+    code, out, err = run.capture(['nvidia-smi', '--query-gpu=name,driver_version', '--format=csv,noheader',
+                                  '-i', gpu_device()])
+    text = out.decode('utf-8', 'replace').strip()
+    if code != 0 or not text:
+        raise WorkerError(f'nvidia-smi 读不到显卡 {gpu_device()}：{err.decode("utf-8", "replace").strip()[-300:] or code}')
+    return text.splitlines()[0].strip()
+
+
+def trt_version(run: JobRun, env: str) -> str:
+    code, out, err = run.capture([conda_executable(), 'run', '-n', env, 'python', '-c',
+                                  'import tensorrt; print(tensorrt.__version__)'])
+    version = out.decode('utf-8', 'replace').strip().splitlines()[-1:] if code == 0 else []
+    if not version:
+        raise WorkerError(f'环境 {env} 里读不到 TensorRT 版本：{err.decode("utf-8", "replace").strip()[-300:]}')
+    return version[0].strip()
+
+
+def _fsync(path: Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _drop_engine(engine: Path) -> None:
+    for p in (engine, engine.with_name(engine.name + '.sha256')):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _cached_engine(run: JobRun, engine: Path) -> Optional[str]:
+    """The sha256 of a cached engine that is whole (its .sha256 file, written after it, agrees), else None; a
+    cached engine that is not is removed, to be built again."""
+    sidecar = engine.with_name(engine.name + '.sha256')
+    if not engine.exists() and not sidecar.exists():
+        return None
+    try:
+        want = sidecar.read_text(encoding='ascii').strip()
+        have = file_sha256(engine) if engine.stat().st_size else ''
+    except (OSError, UnicodeDecodeError):
+        want, have = '', None
+    if want and have == want:
+        return have
+    run.log(f'缓存里的引擎 {engine.name} 不完整或者被改过（和它的 .sha256 对不上），删掉重建')
+    _drop_engine(engine)
+    return None
+
+
+def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tuple[Path, dict]:
+    """The engine of this ONNX on this machine: built with the runner's onnx2engine in its environment, kept in
+    engines/ of the fw cache folder by ONNX, program, environment, GPU and driver (a cache: never uploaded or
+    released; a site builds its own from the same ONNX, and may get a slightly different engine since TensorRT
+    picks its FP16 kernels per build). The engine is written whole before it is used: fsync, rename, then its
+    .sha256 file; one that does not match its .sha256 is built again. Returns its path and what it was built
+    from."""
+    import json
+    from .onnx_check import OnnxError, check_self_contained
+    try:
+        check_self_contained(onnx)
+    except OnnxError as e:
+        raise WorkerError(f'没有建引擎：{e}') from None
+    gpu = gpu_info(run)
+    trt = trt_version(run, runner['conda_env'])
+    info = {'onnx_sha256': onnx_sha256, 'onnx2engine_sha256': runner['onnx2engine_sha256'],
+            'env_sha256': runner['env_sha256'], 'gpu': gpu, 'trt_version': trt, 'precision': ENGINE_PRECISION}
+    key = hashlib.sha256(json.dumps(info, sort_keys=True).encode('utf-8')).hexdigest()
+    from .config import cache_dir
+    cache = cache_dir() / 'engines'
+    cache.mkdir(parents=True, exist_ok=True)
+    engine = cache / f'{key}.engine'
+    digest = _cached_engine(run, engine)
+    if digest is not None:
+        run.log(f'用缓存的引擎（{gpu}，TensorRT {trt}）')
+    else:
+        build = cache / f'build-{key}-{os.getpid()}'
+        shutil.rmtree(build, ignore_errors=True)
+        build.mkdir()
+        try:
+            shutil.copyfile(onnx, build / 'model.onnx')  # alone in its folder: nothing else to read next to it
+            run.log(f'用 onnx2engine 在这台机器上建引擎（onnx2engine 设的精度 {ENGINE_PRECISION.upper()}；'
+                    f'{gpu}，TensorRT {trt}）')
+            code = run.run(conda_run(runner['conda_env'], runner['onnx2engine'], str(build / 'model.onnx')),
+                           cwd=str(build), env=gpu_env())
+            built = build / 'model.engine'  # onnx2engine writes it next to the ONNX
+            if code != 0 or not built.is_file() or built.stat().st_size == 0:
+                raise WorkerError(f'onnx2engine 没有建出引擎（返回 {code}），原因见日志')
+            digest = file_sha256(built)
+            _fsync(built)
+            os.replace(built, engine)
+            sidecar = build / 'engine.sha256'
+            sidecar.write_text(digest + '\n', encoding='ascii')
+            _fsync(sidecar)
+            os.replace(sidecar, engine.with_name(engine.name + '.sha256'))
+            _fsync(cache)
+        finally:
+            shutil.rmtree(build, ignore_errors=True)
+    return engine, dict(info, engine_sha256=digest, engine_size=engine.stat().st_size,
+                        precision_from='onnx2engine')
+
+
+def eval_model(run: JobRun) -> dict:
+    """Evaluate a model version: check the runner is what was registered, lay out the ONNX and the test images,
+    build (or reuse) this machine's TensorRT engine, run it over the images with the framework's inference
+    module (fw/trt_predict.py) into an aoi-deteval predictions file, run deteval evaluate, upload the output
+    and hand it to the platform, which registers the evaluation report. No uploaded weights are ever loaded."""
+    p = run.job['params']
+    runner = p['runner']
+    now = check_runner(run, runner)
+    if not now['same_env'] or not now['same_src']:
+        raise WorkerError('推理环境和登记时不一样了（见上面），没有评估；确认没问题后在这台机器上重新 fw runner register，'
+                          '再提交评估')
+    run.check()
+    root = work_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    folder = root / f'job-{run.id}-{run.job["attempt"]}'
+    try:
+        return _eval_in(run, p, runner, folder)
+    finally:
+        if not os.environ.get('FW_KEEP_WORK'):
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _predict(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str, sets: Path, name: str, nc: int,
+             folder: Path) -> Tuple[Path, dict]:
+    """Run the engine over the sets into preds/<name>.json; an engine that does not load is built again once."""
+    import json
+    pred = folder / 'preds' / f'{name}.json'
+    stats = folder / 'predict-stats.json'
+    pred.parent.mkdir(exist_ok=True)
+    for attempt in (1, 2):
+        engine, built = build_engine(run, runner, onnx, onnx_sha256)
+        run.check()
+        code = run.run(conda_run(runner['conda_env'], 'python', str(Path(__file__).with_name('trt_predict.py')),
+                                 '--framework', runner['framework'], '--engine', str(engine), '--sets', str(sets),
+                                 '--name', name, '--nc', str(nc), '--conf', f'{PREDICT_CONF:g}',
+                                 '--out', str(pred), '--stats', str(stats)), cwd=str(folder), env=gpu_env())
+        if code == ENGINE_LOAD_FAILED and attempt == 1:
+            run.log('引擎加载不了，删掉缓存里的这个引擎，重建一次再试')
+            _drop_engine(engine)
+            continue
+        if code != 0 or not pred.is_file() or not stats.is_file():
+            raise WorkerError(f'TensorRT 推理没有成功（返回 {code}），原因见日志')
+        counted = json.loads(stats.read_text(encoding='utf-8'))
+        built['predict'] = counted
+        if counted['dropped'] > counted['boxes']:
+            raise WorkerError(f'引擎给出的框里有 {counted["dropped"]} 个类别超出模型的类别表（{nc} 类），比留下的 '
+                              f'{counted["boxes"]} 个还多：ONNX 和登记的类别表多半对不上，没有评估')
+        return pred, built
+    raise AssertionError('unreachable')
+
+
+def _eval_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
+    import json
+    from . import ops
+    from .cache import Cache
+    from .contract import IMAGE_EXTS, parse_manifest
+
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir()
+    cache = Cache()
+    try:
+        ops._lay_out(run.api, cache, p['model']['ref'], p['model']['files'], folder / 'model', 'auto', 4, run.log)
+        run.check()
+        entries = parse_manifest(run.api.read_object(p['data']['inputs_sha256']))
+        images = [e[0] for e in entries if Path(e[0]).suffix.lower() in IMAGE_EXTS]
+        if len(images) != p['data']['images']:
+            raise WorkerError(f'输入清单里有 {len(images)} 张图，提交时是 {p["data"]["images"]} 张')
+        ops._lay_out(run.api, cache, p['data']['ref'], entries, folder / 'data', 'auto', 8, run.log)
+        run.check()
+    finally:
+        cache.close()
+    onnx = [f for f in p['model']['files'] if f[0] == 'model.onnx'][0]
+    classes = p['model']['classes']
+    cfg = deteval_sets(folder / 'data', images, classes)
+    sets = folder / 'eval_sets.yaml'
+    sets.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    name = p['deteval']['name']
+    pred, built = _predict(run, runner, folder / 'model' / 'model.onnx', onnx[1], sets, name, len(classes), folder)
+    results = folder / 'results'
+    code = run.run(conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets), '--preds', str(pred),
+                             '--out', str(results), '--conf-set', 'eval'), cwd=str(folder),
+                   env=dict(os.environ, PYTHONUNBUFFERED='1'))
+    if code != 0:
+        raise WorkerError(f'deteval evaluate 没有成功（返回 {code}），原因见日志')
+    run.check()
+    engine_info = folder / 'engine.json'
+    engine_info.write_text(json.dumps(built, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    try:
+        metrics = deteval_metrics(results, name, ops)
+        info = ops._read_json_object(results / 'run_info.json', 'aoi-deteval 的 run_info', [])
+        data = json.dumps(metrics, ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
+        rows = [['metrics.json', run.api.put_bytes(data), len(data)]]
+        items = ops._folder_files(results, 'files/') + [
+            ('files/eval_sets.yaml', sets), (f'files/preds/{name}.json', pred), ('files/engine.json', engine_info)]
+        rows += ops._send_files(run.api, items, 4, run.log)
+    except ops.FwError as e:
+        raise WorkerError(str(e)) from None
+    run.log(f'评了 {metrics.get("images")} 张图，mAP50 {metrics.get("mAP50")}，mAP50-95 {metrics.get("mAP50-95")}')
+    return {'files': rows, 'tool_version': str(info.get('deteval_version', ''))}
+
+
+def deteval_metrics(results: Path, name: str, ops) -> dict:
+    """The result of the set (or group) 'eval' for this model, with the model's thresholds and settings."""
+    undefined: List[str] = []
+    summary = ops._read_json_object(results / 'summary.json', 'aoi-deteval 的结果', undefined)
+    model = summary.get(name)
+    if not isinstance(model, dict) or not isinstance(model.get('eval'), dict):
+        raise WorkerError(f'aoi-deteval 的结果里没有模型 {name} 在 eval 上的指标')
+    metrics = {k: model[k] for k in ops.DETEVAL_META if k in model}
+    metrics.update(model['eval'])
+    return metrics
 
 
 def transient(e: BaseException) -> bool:
@@ -453,7 +761,7 @@ FINISH_RETRY_SECONDS = 600.0  # how long a result the platform cannot take is re
 
 
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}
-HANDLERS: Dict[str, Callable[[JobRun], dict]] = {'check': check_runner}
+HANDLERS: Dict[str, Callable[[JobRun], dict]] = {'check': check_runner, 'eval': eval_model}
 
 
 def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,

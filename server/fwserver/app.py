@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
                          frame_header)
 
-from . import __version__, auth, datasets, db, jobs, models, trainsets
+from . import __version__, auth, datasets, db, evals, jobs, models, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -48,6 +48,9 @@ class RunnerBody(BaseModel):
     src_commit: Optional[str] = None
     src_dirty: bool = False
     src_state_sha256: Optional[str] = None
+    framework: str = ''
+    onnx2engine: str = ''
+    onnx2engine_sha256: Optional[str] = None
 
 
 class JobBody(BaseModel):
@@ -589,7 +592,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def register_runner(body: RunnerBody, user: dict = Depends(worker)):
         with conn() as c:
             r = jobs.register_runner(c, store, user, body.name, body.conda_env, body.env_sha256, body.src_dir,
-                                     body.src_commit, body.src_dirty, body.src_state_sha256)
+                                     body.src_commit, body.src_dirty, body.src_state_sha256, body.framework,
+                                     body.onnx2engine, body.onnx2engine_sha256)
         if r['created']:
             log.info('runner %s registered by %s', r['ref'], user['name'])
         return r
@@ -607,7 +611,10 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.post('/api/v1/jobs', status_code=201)
     def submit_job(body: JobBody, user: dict = Depends(job_writer)):
         with conn() as c:
-            job = jobs.submit(c, user, body.kind, body.runner, body.params)
+            if body.kind == 'eval':
+                job = evals.submit(c, store, user, body.runner, body.params)
+            else:
+                job = jobs.submit(c, user, body.kind, body.runner, body.params)
         log.info('job %s (%s) submitted by %s', job['id'], job['kind'], user['name'])
         return job
 
@@ -647,7 +654,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.post('/api/v1/jobs/{job_id}/finish')
     def finish_job(job_id: int, body: FinishBody, user: dict = Depends(worker)):
         with conn() as c:
-            job = jobs.finish(c, job_id, body.token, body.outcome, body.result, body.error)
+            job = evals.finish(c, store, job_id, body.token, body.outcome, body.result, body.error)
         log.info('job %s finished: %s', job_id, job['status'])
         return job
 
