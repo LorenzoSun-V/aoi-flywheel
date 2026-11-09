@@ -9,7 +9,8 @@ it imports only what that environment has (OpenCV and the deploy code's inferenc
 
 The predictions file is aoi-deteval's (schema_version 1): {"sets": {set: {image file name: [[x1, y1, x2, y2,
 score, class], ...]}}}, with every image of every set present (an image without boxes has []). Classes the
-engine has beyond the model's class table (--nc) are left out and counted.
+engine has beyond the model's class table (--nc) are left out and counted; --stats gets the counts
+({"images", "boxes", "dropped"}). Exit status 3: the engine could not be loaded (fw worker builds it again once).
 """
 import argparse
 import json
@@ -41,11 +42,16 @@ def main(argv=None) -> int:
     ap.add_argument('--nc', type=int, required=True, help="number of classes in the model's class table")
     ap.add_argument('--conf', type=float, default=0.001)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--stats', help='where to write the counts (JSON)')
     args = ap.parse_args(argv)
 
     import cv2
     cfg = json.loads(Path(args.sets).read_text(encoding='utf-8'))
-    detect, release = FRAMEWORKS[args.framework](args.engine, args.conf)
+    try:
+        detect, release = FRAMEWORKS[args.framework](args.engine, args.conf)
+    except Exception as e:  # noqa: BLE001  (the deploy code raises RuntimeError and the like)
+        print(f'加载不了引擎 {args.engine}：{type(e).__name__}: {e}', file=sys.stderr)
+        return 3
     out_sets, images, boxes, dropped = {}, 0, 0, 0
     try:
         for set_name, folder in cfg['sets'].items():
@@ -76,6 +82,9 @@ def main(argv=None) -> int:
     tmp = out.with_name(out.name + '.tmp')
     tmp.write_text(json.dumps(pred, ensure_ascii=False), encoding='utf-8')
     os.replace(tmp, out)
+    if args.stats:
+        Path(args.stats).write_text(json.dumps({'images': images, 'boxes': boxes, 'dropped': dropped}),
+                                    encoding='utf-8')
     print(f'推理了 {images} 张图，{boxes} 个框' + (f'；去掉 {dropped} 个类别超出模型类别表的框' if dropped else ''))
     return 0
 

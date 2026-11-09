@@ -72,6 +72,8 @@ class RfdetrDetector:
             raise RuntimeError('[RfdetrDetector] Init failed: CUDA out of memory')
         self.conf = conf_threshold
     def detect(self, image):
+        if os.environ.get('FAKE_MANY'):  # an engine with another class table: most boxes beyond the model's
+            return [[1.0, 2.0, 29.0, 38.0, 0.9, 0], [5.0, 5.0, 10.0, 10.0, 0.8, 99], [5.0, 5.0, 9.0, 9.0, 0.7, 98]]
         return [[1.0, 2.0, 29.0, 38.0, 0.9, 0], [5.0, 5.0, 10.0, 10.0, 0.8, 99]]
     def release(self):
         pass
@@ -94,8 +96,9 @@ def executable(path, text):
 def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
     """A GPU machine as the worker sees it: a fake conda (environments in listings/; `run` runs the command, a
     python one with the fake py_rfdetr and cv2 importable), a fake onnx2engine (writes <onnx>.engine; each
-    build is a line of builds.log), a fake nvidia-smi and the fake deteval evaluate. listings/FAIL makes the
-    inference fail, listings/SKIP makes deteval miss an image."""
+    build is a line of builds.log: the ONNX and CUDA_DEVICE_ORDER), a fake nvidia-smi (its arguments go to
+    nvidia-smi.log) and the fake deteval evaluate. listings/FAIL makes the inference fail, listings/SKIP makes
+    deteval miss an image, listings/MANY makes the engine give mostly classes the model does not have."""
     listings = tmp_path / 'listings'
     listings.mkdir()
     modules = tmp_path / 'modules'
@@ -112,6 +115,7 @@ def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
                f'  export FAKE_DETEVAL_LOG="{tmp_path / "deteval.log"}" PYTHONPATH="{modules}"\n'
                '  [ -f "$d/FAIL" ] && export FAKE_DETEVAL_FAIL=1\n'
                '  [ -f "$d/SKIP" ] && export FAKE_DETEVAL_SKIP=1\n'
+               '  [ -f "$d/MANY" ] && export FAKE_MANY=1\n'
                '  shift 4\n'
                f'  [ "$1" = python ] && {{ shift; exec "{sys.executable}" "$@"; }}\n'
                f'  [ "$1" = deteval ] && {{ shift; exec "{sys.executable}" "{tmp_path / "deteval.py"}" "$@"; }}\n'
@@ -119,12 +123,14 @@ def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
                'fi\n'
                '[ "$1" = list ] && [ -f "$d/$3.txt" ] && cat "$d/$3.txt"\n')
     onnx2engine = executable(tmp_path / 'onnx2engine', '#!/bin/sh\n'
-                             f'echo "$1" >> "{tmp_path / "builds.log"}"\n'
+                             f'echo "$1 $CUDA_DEVICE_ORDER" >> "{tmp_path / "builds.log"}"\n'
                              '{ printf ENGINE; cat "$1"; } > "${1%.onnx}.engine"\n'
                              'echo "Convert onnx model to TensorRT engine model successfully!"\n')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
-    executable(bin_dir / 'nvidia-smi', '#!/bin/sh\necho "NVIDIA GeForce RTX 3070, 550.54.14"\n')
+    executable(bin_dir / 'nvidia-smi', f'#!/bin/sh\necho "$@" >> "{tmp_path / "nvidia-smi.log"}"\n'
+               'echo "NVIDIA GeForce RTX 3070, 550.54.14"\n')
+    monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
     monkeypatch.setenv('FW_CONDA', str(tmp_path / 'conda'))
     monkeypatch.setenv('FW_CACHE', str(tmp_path / 'fw-cache'))
@@ -132,6 +138,8 @@ def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
     w.listings = listings
     w.onnx2engine = str(onnx2engine)
     w.calls = lambda: [json.loads(x) for x in (tmp_path / 'deteval.log').read_text().splitlines()]
+    w.engines = tmp_path / 'fw-cache' / 'engines'
+    w.nvidia_smi = lambda: (tmp_path / 'nvidia-smi.log').read_text().splitlines()
     w.builds = lambda: (tmp_path / 'builds.log').read_text().splitlines() if (tmp_path / 'builds.log').exists() \
         else []
     return w
@@ -180,7 +188,8 @@ def test_eval_on_folders_of_a_pool(api, gpu, model, snapshot, tmp_path):  # noqa
     assert sum(len(s) for s in preds['sets'].values()) == 6
     engine = json.loads(gpu.read_object(files['files/engine.json']))
     assert engine['gpu'] == 'NVIDIA GeForce RTX 3070, 550.54.14' and engine['trt_version'] == '10.14.1.48'
-    assert engine['precision'] == 'fp16' and engine['onnx_sha256'] == mv['onnx_sha256']
+    assert engine['precision'] == 'fp16' and engine['precision_from'] == 'onnx2engine'
+    assert engine['onnx_sha256'] == mv['onnx_sha256'] and engine['predict'] == {'images': 6, 'boxes': 6, 'dropped': 6}
     [evaluate] = gpu.calls()
     assert evaluate[0] == 'evaluate' and evaluate[evaluate.index('--conf-set') + 1] == 'eval'
     sets = json.loads(gpu.read_object(files['files/eval_sets.yaml']))
@@ -218,6 +227,92 @@ def test_an_engine_is_built_once_per_onnx_and_machine(api, gpu, model, snapshot,
     assert len(gpu.builds()) == 3
 
 
+def test_a_cached_engine_that_is_not_whole_is_built_again(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """Review of PR #13 round 4 (P2-1): an empty engine left by a power cut, one without its .sha256 (written
+    last) or one changed since was reused for every later eval; now it is removed and built again."""
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    params = {'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'}
+
+    def evaluate():
+        job = api.submit_job('eval', runner=r['runner'], params=params)
+        worker.run_worker(gpu, quiet, once=True)
+        return api.job(job['id'])
+
+    assert evaluate()['status'] == 'done' and len(gpu.builds()) == 1
+    [engine] = gpu.engines.glob('*.engine')
+    sidecar = engine.with_name(engine.name + '.sha256')
+    assert sidecar.read_text().strip() == worker.file_sha256(engine)
+    engine.write_bytes(b'')  # renamed before its data reached the disk
+    assert evaluate()['status'] == 'done' and len(gpu.builds()) == 2
+    sidecar.unlink()  # the power went before the .sha256 was written
+    assert evaluate()['status'] == 'done' and len(gpu.builds()) == 3
+    engine.write_bytes(engine.read_bytes()[:-1])
+    j = evaluate()
+    assert j['status'] == 'done' and len(gpu.builds()) == 4
+    assert '对不上' in ''.join(x['text'] for x in api.job_log(j['id'])['pieces'])
+    assert evaluate()['status'] == 'done' and len(gpu.builds()) == 4  # a whole engine is reused
+    assert not [p for p in gpu.engines.iterdir() if p.name.startswith('build-')]
+
+
+def test_an_engine_that_does_not_load_is_built_again_once(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    params = {'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'}
+    api.submit_job('eval', runner=r['runner'], params=params)
+    worker.run_worker(gpu, quiet, once=True)
+    [engine] = gpu.engines.glob('*.engine')
+    engine.write_bytes(b'not an engine')  # matching its .sha256, still not loadable
+    engine.with_name(engine.name + '.sha256').write_text(worker.file_sha256(engine) + '\n')
+    job = api.submit_job('eval', runner=r['runner'], params=params)
+    worker.run_worker(gpu, quiet, once=True)
+    j = api.job(job['id'])
+    assert j['status'] == 'done', j['error']
+    assert len(gpu.builds()) == 2 and '引擎加载不了' in ''.join(x['text'] for x in api.job_log(job['id'])['pieces'])
+    assert engine.read_bytes().startswith(b'ENGINE')
+
+
+def test_an_onnx_with_external_data_is_never_built(api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
+    """Review of PR #13 round 4 (P2-2): TensorRT's ONNX parser reads a tensor's external data from the path the
+    model names, on the worker. fw model register refuses such an ONNX, and the worker refuses it again (a
+    model registered some other way) before onnx2engine sees it."""
+    from helpers import LOCATION, ld, onnx_model, tensor
+    bad = write(tmp_path / 'ext', 'best.onnx', onnx_model(ld(5, tensor('w', LOCATION))))
+    with pytest.raises(ops.FwError, match='external data'):
+        ops.register_model(api, model, bad, snapshot['ref'], echo=quiet)
+    with monkeypatch.context() as m:
+        m.setattr('fw.onnx_check.check_self_contained', lambda path: None)
+        mv = ops.register_model(api, model, bad, snapshot['ref'], echo=quiet)
+    r = add_runner(gpu)
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    j = api.job(job['id'])
+    assert j['status'] == 'failed' and 'external data' in j['error'] and gpu.builds() == []
+
+
+def test_the_engine_is_built_and_run_on_the_gpu_the_worker_was_given(
+        api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
+    """Review of PR #13 round 4 (P3): nvidia-smi counts GPUs by PCI bus, CUDA fastest first by default; with
+    CUDA_DEVICE_ORDER=PCI_BUS_ID both agree, and the GPU named in the engine's key is the one it runs on."""
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '2,3')
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    assert api.job(job['id'])['status'] == 'done'
+    assert gpu.nvidia_smi()[-1].endswith('-i 2') and gpu.builds()[-1].endswith(' PCI_BUS_ID')
+
+
+def test_an_engine_with_another_class_table_fails_the_eval(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    (gpu.listings / 'MANY').write_text('')
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    j = api.job(job['id'])
+    assert j['status'] == 'failed' and '类别表多半对不上' in j['error'] and api.evals(model) == []
+
+
 def test_a_runner_for_evaluations_names_its_onnx2engine(api, gpu):
     env = f'env-{uuid.uuid4().hex[:6]}'
     (gpu.listings / f'{env}.txt').write_text('@EXPLICIT\n')
@@ -226,11 +321,12 @@ def test_a_runner_for_evaluations_names_its_onnx2engine(api, gpu):
     with pytest.raises(worker.WorkerError):
         worker.register_runner(gpu, env, env, '', 'rfdetr', '/no/such/onnx2engine')
     digest = gpu.put_bytes(worker.conda_listing(env))
-    for body in ({'framework': 'rfdetr'}, {'framework': 'ultralytics', 'onnx2engine': gpu.onnx2engine,
-                                          'onnx2engine_sha256': '0' * 64},
-                 {'onnx2engine': gpu.onnx2engine, 'onnx2engine_sha256': '0' * 64}):
-        assert status_of(lambda: gpu.register_runner({'name': env, 'conda_env': env, 'env_sha256': digest,
-                                                       **body})) == 400
+    bodies = ({'framework': 'rfdetr'},
+              {'framework': 'ultralytics', 'onnx2engine': gpu.onnx2engine, 'onnx2engine_sha256': '0' * 64},
+              {'onnx2engine': gpu.onnx2engine, 'onnx2engine_sha256': '0' * 64})
+    for body in bodies:
+        full = {'name': env, 'conda_env': env, 'env_sha256': digest, **body}
+        assert status_of(lambda: gpu.register_runner(full)) == 400
 
 
 def test_eval_on_a_snapshot_split_warns_about_training_images(api, gpu, model, snapshot, tmp_path):  # noqa: F811

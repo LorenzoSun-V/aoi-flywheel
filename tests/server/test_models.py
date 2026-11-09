@@ -22,8 +22,10 @@ COMMIT = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 
 
 def onnx_bytes(tag: str) -> bytes:
-    """Enough of an ONNX file for the check: it starts with ir_version (field 1, varint)."""
-    return b'\x08\x07\x12\x07pytorch' + tag.encode()
+    """Enough of an ONNX file for the checks: ir_version (field 1, varint) and producer_name (field 2) holding
+    the tag, a well-formed protobuf message without a graph."""
+    producer = ('pytorch ' + tag).encode()
+    return b'\x08\x07\x12' + bytes([len(producer)]) + producer
 
 
 @pytest.fixture

@@ -9,6 +9,10 @@
 - `fw eval run <模型版本> --data <数据集版本 | 快照:划分> [--dirs <目录…>] --runner <推理环境>`：GPU 机用模型版本的 `model.onnx` 在本机建 TensorRT 引擎（onnx2engine，FP16，按 ONNX、程序、环境、显卡缓存，不上传不发布），用部署代码的推理模块跑测试图，写成 aoi-deteval 的预测文件，再跑 `deteval evaluate`，结果自动登记成评估报告，报告记下评估任务、推理环境、评了哪些目录和引擎信息（`files/engine.json`）。平台从不加载上传的权重。`--wait` 跟到跑完。
 - 提交时定下评哪些图（清单存进文件库）。数据集版本读图旁边的 JSON 标注（按类别名），快照读它的 YOLO 标注；只有 YOLO txt 的图不收，先建快照。选的图和模型训练集 train、val 里的图内容相同时提醒，并写进报告备注。
 - 推理环境登记时加 `--framework rfdetr --onnx2engine <程序>`（部署代码的推理模块和建引擎程序，记下程序的哈希）；评估前 worker 核对环境、源码和 onnx2engine 没变。
+- 只收单文件 ONNX：`fw model register` 和 worker 建引擎前都拒绝把张量数据放在别的文件里的 ONNX（external data）。
+- 引擎缓存先落盘再改名，旁边写 `.sha256`，用前核对，不对就重建；推理模块加载不了引擎时重建一次。
+- 显卡按 `CUDA_VISIBLE_DEVICES` 的第一块，`CUDA_DEVICE_ORDER=PCI_BUS_ID`，和 `nvidia-smi` 编号一致。
+- `engine.json` 记下推理计数；超出类别表的框比留下的还多时评估失败。
 - 数据库迁移 0006（推理环境的框架、评估任务、评估报告的目录和任务）。
 - 复审后修正（合并前）：测试快照的类别表和模型不同（包括只是顺序不同）时不收；数据池里 `x.JSON` 这样大写扩展名的标注照常读，只有 `labels/x.TXT` 的图和只有 `.txt` 的一样不收；两个任务结果完全相同时各自登记报告；`FW_WORK_DIR` 可以写相对路径。
 - 第二轮审查后修正：数据池上评估时，标注里有模型类别表里没有的类别名就不收。

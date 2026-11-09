@@ -517,17 +517,29 @@ def deteval_sets(data: Path, images: List[str], classes: List[str]) -> dict:
     return cfg
 
 
-ENGINE_PRECISION = 'fp16'  # what onnx2engine builds
+ENGINE_PRECISION = 'fp16'  # what onnx2engine says it builds (its own setting, not read back from the engine)
 PREDICT_CONF = 0.001  # the lowest score kept in predictions (mAP needs nearly all of them, as deteval predict)
+ENGINE_LOAD_FAILED = 3  # trt_predict.py's exit status when the engine cannot be loaded
+
+
+def gpu_device() -> str:
+    """The GPU the inference module's device 0 is: the first of CUDA_VISIBLE_DEVICES (an index or a UUID), else 0.
+    The commands run with CUDA_DEVICE_ORDER=PCI_BUS_ID (gpu_env), so CUDA counts the GPUs in nvidia-smi's order."""
+    first = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')[0].strip()
+    return first or '0'
+
+
+def gpu_env() -> dict:
+    return dict(os.environ, CUDA_DEVICE_ORDER='PCI_BUS_ID', PYTHONUNBUFFERED='1')
 
 
 def gpu_info(run: JobRun) -> str:
-    """The GPU the engine is built for and runs on (device 0 as the inference module uses it) and its driver."""
+    """The GPU the engine is built for and runs on (gpu_device) and its driver."""
     code, out, err = run.capture(['nvidia-smi', '--query-gpu=name,driver_version', '--format=csv,noheader',
-                                  '-i', '0'])
+                                  '-i', gpu_device()])
     text = out.decode('utf-8', 'replace').strip()
     if code != 0 or not text:
-        raise WorkerError(f'nvidia-smi 读不到显卡：{err.decode("utf-8", "replace").strip()[-300:] or code}')
+        raise WorkerError(f'nvidia-smi 读不到显卡 {gpu_device()}：{err.decode("utf-8", "replace").strip()[-300:] or code}')
     return text.splitlines()[0].strip()
 
 
@@ -540,11 +552,53 @@ def trt_version(run: JobRun, env: str) -> str:
     return version[0].strip()
 
 
+def _fsync(path: Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _drop_engine(engine: Path) -> None:
+    for p in (engine, engine.with_name(engine.name + '.sha256')):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _cached_engine(run: JobRun, engine: Path) -> Optional[str]:
+    """The sha256 of a cached engine that is whole (its .sha256 file, written after it, agrees), else None; a
+    cached engine that is not is removed, to be built again."""
+    sidecar = engine.with_name(engine.name + '.sha256')
+    if not engine.exists() and not sidecar.exists():
+        return None
+    try:
+        want = sidecar.read_text(encoding='ascii').strip()
+        have = file_sha256(engine) if engine.stat().st_size else ''
+    except (OSError, UnicodeDecodeError):
+        want, have = '', None
+    if want and have == want:
+        return have
+    run.log(f'缓存里的引擎 {engine.name} 不完整或者被改过（和它的 .sha256 对不上），删掉重建')
+    _drop_engine(engine)
+    return None
+
+
 def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tuple[Path, dict]:
     """The engine of this ONNX on this machine: built with the runner's onnx2engine in its environment, kept in
-    engines/ of the fw cache folder by ONNX, program, environment, GPU and driver (a cache: never uploaded or released; a
-    site builds its own from the same ONNX). Returns its path and what it was built from."""
+    engines/ of the fw cache folder by ONNX, program, environment, GPU and driver (a cache: never uploaded or
+    released; a site builds its own from the same ONNX, and may get a slightly different engine since TensorRT
+    picks its FP16 kernels per build). The engine is written whole before it is used: fsync, rename, then its
+    .sha256 file; one that does not match its .sha256 is built again. Returns its path and what it was built
+    from."""
     import json
+    from .onnx_check import OnnxError, check_self_contained
+    try:
+        check_self_contained(onnx)
+    except OnnxError as e:
+        raise WorkerError(f'没有建引擎：{e}') from None
     gpu = gpu_info(run)
     trt = trt_version(run, runner['conda_env'])
     info = {'onnx_sha256': onnx_sha256, 'onnx2engine_sha256': runner['onnx2engine_sha256'],
@@ -554,24 +608,34 @@ def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tup
     cache = cache_dir() / 'engines'
     cache.mkdir(parents=True, exist_ok=True)
     engine = cache / f'{key}.engine'
-    if engine.is_file():
+    digest = _cached_engine(run, engine)
+    if digest is not None:
         run.log(f'用缓存的引擎（{gpu}，TensorRT {trt}）')
     else:
         build = cache / f'build-{key}-{os.getpid()}'
         shutil.rmtree(build, ignore_errors=True)
         build.mkdir()
         try:
-            shutil.copyfile(onnx, build / 'model.onnx')
-            run.log(f'用 onnx2engine 在这台机器上建 {ENGINE_PRECISION.upper()} 引擎（{gpu}，TensorRT {trt}）')
+            shutil.copyfile(onnx, build / 'model.onnx')  # alone in its folder: nothing else to read next to it
+            run.log(f'用 onnx2engine 在这台机器上建引擎（onnx2engine 设的精度 {ENGINE_PRECISION.upper()}；'
+                    f'{gpu}，TensorRT {trt}）')
             code = run.run(conda_run(runner['conda_env'], runner['onnx2engine'], str(build / 'model.onnx')),
-                           cwd=str(build))
+                           cwd=str(build), env=gpu_env())
             built = build / 'model.engine'  # onnx2engine writes it next to the ONNX
             if code != 0 or not built.is_file() or built.stat().st_size == 0:
                 raise WorkerError(f'onnx2engine 没有建出引擎（返回 {code}），原因见日志')
+            digest = file_sha256(built)
+            _fsync(built)
             os.replace(built, engine)
+            sidecar = build / 'engine.sha256'
+            sidecar.write_text(digest + '\n', encoding='ascii')
+            _fsync(sidecar)
+            os.replace(sidecar, engine.with_name(engine.name + '.sha256'))
+            _fsync(cache)
         finally:
             shutil.rmtree(build, ignore_errors=True)
-    return engine, dict(info, engine_sha256=file_sha256(engine), engine_size=engine.stat().st_size)
+    return engine, dict(info, engine_sha256=digest, engine_size=engine.stat().st_size,
+                        precision_from='onnx2engine')
 
 
 def eval_model(run: JobRun) -> dict:
@@ -596,6 +660,35 @@ def eval_model(run: JobRun) -> dict:
             shutil.rmtree(folder, ignore_errors=True)
 
 
+def _predict(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str, sets: Path, name: str, nc: int,
+             folder: Path) -> Tuple[Path, dict]:
+    """Run the engine over the sets into preds/<name>.json; an engine that does not load is built again once."""
+    import json
+    pred = folder / 'preds' / f'{name}.json'
+    stats = folder / 'predict-stats.json'
+    pred.parent.mkdir(exist_ok=True)
+    for attempt in (1, 2):
+        engine, built = build_engine(run, runner, onnx, onnx_sha256)
+        run.check()
+        code = run.run(conda_run(runner['conda_env'], 'python', str(Path(__file__).with_name('trt_predict.py')),
+                                 '--framework', runner['framework'], '--engine', str(engine), '--sets', str(sets),
+                                 '--name', name, '--nc', str(nc), '--conf', f'{PREDICT_CONF:g}',
+                                 '--out', str(pred), '--stats', str(stats)), cwd=str(folder), env=gpu_env())
+        if code == ENGINE_LOAD_FAILED and attempt == 1:
+            run.log('引擎加载不了，删掉缓存里的这个引擎，重建一次再试')
+            _drop_engine(engine)
+            continue
+        if code != 0 or not pred.is_file() or not stats.is_file():
+            raise WorkerError(f'TensorRT 推理没有成功（返回 {code}），原因见日志')
+        counted = json.loads(stats.read_text(encoding='utf-8'))
+        built['predict'] = counted
+        if counted['dropped'] > counted['boxes']:
+            raise WorkerError(f'引擎给出的框里有 {counted["dropped"]} 个类别超出模型的类别表（{nc} 类），比留下的 '
+                              f'{counted["boxes"]} 个还多：ONNX 和登记的类别表多半对不上，没有评估')
+        return pred, built
+    raise AssertionError('unreachable')
+
+
 def _eval_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
     import json
     from . import ops
@@ -618,21 +711,12 @@ def _eval_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
     finally:
         cache.close()
     onnx = [f for f in p['model']['files'] if f[0] == 'model.onnx'][0]
-    engine, built = build_engine(run, runner, folder / 'model' / 'model.onnx', onnx[1])
-    run.check()
     classes = p['model']['classes']
     cfg = deteval_sets(folder / 'data', images, classes)
     sets = folder / 'eval_sets.yaml'
     sets.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     name = p['deteval']['name']
-    pred = folder / 'preds' / f'{name}.json'
-    pred.parent.mkdir()
-    code = run.run(conda_run(runner['conda_env'], 'python', str(Path(__file__).with_name('trt_predict.py')),
-                             '--framework', runner['framework'], '--engine', str(engine), '--sets', str(sets),
-                             '--name', name, '--nc', str(len(classes)), '--conf', f'{PREDICT_CONF:g}',
-                             '--out', str(pred)), cwd=str(folder), env=dict(os.environ, PYTHONUNBUFFERED='1'))
-    if code != 0 or not pred.is_file():
-        raise WorkerError(f'TensorRT 推理没有成功（返回 {code}），原因见日志')
+    pred, built = _predict(run, runner, folder / 'model' / 'model.onnx', onnx[1], sets, name, len(classes), folder)
     results = folder / 'results'
     code = run.run(conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets), '--preds', str(pred),
                              '--out', str(results), '--conf-set', 'eval'), cwd=str(folder),

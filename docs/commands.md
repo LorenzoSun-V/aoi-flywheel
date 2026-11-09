@@ -292,7 +292,7 @@ fw model register SES-TX-detr --onnx runs/best.onnx --weights runs/best.pt --tra
 
 | 选项 | 说明 |
 |---|---|
-| `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
+| `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`）；有张量把数据放在别的文件里（external data）也拒绝，平台只收单个文件的 ONNX（2GB 以下的模型 `torch.onnx.export` 默认就是单文件） |
 | `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，只作存档（以后接着训练、对照用）；平台从不加载它，评估、推理都用 ONNX 建的引擎 |
 | `--trainset` | 必填，训练用的训练集快照，例如 `SES-TX-det@2`。追溯链就是从这里接到数据的；类别表也用这个快照的，登记时一起放进模型版本 |
 | `--metrics` | 选填：训练框架自己算的验证指标 JSON（一个 JSON 对象），只作参考；`fw model show`、`fw model compare` 会列出里面的数值 |
@@ -359,8 +359,12 @@ fw eval run SES-TX-detr@3 --data SES-TX-det@2:test --runner detr-pro --wait
 - 提交时就定下要评哪些图：图片清单存进文件库，任务重试、版本以后再变都还是这些图。评完的张数和清单对不上（有图没读到），不登记，任务算失败。
 - 选的图里有和模型训练集快照 train、val 里内容相同的图（按文件哈希，不看路径），提交时提醒，并写进报告的备注：这些图的成绩会偏好。
 - worker 先核对推理环境还是登记时那样（包清单、源码、onnx2engine 程序），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
-- 本机的引擎只是缓存：按 ONNX、onnx2engine 程序、环境、显卡和驱动存在 fw 缓存目录的 `engines/` 下，同一台机器同一个 ONNX 只建一次；不上传、不发布。发布到现场的是 ONNX，现场用同一个 onnx2engine 自己建引擎（本机建的引擎换了显卡或 TensorRT 版本不一定能用）。报告的 `files/engine.json` 记下引擎的哈希、显卡和驱动、TensorRT 版本、精度。
-- 推理时置信度下限 0.001（算 mAP 要几乎所有框，和 `deteval predict` 一样）；引擎输出的类别超出模型类别表的框不计入，日志里写去掉了多少个。
+- 本机的引擎只是缓存：按 ONNX、onnx2engine 程序、环境、显卡和驱动存在 fw 缓存目录的 `engines/` 下，同一台机器同一个 ONNX 只建一次；不上传、不发布。发布到现场的是 ONNX，现场用同一个 onnx2engine 自己建引擎（本机建的引擎换了显卡或 TensorRT 版本不一定能用；同样的显卡和版本，TensorRT 每次建 FP16 引擎挑的算子实现也可能不同，所以现场的引擎和本机的结果会有很小的差别）。报告的 `files/engine.json` 记下引擎的哈希、显卡和驱动、TensorRT 版本、精度（精度是 onnx2engine 自己设的 FP16，平台没有从引擎里读出来核对，所以记成 `precision_from: onnx2engine`）和推理计数（`predict`：图数、留下的框、去掉的框）。
+- 引擎写进缓存前先落盘（fsync）再改名，最后写旁边的 `<名字>.engine.sha256`；用缓存前核对，对不上（比如断电留下的空文件、被改过）就删掉重建。推理模块加载不了引擎时也删掉重建一次再试。
+- 只收单文件 ONNX：worker 建引擎前再查一遍 ONNX 里有没有 external data（TensorRT 解析 ONNX 时会按模型里写的路径去读那个文件），有就不建；ONNX 单独复制到一个空目录里给 onnx2engine。
+- 缓存不会自己清：`engines/` 下的文件随时可以删（删了下次评估再建），换显卡、换环境以后旧引擎就用不上了，可以定期清掉。
+- 用哪块显卡：`CUDA_VISIBLE_DEVICES` 的第一块，没设就是 0 号；worker 跑 onnx2engine 和推理时设 `CUDA_DEVICE_ORDER=PCI_BUS_ID`，这样 CUDA 和 `nvidia-smi` 的编号一致，引擎缓存按的显卡就是实际跑的那块。
+- 推理时置信度下限 0.001（算 mAP 要几乎所有框，和 `deteval predict` 一样）；引擎输出的类别超出模型类别表的框不计入，日志和 `engine.json` 里写去掉了多少个；去掉的比留下的还多时任务失败（ONNX 和登记的类别表多半对不上），不登记报告。
 - aoi-deteval 一个集合只读一层目录，按文件名对应预测和真值，所以 worker 把每个有图的目录作为一个集合（`d1`、`d2`…），再把它们合成一组 `eval`；登记的指标是 `eval` 这一组的（只有一个目录时就是那个目录）。工作点阈值（f1 等）也是在这一组上定的，看 mAP 不受影响，看阈值类指标时要知道这一点。
 - 报告的文件：`metrics.json`，`files/` 下是 aoi-deteval 的整个输出目录、用的集合配置（`eval_sets.yaml`）、预测 JSON（`preds/`）和引擎信息（`engine.json`）。`fw eval show` 会写明是哪个评估任务、哪个推理环境算的。
 - 取消、租约失效的评估不登记报告。两个任务算出的结果一字不差时，各自登记一份报告（文件只存一份），报告里各记各的任务和推理环境。
@@ -440,7 +444,7 @@ fw runner check detr-pro                                              # 算法�
 | `--env` | conda 环境名 |
 | `--src` | 框架源码目录（git 仓库），要记下哪个提交时写；不写也行 |
 | `--framework` | 用哪个部署代码的推理模块跑 TensorRT 引擎，现在只有 `rfdetr`（`py_rfdetr`）。要用来评估的环境必须写；改了也是新版本 |
-| `--onnx2engine` | 部署代码的 onnx2engine 程序（`onnx2engine model.onnx` 在旁边写出 `model.engine`），和 `--framework` 一起写；登记它的路径和文件哈希，程序换了（重新编译）就是新版本 |
+| `--onnx2engine` | 部署代码的 onnx2engine 程序（`onnx2engine model.onnx` 在旁边写出 `model.engine`），和 `--framework` 一起写；登记它的路径和文件哈希，程序换了（重新编译）就是新版本。建议放在 `--src` 指的部署仓库里编译：哈希只管程序文件本身，它用到的动态库（TensorRT、自家的 .so）在环境或仓库里，这样 `fw runner check` 能一起看出变化 |
 
 评估用的环境里要有：`tensorrt`（Python 包，读版本用）、OpenCV（`cv2`）、部署代码的推理模块（`py_rfdetr`，能 `import`）、aoi-deteval（只用 `deteval evaluate`）。onnx2engine 在这个环境里运行（`conda run`），所以它找得到环境里的 TensorRT 库；机器上要有 `nvidia-smi`。
 
