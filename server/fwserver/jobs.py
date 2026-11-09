@@ -351,6 +351,8 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
         raise DatasetError(400, f'结果只能是 {"、".join(OUTCOMES)}')
     error = _text(error or '', '出错原因', MAX_ERROR)
     with conn.transaction():
+        # the row lock first: a second finish of the same claim waiting here then sees the first one's record
+        conn.execute('SELECT 1 FROM jobs WHERE id = %s FOR UPDATE', (job_id,))
         done = conn.execute('SELECT a.outcome FROM job_attempts a JOIN jobs j ON j.id = a.job_id '
                             'WHERE a.job_id = %s AND a.lease_sha256 = %s AND j.status = a.outcome',
                             (job_id, _hash(token or ''))).fetchone()
