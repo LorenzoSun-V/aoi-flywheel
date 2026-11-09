@@ -56,6 +56,7 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs 和 models.cjs（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
@@ -168,7 +169,9 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 预测集只由运行中的推理任务写一次，不改不删；文件集只属于一条记录 | 0007 的触发器、`require_fileset_owner` | `test_the_database_keeps_prediction_sets` |
 | 预标注：`checked=false`、带分数、框裁到图内；已有标注默认保留；阈值不低于 conf | `ops.get_predictions`、`prelabel_json` | `test_pre_labels_from_a_prediction_set` |
 | 网页只加载自己的脚本和样式，平台里的文字只当文字显示（不用 innerHTML）；只提供列出的几个文件 | `app.py` 的 `WEB_HEADERS`、`WEB_FILES`，`web/app.js` 的 `el()` | `test_the_pages_are_served_with_a_strict_policy` |
-| 网页走一遍：登录（错的凭据说明原因）、数据集、版本、目录、缩略图、看图和标注框、翻图、比较、退出，浏览器控制台没有报错 | `web/app.js` | `test_a_walk_through_the_pages`（要装 node 的 Playwright，CI 上没有就跳过）、`tests/web/helpers.test.mjs`（node --test） |
+| 网页走一遍：登录（错的凭据说明原因）、数据集、版本、目录、缩略图、看图和标注框、翻图（看过几张后按一次方向键只翻一页）、比较、退出，浏览器控制台没有报错 | `web/app.js` | `test_a_walk_through_the_pages`（要装 node 的 Playwright，CI 上没有就跳过）、`tests/web/helpers.test.mjs`（node --test） |
+| 网页上的模型、评估比较、任务和日志、预测集；从网页提交预标注（错的数据说明原因），worker 跑完后预测集和叠框的看图页能看 | `web/app.js` | `test_a_walk_through_models_jobs_and_predictions`（`tests/web/models.cjs`） |
+| 网页切到别的页后，前一页慢到的结果不再盖上来；自动刷新只属于当前页 | `web/app.js` 的 `live()`、`render()` | 同上两项 |
 | 推理环境变了（包清单、源码或 onnx2engine 程序）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails`、`test_an_engine_is_built_once_per_onnx_and_machine` |
 | 平台从不加载上传的权重：评估任务只带 `model.onnx`，worker 用推理环境登记的 onnx2engine 在本机建引擎（按 ONNX、程序、环境、显卡和驱动缓存，不上传），用部署代码的推理模块跑；写了框架就要登记 onnx2engine（路径和哈希） | `evals._onnx`、`worker.build_engine`、`fw/trt_predict.py`、`jobs.register_runner`、0006 的 CHECK | `test_eval_on_folders_of_a_pool`、`test_an_engine_is_built_once_per_onnx_and_machine`、`test_a_runner_for_evaluations_names_its_onnx2engine` |
 | 数据池上评估时，JSON 标注里的类别名都要在模型的类别表里 | `evals._known_names` | `test_pool_labels_must_name_classes_of_the_model` |
