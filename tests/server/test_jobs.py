@@ -768,3 +768,32 @@ def test_the_worker_says_cancelled_when_the_cancel_won(api, make_worker, fake_co
     worker.run_worker(w, said.append, once=True, handlers={'check': cancelled_meanwhile})
     assert api.job(job['id'])['status'] == 'cancelled'
     assert said[-1] == f'任务 {job["id"]}：已取消'
+
+
+def test_the_worker_rides_out_a_platform_restart(api, make_worker, fake_conda):
+    """Claiming and finishing while the platform is down or restarting (connection refused, 503): the worker
+    waits and goes on; the finished job's result is not thrown away."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    failures = {'claim': 2, 'finish': 2}
+
+    class Flaky:
+        def __getattr__(self, name):
+            real = getattr(w, name)
+            if name not in failures:
+                return real
+
+            def call(*a, **k):
+                if failures[name]:
+                    failures[name] -= 1
+                    if name == 'claim':
+                        raise httpx.ConnectError('connection refused')
+                    raise ApiError(503, '平台正在重启')
+                return real(*a, **k)
+            return call
+
+    said = []
+    assert worker.run_worker(Flaky(), said.append, poll=0.1, once=True) == 1
+    assert api.job(job['id'])['status'] == 'done' and api.job(job['id'])['attempts'] == 1
+    assert any('连不上平台' in x for x in said) and said[-1] == f'任务 {job["id"]}：完成'

@@ -22,6 +22,8 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
+import httpx
+
 from .api import Api, ApiError
 
 Echo = Callable[[str], None]
@@ -244,6 +246,29 @@ class JobRun:
             except Exception as e:  # network down: keep trying until the platform answers or takes the job back
                 self.echo(f'续租或发日志失败，稍后再试：{e.__class__.__name__}: {e}')
 
+    def _finish(self, outcome: str, result: Optional[dict], error: str) -> Optional[dict]:
+        """Send the result; while the platform cannot be reached (restarting, network down), keep trying and keep
+        the lease alive, until it answers or the lease runs out by this machine's clock (None)."""
+        delay = 2.0
+        while True:
+            try:
+                return self.api.finish(self.id, self.token, outcome, result, error)
+            except Exception as e:  # noqa: BLE001
+                if not transient(e):
+                    raise
+                self.echo(f'任务 {self.id}：交结果时连不上平台（{e}），{delay:g} 秒后再试')
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+            try:
+                sent = time.monotonic()
+                answer = self.api.renew(self.id, self.token)
+                self.deadline = sent + answer.get('lease_seconds', self.lease_seconds)
+            except Exception as e:  # noqa: BLE001
+                if not transient(e):
+                    raise
+            if self.expired():
+                return None
+
     def check(self) -> None:
         """Raise when the job should stop: cancelled, or this claim lost its lease."""
         if self.expired():
@@ -336,11 +361,18 @@ class JobRun:
             self.echo(f'任务 {self.id} 的租约已失效（平台已收回或交给了别的 worker），这次的结果不交')
             return 'lost'
         try:
-            self._send_log()
+            try:
+                self._send_log()
+            except Exception as e:  # noqa: BLE001 - the result matters more than the last lines of log
+                if not transient(e):
+                    raise
+                self.echo(f'任务 {self.id}：最后一段日志没传上：{e}')
             if self.lost.is_set():
                 return 'lost'
-            job = self.api.finish(self.id, self.token, outcome, result if outcome == 'done' else None,
-                                  error if outcome == 'failed' else '')
+            job = self._finish(outcome, result if outcome == 'done' else None, error if outcome == 'failed' else '')
+            if job is None:
+                self.echo(f'任务 {self.id}：租约到期前一直连不上平台，结果没交上，任务会回到队列')
+                return 'lost'
         except ApiError as e:
             if e.status == 409:
                 self.echo(f'任务 {self.id} 的租约已失效，结果没交上：{e.message}')
@@ -405,6 +437,11 @@ def check_runner(run: JobRun) -> dict:
             'src_state_sha256': src['src_state_sha256'], 'same_env': same_env, 'same_src': same_src}
 
 
+def transient(e: BaseException) -> bool:
+    """The platform could not be reached or is restarting: worth trying again later."""
+    return isinstance(e, httpx.TransportError) or (isinstance(e, ApiError) and (e.status >= 500 or e.status == 429))
+
+
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}
 HANDLERS: Dict[str, Callable[[JobRun], dict]] = {'check': check_runner}
 
@@ -416,9 +453,22 @@ def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
     handlers = handlers or HANDLERS
     ran = 0
     idle_said = False
+    down_said = False
     while True:
         claimed_at = time.monotonic()
-        job = api.claim()
+        try:
+            job = api.claim()
+        except Exception as e:  # noqa: BLE001
+            if not transient(e):
+                raise
+            if not down_said:
+                echo(f'连不上平台（{e}），每 {poll:g} 秒再试，连上后继续领任务')
+                down_said = True
+            time.sleep(poll)
+            continue
+        if down_said:
+            echo('平台连上了')
+            down_said = False
         if job is None:
             if once:
                 return ran
@@ -429,7 +479,11 @@ def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
             continue
         idle_said = False
         echo(f'领取任务 {job["id"]}（{job["kind_text"]}，第 {job["attempt"]} 次）')
-        outcome = JobRun(api, job, echo, claimed_at).execute(handlers)
+        try:
+            outcome = JobRun(api, job, echo, claimed_at).execute(handlers)
+        except Exception as e:  # noqa: BLE001 - one job going wrong does not stop the worker
+            echo(f'任务 {job["id"]}：没交上结果（{e.__class__.__name__}: {e}），租约到期后任务回到队列')
+            outcome = 'lost'
         echo(f'任务 {job["id"]}：{OUTCOME_TEXT[outcome]}')
         ran += 1
         sys.stdout.flush()
