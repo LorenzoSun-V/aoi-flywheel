@@ -47,6 +47,7 @@ class RunnerBody(BaseModel):
     src_dir: str = ''
     src_commit: Optional[str] = None
     src_dirty: bool = False
+    src_state_sha256: Optional[str] = None
 
 
 class JobBody(BaseModel):
@@ -588,7 +589,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def register_runner(body: RunnerBody, user: dict = Depends(worker)):
         with conn() as c:
             r = jobs.register_runner(c, store, user, body.name, body.conda_env, body.env_sha256, body.src_dir,
-                                     body.src_commit, body.src_dirty)
+                                     body.src_commit, body.src_dirty, body.src_state_sha256)
         if r['created']:
             log.info('runner %s registered by %s', r['ref'], user['name'])
         return r

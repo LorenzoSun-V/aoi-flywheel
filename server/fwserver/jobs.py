@@ -16,10 +16,10 @@ import hashlib
 import json
 import re
 import secrets
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .datasets import NAME, DatasetError, check_digest
-from .store import Store
+from .store import Store, StoreError
 
 KINDS = {'check': '检查推理环境'}
 STATUSES = {'queued': '排队', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消'}
@@ -56,6 +56,7 @@ def _runner_version(r: dict) -> dict:
     return {'id': r['id'], 'runner': r['name'], 'number': r['number'], 'ref': f'{r["name"]}@{r["number"]}',
             'worker': r['worker'], 'conda_env': r['conda_env'], 'env_sha256': bytes(r['env_sha256']).hex(),
             'src_dir': r['src_dir'], 'src_commit': r['src_commit'], 'src_dirty': r['src_dirty'],
+            'src_state_sha256': bytes(r['src_state_sha256']).hex() if r['src_state_sha256'] else None,
             'registered_by': r['registered_by'], 'created_at': _stamp(r['created_at'])}
 
 
@@ -96,7 +97,8 @@ def get_runner_version_by_id(conn, rv_id: int) -> dict:
 
 
 def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str, env_sha256: str,
-                    src_dir: str = '', src_commit: Optional[str] = None, src_dirty: bool = False) -> dict:
+                    src_dir: str = '', src_commit: Optional[str] = None, src_dirty: bool = False,
+                    src_state_sha256: Optional[str] = None) -> dict:
     """A new version of the runner when anything differs from its newest one (another machine, another
     environment listing, another source commit); the newest one again otherwise. Only worker accounts
     register: what is recorded is what that machine has."""
@@ -106,7 +108,7 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
         raise DatasetError(400, f'conda 环境名不对：{conda_env!r}')
     env_sha256 = check_digest(env_sha256)
     if store.size(env_sha256) is None:
-        raise DatasetError(400, '环境的包清单（conda list --explicit）还没上传')
+        raise DatasetError(400, '环境的包清单（conda list --explicit 和 pip freeze）还没上传')
     src_dir = _text(src_dir or '', '源码目录', 1000).strip()
     if any(c in src_dir for c in '\r\n\t'):
         raise DatasetError(400, '源码目录里有不能用的字符')
@@ -117,6 +119,15 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     if not src_dir and (src_commit or src_dirty):
         raise DatasetError(400, '没有源码目录时不能有提交号')
     src_dirty = bool(src_dirty)
+    if src_state_sha256 is not None:
+        src_state_sha256 = check_digest(src_state_sha256)
+    if src_dirty != (src_state_sha256 is not None):
+        raise DatasetError(400, '源码有未提交的改动时要带上改动的哈希，没有改动时不带')
+    try:
+        store.flush()  # the listing is durable before any record points at it
+    except StoreError as e:
+        raise DatasetError(503, str(e)) from None
+    state = bytes.fromhex(src_state_sha256) if src_state_sha256 else None
     with conn.transaction():
         conn.execute('INSERT INTO runners (name) VALUES (%s) ON CONFLICT DO NOTHING', (name,))
         runner = conn.execute('SELECT id, name FROM runners WHERE lower(name) = lower(%s) FOR UPDATE',
@@ -124,15 +135,16 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
         last = conn.execute('SELECT * FROM runner_versions WHERE runner_id = %s ORDER BY number DESC LIMIT 1',
                             (runner['id'],)).fetchone()
         same = last is not None and (last['worker_id'], last['conda_env'], bytes(last['env_sha256']).hex(),
-                                     last['src_dir'], last['src_commit'], last['src_dirty']) == (
-            worker['user_id'], conda_env, env_sha256, src_dir, src_commit, src_dirty)
+                                     last['src_dir'], last['src_commit'], last['src_dirty'],
+                                     bytes(last['src_state_sha256']) if last['src_state_sha256'] else None) == (
+            worker['user_id'], conda_env, env_sha256, src_dir, src_commit, src_dirty, state)
         if same:
             return dict(get_runner_version_by_id(conn, last['id']), created=False)
         row = conn.execute(
             'INSERT INTO runner_versions (runner_id, number, worker_id, conda_env, env_sha256, src_dir, src_commit, '
-            'src_dirty, registered_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+            'src_dirty, src_state_sha256, registered_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
             (runner['id'], (last['number'] if last else 0) + 1, worker['user_id'], conda_env,
-             bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, worker['user_id'])).fetchone()
+             bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, state, worker['user_id'])).fetchone()
     return dict(get_runner_version_by_id(conn, row['id']), created=True)
 
 
@@ -163,7 +175,8 @@ def expire_leases(conn) -> int:
     n = 0
     with conn.transaction():
         rows = conn.execute("SELECT id, attempts, max_attempts, cancel_requested FROM jobs "
-                            "WHERE status = 'running' AND lease_expires < now() FOR UPDATE SKIP LOCKED").fetchall()
+                            "WHERE status = 'running' AND lease_expires < clock_timestamp() "
+                            "FOR UPDATE SKIP LOCKED").fetchall()
         for r in rows:
             conn.execute("UPDATE job_attempts SET ended_at = now(), outcome = 'lost' "
                          "WHERE job_id = %s AND attempt = %s AND outcome IS NULL", (r['id'], r['attempts']))
@@ -218,7 +231,8 @@ def submit(conn, user: dict, kind: str, runner: Optional[str] = None, params: Op
         name, _, number = runner.partition('@')
         rv = get_runner_version(conn, name, number or 'latest')
         params = {'conda_env': rv['conda_env'], 'env_sha256': rv['env_sha256'], 'src_dir': rv['src_dir'],
-                  'src_commit': rv['src_commit'], 'src_dirty': rv['src_dirty']}
+                  'src_commit': rv['src_commit'], 'src_dirty': rv['src_dirty'],
+                  'src_state_sha256': rv['src_state_sha256']}
     row = conn.execute('INSERT INTO jobs (kind, params, runner_version_id, submitted_by) VALUES (%s, %s, %s, %s) '
                        'RETURNING id', (kind, json.dumps(params, ensure_ascii=False), rv['id'] if rv else None,
                                         user['user_id'])).fetchone()
@@ -256,7 +270,8 @@ def claim(conn, worker: dict, lease_seconds: int) -> Optional[dict]:
             return None
         attempt = row['attempts'] + 1
         conn.execute("UPDATE jobs SET status = 'running', attempts = %s, worker_id = %s, lease_sha256 = %s, "
-                     "lease_expires = now() + make_interval(secs => %s), started_at = coalesce(started_at, now()) "
+                     "lease_expires = clock_timestamp() + make_interval(secs => %s), "
+                     "started_at = coalesce(started_at, now()) "
                      "WHERE id = %s", (attempt, worker['user_id'], _hash(token), lease_seconds, row['id']))
         conn.execute('INSERT INTO job_attempts (job_id, attempt, worker_id, lease_sha256) VALUES (%s, %s, %s, %s)',
                      (row['id'], attempt, worker['user_id'], _hash(token)))
@@ -264,12 +279,16 @@ def claim(conn, worker: dict, lease_seconds: int) -> Optional[dict]:
 
 
 def _held(conn, job_id: int, token: str) -> dict:
-    """The job row, locked, if this token's claim still holds its lease; 409 otherwise."""
-    row = conn.execute('SELECT id, status, attempts, lease_sha256, lease_expires < now() AS expired, '
-                       'cancel_requested FROM jobs WHERE id = %s FOR UPDATE', (job_id,)).fetchone()
+    """The job row, locked, if this token's claim still holds its lease; 409 otherwise. The lease is compared
+    with the clock after the lock is taken (clock_timestamp, not the transaction's start, now()): a request that
+    waited for the lock past the end of the lease is refused."""
+    row = conn.execute('SELECT id, status, attempts, lease_sha256, lease_expires, cancel_requested FROM jobs '
+                       'WHERE id = %s FOR UPDATE', (job_id,)).fetchone()
     if row is None:
         raise DatasetError(404, f'没有任务 {job_id}')
-    if row['status'] != 'running' or bytes(row['lease_sha256']) != _hash(token or '') or row['expired']:
+    expired = row['lease_expires'] is None or conn.execute(
+        'SELECT %s::timestamptz <= clock_timestamp() AS e', (row['lease_expires'],)).fetchone()['e']
+    if row['status'] != 'running' or bytes(row['lease_sha256']) != _hash(token or '') or expired:
         raise DatasetError(409, f'任务 {job_id} 的这次领取已经失效（租约过期、任务已结束或已交给别的 worker），'
                                 f'不再接受它的结果')
     return row
@@ -278,7 +297,7 @@ def _held(conn, job_id: int, token: str) -> dict:
 def renew(conn, job_id: int, token: str, lease_seconds: int) -> dict:
     with conn.transaction():
         row = _held(conn, job_id, token)
-        conn.execute('UPDATE jobs SET lease_expires = now() + make_interval(secs => %s) WHERE id = %s',
+        conn.execute('UPDATE jobs SET lease_expires = clock_timestamp() + make_interval(secs => %s) WHERE id = %s',
                      (lease_seconds, job_id))
     return {'cancel': row['cancel_requested'], 'lease_seconds': lease_seconds}
 
@@ -325,8 +344,9 @@ def _check_result(kind: str, result: Any) -> dict:
 
 
 def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, error: str = '') -> dict:
-    """Ends the job as done (with its result), failed (with why) or cancelled. Sending the same finish again
-    after a network error returns the job instead of an error."""
+    """Ends the job as done (with its result), failed (with why) or cancelled. A job whose cancel was accepted
+    ends cancelled whatever the worker sends. Sending the same finish again after a network error returns the
+    job instead of an error."""
     if outcome not in OUTCOMES:
         raise DatasetError(400, f'结果只能是 {"、".join(OUTCOMES)}')
     error = _text(error or '', '出错原因', MAX_ERROR)
@@ -334,8 +354,8 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
         done = conn.execute('SELECT a.outcome FROM job_attempts a JOIN jobs j ON j.id = a.job_id '
                             'WHERE a.job_id = %s AND a.lease_sha256 = %s AND j.status = a.outcome',
                             (job_id, _hash(token or ''))).fetchone()
-        if done is not None and done['outcome'] == outcome:
-            return get_job(conn, job_id)  # this claim already finished the job like this
+        if done is not None and (done['outcome'] == outcome or done['outcome'] == 'cancelled'):
+            return get_job(conn, job_id)  # this claim already finished the job (like this, or cancelled)
         row = _held(conn, job_id, token)
         kind = conn.execute('SELECT kind FROM jobs WHERE id = %s', (job_id,)).fetchone()['kind']
         if outcome == 'done':
@@ -344,6 +364,9 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
             raise DatasetError(400, '只有完成的任务带结果')
         if outcome == 'failed' and not error.strip():
             raise DatasetError(400, '失败的任务要写原因')
+        if row['cancel_requested'] and outcome != 'cancelled':
+            # the cancel was accepted before the result came: it stands (a failure keeps its reason)
+            outcome, result = 'cancelled', None
         conn.execute('UPDATE job_attempts SET ended_at = now(), outcome = %s WHERE job_id = %s AND attempt = %s',
                      (outcome, job_id, row['attempts']))
         conn.execute('UPDATE jobs SET status = %s, result = %s, error = %s, finished_at = now(), worker_id = NULL, '
@@ -351,3 +374,13 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
                      (outcome, json.dumps(result, ensure_ascii=False) if result is not None else None,
                       error or None, job_id))
     return get_job(conn, job_id)
+
+
+def verify_inputs(conn) -> Tuple[List[str], Dict[str, Tuple[Optional[int], str]], int]:
+    """For datasets.verify (fw-server verify): the package listings runner versions point at."""
+    wanted: Dict[str, Tuple[Optional[int], str]] = {}
+    rows = conn.execute("SELECT encode(rv.env_sha256, 'hex') AS d, r.name || '@' || rv.number AS ref "
+                        'FROM runner_versions rv JOIN runners r ON r.id = rv.runner_id ORDER BY rv.id').fetchall()
+    for r in rows:
+        wanted.setdefault(r['d'], (None, f'推理环境 {r["ref"]} 的包清单'))
+    return [], wanted, len(rows)

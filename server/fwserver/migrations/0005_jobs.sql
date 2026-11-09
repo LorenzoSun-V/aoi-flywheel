@@ -26,15 +26,19 @@ CREATE TABLE runner_versions (
   number         int NOT NULL CHECK (number > 0),
   worker_id      bigint NOT NULL REFERENCES users(id),  -- the worker account of the machine it is on
   conda_env      text NOT NULL CHECK (conda_env <> ''),
-  -- sha256 of `conda list -n <env> --explicit`; the listing itself is in the store under that hash
+  -- sha256 of `conda list -n <env> --explicit` followed by `pip freeze --all` run in the environment; the
+  -- listing itself is in the store under that hash
   env_sha256     bytea NOT NULL CHECK (length(env_sha256) = 32),
   src_dir        text NOT NULL DEFAULT '',
   src_commit     text CHECK (src_commit ~ '^[0-9a-f]{7,64}$'),
   src_dirty      boolean NOT NULL DEFAULT false,
+  -- sha256 of the uncommitted changes (tracked diff and untracked files), so that a second change is seen
+  src_state_sha256 bytea CHECK (length(src_state_sha256) = 32),
   registered_by  bigint NOT NULL REFERENCES users(id),
   created_at     timestamptz NOT NULL DEFAULT now(),
   UNIQUE (runner_id, number),
-  CHECK (src_dir <> '' OR (src_commit IS NULL AND NOT src_dirty))
+  CHECK (src_dir <> '' OR (src_commit IS NULL AND NOT src_dirty)),
+  CHECK (src_dirty = (src_state_sha256 IS NOT NULL))
 );
 
 CREATE FUNCTION guard_append_only() RETURNS trigger LANGUAGE plpgsql AS $$

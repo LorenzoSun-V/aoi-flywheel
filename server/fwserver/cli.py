@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, auth, datasets, db, models
+from . import __version__, auth, datasets, db, jobs, models
 from .settings import Settings, SettingsError
 from .store import Store, StoreError
 
@@ -61,13 +61,23 @@ def cmd_token(args, settings):
                 return 1
 
 
+def verify_inputs(conn):
+    """What the records above the datasets point at: model versions and evaluation reports, runner versions."""
+    problems, wanted, count = models.verify_inputs(conn)
+    more_problems, more_wanted, more_count = jobs.verify_inputs(conn)
+    for digest, (size, ref) in more_wanted.items():
+        if wanted.get(digest, (None,))[0] is None:
+            wanted[digest] = (size, ref)
+    return problems + more_problems, wanted, count + more_count
+
+
 def cmd_verify(args, settings):
     store = Store(settings.store)
     try:
         with db.connect(settings.dsn) as conn:
             problems = datasets.verify(conn, store, rehash=args.rehash,
                                        repair_from=Path(args.repair_from) if args.repair_from else None,
-                                       more=models.verify_inputs)
+                                       more=verify_inputs)
         for p in problems[:50]:
             print(f'  {p}')
         if len(problems) > 50:

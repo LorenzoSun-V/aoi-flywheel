@@ -17,8 +17,9 @@ import sys
 import threading
 import time
 import traceback
+from collections import deque
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from .api import Api, ApiError
 
@@ -47,25 +48,80 @@ def conda_executable() -> str:
     return found
 
 
-def conda_listing(env: str) -> bytes:
-    """`conda list -n <env> --explicit`: every package of the environment with its exact build; its sha256 tells
-    whether the environment changed since it was registered."""
+Capture = Callable[[List[str]], Tuple[int, bytes, bytes]]  # argv -> (exit status, stdout, stderr)
+PIP_HEADER = b'\n# pip freeze --all\n'
+
+
+def plain_capture(argv: List[str]) -> Tuple[int, bytes, bytes]:
+    """Outside a job (fw runner register): run and wait, at most 5 minutes."""
     try:
-        r = subprocess.run([conda_executable(), 'list', '-n', env, '--explicit'], capture_output=True, timeout=300)
+        r = subprocess.run(argv, capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as e:
-        raise WorkerError(f'运行 conda list 失败：{e}') from None
-    if r.returncode != 0:
-        why = (r.stderr or r.stdout).decode('utf-8', 'replace').strip()[-2000:]
-        raise WorkerError(f'读不了 conda 环境 {env} 的包清单（conda 返回 {r.returncode}）：{why}')
-    if not r.stdout.strip():
+        raise WorkerError(f'运行 {argv[0]} 失败：{e}') from None
+    return r.returncode, r.stdout, r.stderr
+
+
+def conda_listing(env: str, capture: Optional[Capture] = None) -> bytes:
+    """What the environment holds: `conda list -n <env> --explicit` (every conda package with its exact build),
+    then `pip freeze --all` run in it (packages installed with pip, which the conda listing leaves out). Its
+    sha256 tells whether the environment changed since it was registered. An environment without pip gets a
+    line saying so."""
+    capture = capture or plain_capture
+    conda = conda_executable()
+    code, out, err = capture([conda, 'list', '-n', env, '--explicit'])
+    if code != 0:
+        why = (err or out).decode('utf-8', 'replace').strip()[-2000:]
+        raise WorkerError(f'读不了 conda 环境 {env} 的包清单（conda 返回 {code}）：{why}')
+    if not out.strip():
         raise WorkerError(f'conda 环境 {env} 的包清单是空的')
+    code, pip, err = capture([conda, 'run', '-n', env, 'python', '-m', 'pip', 'freeze', '--all',
+                              '--disable-pip-version-check'])
+    if code != 0:
+        why = (err or pip).decode('utf-8', 'replace').strip()
+        if 'No module named pip' not in why:
+            raise WorkerError(f'读不了 conda 环境 {env} 里 pip 装的包（返回 {code}）：{why[-2000:]}')
+        pip = b'# no pip in this environment\n'
+    return out + PIP_HEADER + pip
+
+
+def _git_bytes(folder: Path, *args: str) -> bytes:
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith('GIT_')}
+    try:
+        r = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, timeout=300, env=env,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise WorkerError(f'运行 git 失败：{e}') from None
+    if r.returncode != 0:
+        raise WorkerError(f'git {args[0]} 失败：{r.stderr.decode("utf-8", "replace").strip()[-500:]}')
     return r.stdout
 
 
+def source_state(folder: Path) -> Optional[str]:
+    """sha256 of what the working copy has beyond its commit: the diff of tracked files (git diff HEAD --binary)
+    and every untracked file that is not ignored, by path and content. None when there is nothing; so a second
+    change to a source that already had uncommitted changes is seen too."""
+    diff = _git_bytes(folder, 'diff', 'HEAD', '--binary', '--no-color', '--no-ext-diff')
+    untracked = sorted(p for p in _git_bytes(folder, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
+                       if p)
+    if not diff and not untracked:
+        return None
+    h = hashlib.sha256(b'diff\0' + diff)
+    for rel in untracked:
+        path = folder / os.fsdecode(rel)
+        try:
+            content = hashlib.sha256(path.read_bytes()).hexdigest().encode() if not path.is_symlink() else \
+                b'link:' + os.fsencode(os.readlink(path))
+        except OSError as e:
+            raise WorkerError(f'读不了源码目录里的 {path}（{e.strerror or e}）') from None
+        h.update(b'\0file\0' + rel + b'\0' + content)
+    return h.hexdigest()
+
+
 def source_info(src_dir: str) -> Dict[str, object]:
-    """The framework source's commit and whether tracked files have changes; '' src_dir = no source."""
+    """The framework source's commit, and whether (and how) the working copy differs from it (see
+    source_state); '' src_dir = no source."""
     if not src_dir:
-        return {'src_dir': '', 'src_commit': None, 'src_dirty': False}
+        return {'src_dir': '', 'src_commit': None, 'src_dirty': False, 'src_state_sha256': None}
     from .ops import git_info  # ops is the heavier module; only this needs it
     folder = Path(src_dir).expanduser()
     if not folder.is_dir():
@@ -73,14 +129,16 @@ def source_info(src_dir: str) -> Dict[str, object]:
     info = git_info(folder)
     if info is None:
         raise WorkerError(f'{folder} 不是 git 仓库（或者没装 git）：源码要能看出是哪个提交')
-    return {'src_dir': str(folder.resolve()), 'src_commit': info['commit'], 'src_dirty': info['dirty']}
+    state = source_state(folder)
+    return {'src_dir': str(folder.resolve()), 'src_commit': info['commit'], 'src_dirty': state is not None,
+            'src_state_sha256': state}
 
 
 def register_runner(api: Api, name: str, env: str, src_dir: str = '') -> dict:
     """Run on the GPU machine with its worker account: records the environment's package listing (uploaded to
     the store, so a later change can be compared) and the source commit as the runner's next version."""
     listing = conda_listing(env)
-    digest = api.put_bytes(listing)
+    digest = api.put_bytes(listing)  # the platform makes it durable before it records the runner
     src = source_info(src_dir)
     return api.register_runner({'name': name, 'conda_env': env, 'env_sha256': digest, **src})
 
@@ -88,15 +146,20 @@ def register_runner(api: Api, name: str, env: str, src_dir: str = '') -> dict:
 class JobRun:
     """One claim of one job: its lease, its log, and what it runs."""
 
-    def __init__(self, api: Api, job: dict, echo: Echo):
+    def __init__(self, api: Api, job: dict, echo: Echo, claimed_at: Optional[float] = None):
+        """claimed_at: time.monotonic() before the claim was sent; the lease runs out lease_seconds after it at
+        the latest, whatever this machine hears from the platform."""
         self.api, self.job, self.echo = api, job, echo
         self.id, self.token = job['id'], job['token']
-        self.renew_every = max(1.0, job.get('lease_seconds', 60) / 3)
+        self.lease_seconds = job.get('lease_seconds', 60)
+        self.renew_every = max(1.0, self.lease_seconds / 3)
+        self.deadline = (time.monotonic() if claimed_at is None else claimed_at) + self.lease_seconds
         self.cancel = threading.Event()
         self.lost = threading.Event()
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.pending: List[str] = []
+        self.outbox: Deque[Tuple[int, str]] = deque()  # numbered pieces not yet confirmed by the platform
         self.seq = 0
         self.keeper = threading.Thread(target=self._keep, name=f'job-{self.id}-lease', daemon=True)
 
@@ -109,27 +172,46 @@ class JobRun:
             self.pending.append(text if text.endswith('\n') else text + '\n')
 
     def _send_log(self) -> None:
+        """Send the output so far. Each piece gets its number once and is sent again with that number until the
+        platform answers, so a piece the platform stored but whose answer was lost is not stored twice, and the
+        next piece never reuses its number."""
         with self.lock:
             text, self.pending = ''.join(self.pending), []
-        while text and not self.lost.is_set():
-            piece, text = text[:LOG_PIECE], text[LOG_PIECE:]
+            while text:
+                self.outbox.append((self.seq, text[:LOG_PIECE]))
+                text = text[LOG_PIECE:]
+                self.seq += 1
+        while self.outbox and not self.lost.is_set():
+            seq, piece = self.outbox[0]
             try:
-                self.api.add_log(self.id, self.token, self.seq, piece)
+                self.api.add_log(self.id, self.token, seq, piece)
             except ApiError as e:
                 if e.status == 409:
                     self.lost.set()
                     return
                 raise
-            self.seq += 1
+            self.outbox.popleft()
+
+    def expired(self) -> bool:
+        """The lease ran out by this machine's clock (the platform could not be reached to renew it): the
+        platform may already have given the job to another worker, so this claim stops."""
+        if not self.lost.is_set() and time.monotonic() >= self.deadline:
+            self.echo(f'任务 {self.id}：租约到期前没能续上（连不上平台），停下任务，这次领取作废')
+            self.lost.set()
+        return self.lost.is_set()
 
     def _keep(self) -> None:
         last_renew = time.monotonic()
         while not self.stop.wait(LOG_EVERY):
+            if self.expired():
+                return
             try:
                 self._send_log()
                 if time.monotonic() - last_renew >= self.renew_every:
+                    sent = time.monotonic()
                     answer = self.api.renew(self.id, self.token)
-                    last_renew = time.monotonic()
+                    last_renew = sent
+                    self.deadline = sent + answer.get('lease_seconds', self.lease_seconds)
                     if answer.get('cancel'):
                         self.cancel.set()
             except ApiError as e:
@@ -142,43 +224,64 @@ class JobRun:
 
     def check(self) -> None:
         """Raise when the job should stop: cancelled, or this claim lost its lease."""
-        if self.lost.is_set():
+        if self.expired():
             raise LeaseLost()
         if self.cancel.is_set():
             raise Cancelled()
 
     # --- running a command -----------------------------------------------------------------------
     def run(self, argv: List[str], cwd: Optional[str] = None, env: Optional[dict] = None) -> int:
-        """Run a command, its output going to the job's log; killed (with what it started) on cancel or lost
-        lease. Returns its exit status."""
-        self.check()
+        """Run a command, its output going to the job's log. Returns its exit status (see _spawn)."""
         self.log('$ ' + ' '.join(argv))
+        return self._spawn(argv, cwd, env, lambda raw: self.log(raw.decode('utf-8', 'replace')), None)
+
+    def capture(self, argv: List[str]) -> Tuple[int, bytes, bytes]:
+        """Run a command for its output (not logged): (exit status, stdout, stderr); see _spawn."""
+        out: List[bytes] = []
+        err: List[bytes] = []
+        code = self._spawn(argv, None, None, out.append, err.append)
+        return code, b''.join(out), b''.join(err)
+
+    def _spawn(self, argv: List[str], cwd: Optional[str], env: Optional[dict], on_out: Callable[[bytes], None],
+               on_err: Optional[Callable[[bytes], None]]) -> int:
+        """Run a command in a process group (a session on Linux) of its own. On cancel or a lost lease the whole
+        group is killed and Cancelled / LeaseLost raised. When the command itself ends, whatever it left running
+        in its group is killed too: nothing outlives the job, and nothing left over keeps its output pipe open."""
+        self.check()
         kwargs = {'start_new_session': True} if os.name == 'posix' else {
             'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
         try:
             proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, **kwargs)
+                                    stderr=subprocess.PIPE if on_err else subprocess.STDOUT, **kwargs)
         except OSError as e:
             raise WorkerError(f'启动不了 {argv[0]}：{e}') from None
 
-        def pump():
-            for raw in iter(proc.stdout.readline, b''):
-                self.log(raw.decode('utf-8', 'replace'))
-            proc.stdout.close()
+        def pump(stream, sink):
+            for raw in iter(stream.readline, b''):
+                sink(raw)
+            stream.close()
 
-        reader = threading.Thread(target=pump, daemon=True)
-        reader.start()
+        readers = [threading.Thread(target=pump, args=(proc.stdout, on_out), daemon=True)]
+        if on_err:
+            readers.append(threading.Thread(target=pump, args=(proc.stderr, on_err), daemon=True))
+        for r in readers:
+            r.start()
         try:
-            while proc.poll() is None:
-                if self.cancel.is_set() or self.lost.is_set():
-                    _kill(proc)
-                    reader.join(5)
-                    self.check()
+            while not _ended(proc):
+                if self.cancel.is_set() or self.expired():
+                    raise LeaseLost() if self.lost.is_set() else Cancelled()
                 time.sleep(0.2)
+            _kill(proc)  # what it left in its group (the group lives on while the ended leader is not reaped)
+            for r in readers:
+                while r.is_alive():
+                    r.join(0.2)
+                    if self.cancel.is_set() or self.expired():  # Windows: a leftover may still hold the pipe
+                        raise LeaseLost() if self.lost.is_set() else Cancelled()
         except BaseException:
             _kill(proc)
+            for r in readers:
+                r.join(5)
             raise
-        reader.join(30)
         return proc.returncode
 
     # --- the whole claim -------------------------------------------------------------------------
@@ -224,17 +327,33 @@ class JobRun:
         return outcome
 
 
+def _ended(proc: subprocess.Popen) -> bool:
+    """Has the command itself ended? On Linux without reaping it: an ended but unreaped leader keeps its
+    process group id taken, so killing the group afterwards cannot reach anything else."""
+    if proc.returncode is not None:
+        return True
+    if os.name == 'posix':
+        try:
+            info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return proc.poll() is not None
+        return info is not None
+    return proc.poll() is not None
+
+
 def _kill(proc: subprocess.Popen) -> None:
-    """Kill the command and everything it started (it runs in its own process group / session)."""
-    if proc.poll() is not None:
-        return
+    """Kill the command and everything it started (it runs in its own process group / session), then reap it."""
     try:
         if os.name == 'posix':
             os.killpg(proc.pid, signal.SIGKILL)
-        else:
+        elif proc.returncode is None:
             subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        proc.kill()
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
     try:
         proc.wait(30)
     except subprocess.TimeoutExpired:
@@ -246,19 +365,20 @@ def check_runner(run: JobRun) -> dict:
     """Is the runner on this machine still what was registered? Compares the package listing and the source."""
     p = run.job['params']
     run.log(f'检查 conda 环境 {p["conda_env"]}')
-    listing = conda_listing(p['conda_env'])
+    listing = conda_listing(p['conda_env'], run.capture)
     digest = hashlib.sha256(listing).hexdigest()
     run.check()
     src = source_info(p['src_dir'])
+    run.check()
     same_env = digest == p['env_sha256']
-    same_src = (src['src_commit'], src['src_dirty']) == (p['src_commit'], p['src_dirty'])
+    same_src = (src['src_commit'], src['src_state_sha256']) == (p['src_commit'], p.get('src_state_sha256'))
     run.log('包清单' + ('和登记时一样' if same_env else f'变了：现在 {digest[:12]}，登记时 {p["env_sha256"][:12]}'))
     if p['src_dir']:
         now = f'{src["src_commit"]}{"（有未提交的改动）" if src["src_dirty"] else ""}'
         then = f'{p["src_commit"]}{"（有未提交的改动）" if p["src_dirty"] else ""}'
         run.log('源码' + ('和登记时一样' if same_src else f'变了：现在 {now}，登记时 {then}'))
     return {'env_sha256': digest, 'src_commit': src['src_commit'], 'src_dirty': src['src_dirty'],
-            'same_env': same_env, 'same_src': same_src}
+            'src_state_sha256': src['src_state_sha256'], 'same_env': same_env, 'same_src': same_src}
 
 
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}
@@ -273,6 +393,7 @@ def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
     ran = 0
     idle_said = False
     while True:
+        claimed_at = time.monotonic()
         job = api.claim()
         if job is None:
             if once:
@@ -284,7 +405,7 @@ def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
             continue
         idle_said = False
         echo(f'领取任务 {job["id"]}（{job["kind_text"]}，第 {job["attempt"]} 次）')
-        outcome = JobRun(api, job, echo).execute(handlers)
+        outcome = JobRun(api, job, echo, claimed_at).execute(handlers)
         echo(f'任务 {job["id"]}：{OUTCOME_TEXT[outcome]}')
         ran += 1
         sys.stdout.flush()

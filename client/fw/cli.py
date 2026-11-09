@@ -428,9 +428,15 @@ def cmd_job_show(args, api: Api) -> None:
 
 
 def cmd_job_log(args, api: Api) -> None:
-    after = -1
+    after, attempt = -1, None
     while True:
         piece = api.job_log(args.id, args.attempt, after)
+        if attempt is not None and piece['attempt'] != attempt:
+            # the job was claimed again: its pieces are numbered from 0 again, so read this claim from the start
+            attempt, after = piece['attempt'], -1
+            print(f'\n--- 第 {attempt} 次领取 ---')
+            continue
+        attempt = piece['attempt']
         for p in piece['pieces']:
             sys.stdout.write(p['text'])
             after = p['seq']

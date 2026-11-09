@@ -245,8 +245,9 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
 
     - each version's rows rebuild its manifest hash, and the manifest object is in the store and intact;
     - more(conn) -> (problems, {digest: (size or None, where it is used)}, count): what the records of the
-      modules above hold, checked the same way. Always pass models.verify_inputs (it is required so that no
-      caller forgets it: with rehash, an object nothing here knows about counts as left over by an import);
+      modules above hold, checked the same way. Always pass cli.verify_inputs (model versions, evaluation
+      reports and runners; it is required so that no caller forgets it: with rehash, an object nothing here
+      knows about counts as left over by an import);
     - every referenced object is in the store with the right size, and with rehash, the right content;
     - with rehash, also every object no version uses yet (left by an import that failed or is still
       running): the next import of the same files reuses whatever the store holds, so a damaged one is
