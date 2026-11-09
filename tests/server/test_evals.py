@@ -30,6 +30,7 @@ def opt(name):
     return args[args.index(name) + 1] if name in args else None
 with open(os.environ['FAKE_DETEVAL_LOG'], 'a') as f:
     f.write(json.dumps(args) + '\n')
+print('environment:', ' '.join(sorted(os.environ)))
 cfg = json.loads(Path(opt('--sets')).read_text())
 IMG = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
 def images(d):
@@ -73,25 +74,42 @@ else:
 '''
 
 
+def executable(path, text):
+    path.write_text(text)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
 @pytest.fixture
 def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
-    """A worker machine with a fake conda (environments in listings/) that runs the fake deteval."""
+    """A worker machine with a fake conda (environments in listings/) that runs the fake deteval, and a fake sudo
+    (FW_RUN_AS=nobody) that runs the command as it is, with the empty environment the worker gives it; it writes
+    its arguments to sudo.log. The fake deteval fails with listings/FAIL, misses an image with listings/SKIP."""
     listings = tmp_path / 'listings'
     listings.mkdir()
     (tmp_path / 'deteval.py').write_text(FAKE_DETEVAL)
-    script = tmp_path / 'conda'
-    script.write_text('#!/bin/sh\n'
-                      f'd="{listings}"\n'
-                      'if [ "$1" = run ] && [ "$4" = python ]; then echo "pip==24.0"; exit 0; fi\n'
-                      'if [ "$1" = run ] && [ "$5" = deteval ]; then\n'
-                      '  [ -f "$d/$3.txt" ] || exit 1\n'
-                      f'  shift 5; exec "{sys.executable}" "{tmp_path / "deteval.py"}" "$@"\n'
-                      'fi\n'
-                      '[ "$1" = list ] && [ -f "$d/$3.txt" ] && cat "$d/$3.txt"\n')
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv('FW_CONDA', str(script))
+    executable(tmp_path / 'conda', '#!/bin/sh\n'
+               f'd="{listings}"\n'
+               'if [ "$1" = run ] && [ "$4" = python ]; then echo "pip==24.0"; exit 0; fi\n'
+               'if [ "$1" = run ] && [ "$5" = deteval ]; then\n'
+               '  [ -f "$d/$3.txt" ] || exit 1\n'
+               f'  export FAKE_DETEVAL_LOG="{tmp_path / "deteval.log"}"\n'
+               '  [ -f "$d/FAIL" ] && export FAKE_DETEVAL_FAIL=1\n'
+               '  [ -f "$d/SKIP" ] && export FAKE_DETEVAL_SKIP=1\n'
+               f'  shift 5; exec "{sys.executable}" "{tmp_path / "deteval.py"}" "$@"\n'
+               'fi\n'
+               '[ "$1" = list ] && [ -f "$d/$3.txt" ] && cat "$d/$3.txt"\n')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    executable(bin_dir / 'sudo', '#!/bin/sh\n'
+               f'echo "$*" >> "{tmp_path / "sudo.log"}"\n'
+               'while [ "$1" != -- ]; do shift; done; shift\n'
+               'case " $* " in *" kill -KILL -1 "*) exit 0;; esac\n'  # not every process of the test's account
+               'exec "$@"\n')
+    monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    monkeypatch.setenv('FW_RUN_AS', 'nobody')
+    monkeypatch.setenv('FW_CONDA', str(tmp_path / 'conda'))
     monkeypatch.setenv('FW_CACHE', str(tmp_path / 'fw-cache'))
-    monkeypatch.setenv('FAKE_DETEVAL_LOG', str(tmp_path / 'deteval.log'))
     w = make_worker()
     w.listings = listings
     w.calls = lambda: [json.loads(x) for x in (tmp_path / 'deteval.log').read_text().splitlines()]
@@ -198,13 +216,13 @@ def test_what_an_eval_needs(api, gpu, model, snapshot, tmp_path):  # noqa: F811
 def test_an_eval_that_missed_images_registers_nothing(api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
     mv = trained(api, model, snapshot, tmp_path)
     r = add_runner(gpu)
-    monkeypatch.setenv('FAKE_DETEVAL_SKIP', '1')
+    (gpu.listings / 'SKIP').write_text('')
     job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
     worker.run_worker(gpu, quiet, once=True)
     j = api.job(job['id'])
     assert j['status'] == 'failed' and '有图没评到' in j['error'] and api.evals(model) == []
-    monkeypatch.delenv('FAKE_DETEVAL_SKIP')
-    monkeypatch.setenv('FAKE_DETEVAL_FAIL', '1')
+    (gpu.listings / 'SKIP').unlink()
+    (gpu.listings / 'FAIL').write_text('')
     job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
     worker.run_worker(gpu, quiet, once=True)
     j = api.job(job['id'])
@@ -286,3 +304,94 @@ def test_labels_next_to_images_are_read(api, gpu, model, snapshot, tmp_path):  #
     worker.run_worker(gpu, quiet, once=True)
     e = api.eval(api.job(job['id'])['result']['eval_id'])
     assert e['metrics']['boxes'] == 2 and e['dirs'] == []
+
+
+# --- review of PR #13 ------------------------------------------------------------------------------------
+def test_model_code_runs_under_its_own_account_with_nothing_of_the_workers(  # noqa: F811
+        api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
+    """deteval loads the uploaded weights (a pickle: code): it runs through sudo as FW_RUN_AS, with an empty
+    environment; a worker without FW_RUN_AS does not run it at all."""
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    monkeypatch.setenv('FW_SECRET_FOR_TEST', 'do-not-pass')
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    assert api.job(job['id'])['status'] == 'done'
+    log = ''.join(x['text'] for x in api.job_log(job['id'])['pieces'])
+    shown = [line for line in log.splitlines() if line.startswith('environment:')]
+    assert shown and all('FW_' not in line and 'FAKE_DETEVAL_LOG' in line for line in shown)
+    sudo = (tmp_path / 'sudo.log').read_text().splitlines()
+    runs = [line for line in sudo if ' deteval ' in line]
+    assert len(runs) == 2 and all(line.startswith('-n -H -u nobody -- /usr/bin/env -i ') for line in runs)
+    assert any('kill -KILL -1' in line for line in sudo)  # what it left running is killed
+    monkeypatch.delenv('FW_RUN_AS')
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    j = api.job(job['id'])
+    assert j['status'] == 'failed' and 'FW_RUN_AS' in j['error']
+    assert len([line for line in (tmp_path / 'sudo.log').read_text().splitlines() if ' deteval ' in line]) == 2
+
+
+def test_a_snapshot_numbered_by_another_class_table_is_refused(api, gpu, model, tmp_path):  # noqa: F811
+    from test_trainsets import make
+    src = pool(api, tmp_path, {**sample_files('a', 4, names=('scratch', 'dent')),
+                               **sample_files('b', 3, names=('dent',))})
+    same = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], classes=['scratch', 'dent'], test_dirs=['b'])
+    swapped = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], classes=['dent', 'scratch'], test_dirs=['b'])
+    mv = trained(api, model, same, tmp_path)
+    assert mv['classes'] == ['scratch', 'dent']
+    r = add_runner(gpu)
+    assert api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{same["ref"]}:test'})
+    with pytest.raises(ApiError) as e:
+        api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{swapped["ref"]}:test'})
+    assert e.value.status == 400 and '类别表' in e.value.message
+
+
+def test_labels_with_upper_case_extensions(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """x.JSON is the label of x.png (laid out as x.json, which deteval reads); an image with only labels/x.TXT is
+    a YOLO-only image like one with x.txt."""
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    data = pool(api, tmp_path, {'J/1.png': png(uuid.uuid4().hex), 'J/1.JSON': label('scratch', 'scratch'),
+                                'T/images/2.png': png(uuid.uuid4().hex), 'T/labels/2.TXT': b'0 .5 .5 .1 .1\n'})
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1', 'dirs': ['J']})
+    worker.run_worker(gpu, quiet, once=True)
+    done = api.job(job['id'])
+    assert done['status'] == 'done', done['error']
+    assert api.eval(done['result']['eval_id'])['metrics']['boxes'] == 2
+    with pytest.raises(ApiError) as e:
+        api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1', 'dirs': ['T']})
+    assert e.value.status == 400 and 'YOLO txt' in e.value.message
+
+
+def test_two_jobs_with_the_same_result_keep_a_report_each(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """Two runners send byte-identical output: each job gets its own report, recording that job and runner (the
+    files are stored once); the same job sending it again gets its own report back."""
+    mv = trained(api, model, snapshot, tmp_path)
+    r1, r2 = add_runner(gpu), add_runner(gpu)
+    params = {'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'}
+    first = api.submit_job('eval', runner=r1['runner'], params=params)
+    worker.run_worker(gpu, quiet, once=True)
+    e1 = api.eval(api.job(first['id'])['result']['eval_id'])
+    files = [[f['path'], f['sha256'], f['size']] for f in e1['files']]
+    second = api.submit_job('eval', runner=r2['runner'], params=params)
+    c = gpu.claim()
+    j = gpu.finish(second['id'], c['token'], 'done', {'files': files, 'tool_version': '0.3.0'})
+    assert j['status'] == 'done'
+    e2 = api.eval(j['result']['eval_id'])
+    assert e2['id'] != e1['id'] and e2['job_id'] == second['id'] and e2['runner'] == r2['ref']
+    assert api.eval(e1['id'])['job_id'] == first['id'] and api.eval(e1['id'])['runner'] == r1['ref']
+    again = gpu.finish(second['id'], c['token'], 'done', {'files': files, 'tool_version': '0.3.0'})
+    assert again['result']['eval_id'] == e2['id']
+
+
+def test_a_relative_work_dir(api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('FW_WORK_DIR', 'jobs')
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    done = api.job(job['id'])
+    assert done['status'] == 'done', done['error']
+    assert not list((tmp_path / 'jobs').iterdir())

@@ -496,9 +496,12 @@ def register_eval(conn, store: Store, user_id: int, name: str, number: str, test
     manifest = _prepare(store, entries)
     with conn.transaction():
         conn.execute('SELECT id FROM model_versions WHERE id = %s FOR UPDATE', (mv['id'],))
+        # the same report sent again: by hand, the same content; from a job, that job's report (another job
+        # with the same result has a report of its own, which records that job and its runner)
         same = conn.execute(_EVAL + ' WHERE e.model_version_id = %s AND e.testset_id = %s AND e.split = %s '
-                                    'AND e.dirs = %s AND s.manifest_sha256 = %s ORDER BY e.id LIMIT 1',
-                            (mv['id'], testset_id, split, dirs, bytes.fromhex(manifest))).fetchone()
+                                    'AND e.dirs = %s AND s.manifest_sha256 = %s AND e.job_id IS NOT DISTINCT FROM %s '
+                                    'ORDER BY e.id LIMIT 1',
+                            (mv['id'], testset_id, split, dirs, bytes.fromhex(manifest), job_id)).fetchone()
         if same:
             return dict(_eval(same), existing=True)
         fid = _insert_fileset(conn, entries, manifest)

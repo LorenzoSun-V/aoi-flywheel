@@ -179,7 +179,7 @@ mv = fw.register_model('SES-TX-detr', onnx='best.onnx', weights='best.pt', train
 不同训练框架自己的指标代码不一致，模型好坏以平台用 aoi-deteval（按 ultralytics 的口径）统一算的为准；登记时的训练框架指标只作参考。
 
 - 评估任务：`fw eval run <模型版本> --data <数据池或快照版本> --dirs <目录…> --weights|--engine`。选数据池版本里的几个目录，worker 递归取图，按相对路径对应预测和真值，不用把图摆平。选的目录里有这个模型训练时用过的图（训练集快照的 train/val）就提醒。
-- 权重评估：worker 在模型版本登记的**推理环境**里运行 `deteval predict`，再统一运行 `deteval evaluate`，结果自动登记成评估报告。
+- 权重评估：worker 在模型版本登记的**推理环境**里运行 `deteval predict`，再统一运行 `deteval evaluate`，结果自动登记成评估报告。 权重文件（pickle）加载时会执行代码，所以 deteval 在 GPU 机上单独的低权限系统账号（`FW_RUN_AS`）下运行，读不到 worker 的令牌（2026-11-09 定）。
 - 已实现（第三步之二，迁移 0006）：`fw eval run <模型版本> --data <版本或快照:划分> [--dirs …] --runner <推理环境>`。推理环境在提交时指定（推理环境登记时写 `--framework`），没有放进模型版本：同一个模型可以在不同机器、不同环境里评。数据集版本读 JSON 标注，只有 txt 标注的图要先建快照再评。
 - 推理环境就是部署服务器上搭好的 conda 环境（2026-11-06 选定 conda，不用 Docker），一个框架一个，例如 `yolo26`、`detr-pro`。登记时写环境名和框架源码目录，平台自动记下环境包清单的哈希（`conda list --explicit` 加上 `pip freeze --all`）和源码的 git 提交号（有未提交的改动时还有改动内容的哈希）；有人改了环境或源码，下次评估前能看出来。框架源码留在你们手里，平台不收。迁到别的 GPU 服务器，装好同名环境再登记一次。
 - 引擎评估：引擎由平台在部署服务器上从 ONNX 构建（不收上传的引擎），部署仓库提供两个入口：从 ONNX 构建引擎；用引擎推理并写出 aoi-deteval 格式的预测 JSON。同一张测试集上权重和引擎各评一次，就能看量化后掉了多少点。具体入口拿到推理代码后再定。

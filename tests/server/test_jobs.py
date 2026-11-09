@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import threading
@@ -768,3 +769,64 @@ def test_the_worker_says_cancelled_when_the_cancel_won(api, make_worker, fake_co
     worker.run_worker(w, said.append, once=True, handlers={'check': cancelled_meanwhile})
     assert api.job(job['id'])['status'] == 'cancelled'
     assert said[-1] == f'任务 {job["id"]}：已取消'
+
+
+# --- review of PR #13: model code under its own account -----------------------------------------------------
+MODEL_ACCOUNT = 'fwmodeltest'
+
+
+def model_account():
+    """A real model account for this test machine (root, or a CI runner with passwordless sudo), else skip."""
+    def sudo(*argv):
+        return subprocess.run(['sudo', '-n', *argv], capture_output=True, timeout=60)
+    if shutil.which('sudo') is None or sudo('true').returncode != 0:
+        pytest.skip('needs sudo without a password')
+    if sudo('id', MODEL_ACCOUNT).returncode != 0:
+        assert sudo('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin',
+                    MODEL_ACCOUNT).returncode == 0
+    return worker.RunAs(MODEL_ACCOUNT)
+
+
+def test_model_code_cannot_read_the_workers_files_and_is_killed_on_cancel(
+        api, make_worker, fake_conda, monkeypatch):
+    import tempfile
+    model = model_account()
+    model.check()
+    shared = Path(tempfile.mkdtemp(prefix='fw-runas-', dir='/tmp'))
+    try:
+        shared.chmod(0o755)
+        secret = shared / 'worker-token'
+        secret.write_text('token\n')
+        secret.chmod(0o600)  # like the worker's config file
+        monkeypatch.setenv('FW_SECRET_FOR_TEST', 'do-not-pass')
+        w = make_worker()
+        r = runner(w, fake_conda)
+        api.submit_job('check', runner=r['runner'])
+        run = worker.JobRun(w, w.claim(), quiet)
+        out = []
+        run.log = out.append
+        code = run.run(model.argv(['/bin/sh', '-c', f'id -un; env; cat {secret} || echo unreadable']))
+        text = ''.join(out)
+        assert code == 0 and MODEL_ACCOUNT in text and 'unreadable' in text
+        assert 'FW_SECRET_FOR_TEST' not in text and 'token\n' not in text.split('$ ', 1)[-1].split('\n', 1)[1]
+        run.reaper = model.kill_all
+        done = {}
+
+        def long_job():
+            try:
+                run.run(model.argv(['/bin/sh', '-c', 'sleep 65 & sleep 66']))
+            except worker.Cancelled:
+                done['cancelled'] = True
+        t = threading.Thread(target=long_job)
+        t.start()
+        for _ in range(100):
+            if running('sleep 66'):
+                break
+            time.sleep(0.1)
+        assert running('sleep 65') and running('sleep 66')
+        run.cancel.set()
+        t.join(30)
+        assert not t.is_alive() and done.get('cancelled')
+        assert not running('sleep 65') and not running('sleep 66')
+    finally:
+        shutil.rmtree(shared, ignore_errors=True)

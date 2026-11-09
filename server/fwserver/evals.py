@@ -18,7 +18,7 @@ from typing import Any, List, Optional
 
 from fw.contract import ContractError, eval_dirs, eval_selection, manifest_bytes
 
-from . import datasets, jobs, models
+from . import datasets, jobs, models, trainsets
 from .datasets import DatasetError
 from .store import Store, StoreError
 
@@ -72,6 +72,16 @@ def _overlap(conn, mv: dict, images: List[tuple]) -> Optional[str]:
             f'（例如 {seen[0][0]}），这些图的结果会偏好')
 
 
+def _same_classes(conn, version: dict, mv: dict) -> None:
+    """A snapshot's YOLO labels number classes by its own class table, and deteval reads them by the model's:
+    the two must be the same list in the same order, or right boxes count as the wrong class."""
+    theirs = list(trainsets.info(conn, version['id'])['trainset']['classes'] or [])
+    ours = list(mv['classes'] or [])
+    if theirs != ours:
+        raise DatasetError(400, f'{version["ref"]} 的类别表（{"、".join(theirs)}）和模型 {mv["ref"]} 的（{"、".join(ours)}）'
+                                '不一样（顺序也要一样），快照里 txt 的类别编号会对错类别；用和模型相同的类别表建快照再评')
+
+
 def submit(conn, store: Store, user: dict, runner: Optional[str], params: Optional[dict]) -> dict:
     """params: model (a model version), data (a dataset version, or a snapshot's split as NAME@N:test), dirs (folders
     of the dataset version; none = all of it), imgsz and batch (passed on to deteval predict)."""
@@ -108,6 +118,8 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
         raise DatasetError(400, '评不了：' + '；'.join(problems))
     if not images:
         raise DatasetError(400, f'{version["ref"]}{":" + split if split else ""} 里没有图片')
+    if snapshot:
+        _same_classes(conn, version, mv)
     warnings = [w for w in (_overlap(conn, mv, images),) if w]
     inputs, _ = store.put_bytes(manifest_bytes(files))
     try:

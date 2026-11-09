@@ -174,6 +174,7 @@ class JobRun:
         self.deadline = (time.monotonic() if claimed_at is None else claimed_at) + self.lease_seconds
         self.cancel = threading.Event()
         self.lost = threading.Event()
+        self.reaper: Optional[Callable[[], None]] = None  # kills what runs under the model account (RunAs)
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.pending: List[str] = []
@@ -295,6 +296,7 @@ class JobRun:
                 if self.cancel.is_set() or self.expired():
                     raise LeaseLost() if self.lost.is_set() else Cancelled()
                 time.sleep(0.2)
+            self._reap()
             _kill(proc)  # what it left in its group (the group lives on while the ended leader is not reaped)
             for r in readers:
                 while r.is_alive():
@@ -302,11 +304,16 @@ class JobRun:
                     if self.cancel.is_set() or self.expired():  # Windows: a leftover may still hold the pipe
                         raise LeaseLost() if self.lost.is_set() else Cancelled()
         except BaseException:
+            self._reap()
             _kill(proc)
             for r in readers:
                 r.join(5)
             raise
         return proc.returncode
+
+    def _reap(self) -> None:
+        if self.reaper is not None:
+            self.reaper()
 
     # --- the whole claim -------------------------------------------------------------------------
     def execute(self, handlers: Dict[str, Callable[['JobRun'], dict]]) -> str:
@@ -395,6 +402,91 @@ def _kill(proc: subprocess.Popen) -> None:
         pass
 
 
+# --- running model code ---------------------------------------------------------------------------------
+# What a model account's commands get from the worker's environment: the GPU choice and the locale. Nothing
+# else: no FW_* settings, no proxies with passwords, nothing the worker's own account was given.
+RUN_AS_PASS = ('CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES', 'CUDA_DEVICE_ORDER', 'LANG', 'LC_ALL', 'TZ')
+RUN_AS_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+
+class RunAs:
+    """Model code runs under its own low-privilege system account (FW_RUN_AS), through sudo.
+
+    Loading uploaded weights runs code: a .pt / .pth is a pickle, and RF-DETR and YOLO checkpoints cannot be
+    loaded with torch's weights_only. So whatever reads them (deteval) runs as an account that cannot read the
+    worker's token or files, with an empty environment except RUN_AS_PASS. The worker's account needs one sudo
+    rule: `<worker account> ALL=(<model account>) NOPASSWD: /usr/bin/env` (docs/commands.md). One model account
+    per worker: the worker kills every process of that account when a command ends or is cancelled (a process
+    of another account cannot be signalled by the worker; sudo itself runs as root)."""
+
+    def __init__(self, user: str):
+        import pwd
+        self.user = user
+        try:
+            entry = pwd.getpwnam(user)
+        except KeyError:
+            raise WorkerError(f'FW_RUN_AS={user}：这台机器上没有这个系统账号') from None
+        if entry.pw_uid in (0, os.getuid()):
+            raise WorkerError(f'FW_RUN_AS={user} 不能是 root 或 worker 自己的账号：模型要在单独的低权限账号下跑')
+        self.home = entry.pw_dir
+        sudo = shutil.which('sudo')
+        if not sudo:
+            raise WorkerError('没装 sudo：要用 sudo 切到 FW_RUN_AS 的账号跑模型')
+        self.sudo = sudo
+
+    def _sudo(self, argv: List[str]) -> List[str]:
+        return [self.sudo, '-n', '-H', '-u', self.user, '--', '/usr/bin/env', '-i', f'HOME={self.home}',
+                f'USER={self.user}', f'LOGNAME={self.user}', f'PATH={RUN_AS_PATH}',
+                *[f'{k}={os.environ[k]}' for k in RUN_AS_PASS if k in os.environ], *argv]
+
+    def argv(self, argv: List[str], env: Optional[Dict[str, str]] = None) -> List[str]:
+        """argv run as the model account; env: more variables (on top of the empty environment). Files it makes
+        are readable by the worker (umask 022)."""
+        extra = [f'{k}={v}' for k, v in (env or {}).items()]
+        return self._sudo([*extra, '/bin/sh', '-c', 'umask 022 && exec "$@"', 'sh', *argv])
+
+    def _plain(self, argv: List[str], timeout: float = 60) -> Tuple[int, str]:
+        try:
+            r = subprocess.run(self._sudo(argv), capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as e:
+            return 1, str(e)
+        return r.returncode, r.stderr.decode('utf-8', 'replace').strip()[-500:]
+
+    def check(self) -> None:
+        code, err = self._plain(['true'])
+        if code != 0:
+            raise WorkerError(f'切不到账号 {self.user}（sudo -n -u {self.user}）：{err or "返回 " + str(code)}；'
+                              f'要在 sudoers 里加 {os.environ.get("USER", "<worker 账号>")} ALL=({self.user}) '
+                              'NOPASSWD: /usr/bin/env')
+
+    def kill_all(self) -> None:
+        """Kill every process of the model account (what a command left running included)."""
+        self._plain(['kill', '-KILL', '-1'], 30)
+
+    def remove(self, paths: List[Path]) -> None:
+        """Remove what the model account wrote (the worker cannot delete inside its folders)."""
+        if paths:
+            self._plain(['rm', '-rf', '--', *[str(x) for x in paths]], 300)
+
+
+def run_as() -> RunAs:
+    user = os.environ.get('FW_RUN_AS', '').strip()
+    if not user:
+        raise WorkerError('这台 worker 没配 FW_RUN_AS（跑模型用的低权限系统账号），不跑会加载模型权重的任务：'
+                          '模型权重文件里可以带代码，要和 worker 的令牌隔开；配置方法见 docs/commands.md「fw worker」')
+    return RunAs(user)
+
+
+def _readable(folder: Path) -> None:
+    """Let the model account read what the worker laid out (only adds read bits: a laid-out file can be a hard
+    link to a read-only cache object)."""
+    for d, dirs, files in os.walk(folder):
+        os.chmod(d, os.stat(d).st_mode | 0o555)
+        for f in files:
+            fp = os.path.join(d, f)
+            os.chmod(fp, os.stat(fp).st_mode | 0o444)
+
+
 # --- job kinds ----------------------------------------------------------------------------------------
 def check_runner(run: JobRun, p: Optional[dict] = None) -> dict:
     """Is the runner on this machine still what was registered? Compares the package listing and the source."""
@@ -420,9 +512,9 @@ def work_dir() -> Path:
     """Where jobs lay out their files: FW_WORK_DIR, else jobs/ in the fw cache folder (the same disk as the cache,
     so laying out can use reflinks)."""
     if os.environ.get('FW_WORK_DIR'):
-        return Path(os.environ['FW_WORK_DIR'])
+        return Path(os.environ['FW_WORK_DIR']).expanduser().resolve()  # commands run with the job's folder as cwd
     from .config import cache_dir
-    return cache_dir() / 'jobs'
+    return (cache_dir() / 'jobs').resolve()
 
 
 def conda_run(env: str, *argv: str) -> List[str]:
@@ -452,23 +544,45 @@ def deteval_sets(data: Path, images: List[str], classes: List[str], imgsz: Optio
 def eval_model(run: JobRun) -> dict:
     """Evaluate a model version: check the runner is what was registered, lay out the weights and the test
     images, run deteval predict and deteval evaluate in the runner's conda environment, upload the output
-    and hand it to the platform, which registers the evaluation report."""
-    import json
-    from . import ops
-    from .cache import Cache
-    from .contract import IMAGE_EXTS, parse_manifest
-
+    and hand it to the platform, which registers the evaluation report. deteval (which loads the weights) runs
+    under the model account (RunAs)."""
     p = run.job['params']
     runner, deteval = p['runner'], p['deteval']
+    model = run_as()
+    model.check()
     now = check_runner(run, runner)
     if not now['same_env'] or not now['same_src']:
         raise WorkerError('推理环境和登记时不一样了（见上面），没有评估；确认没问题后在这台机器上重新 fw runner register，'
                           '再提交评估')
     run.check()
-    folder = work_dir() / f'job-{run.id}-{run.job["attempt"]}'
+    root = work_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    folder = root / f'job-{run.id}-{run.job["attempt"]}'
+    written = [folder / 'preds', folder / 'results', folder / 'tmp']  # what the model account writes
+    run.reaper = model.kill_all
+    model.kill_all()  # anything a crashed worker left running
+    try:
+        result = _eval_in(run, p, runner, deteval, model, folder, written)
+    finally:
+        model.kill_all()
+        run.reaper = None
+        if not os.environ.get('FW_KEEP_WORK'):
+            model.remove([x for x in written if x.exists()])
+            shutil.rmtree(folder, ignore_errors=True)
+    return result
+
+
+def _eval_in(run: JobRun, p: dict, runner: dict, deteval: dict, model: RunAs, folder: Path,
+             written: List[Path]) -> dict:
+    import json
+    from . import ops
+    from .cache import Cache
+    from .contract import IMAGE_EXTS, parse_manifest
+
     if folder.exists():
+        model.remove([x for x in written if x.exists()])
         shutil.rmtree(folder)
-    folder.mkdir(parents=True)
+    folder.mkdir()
     cache = Cache()
     try:
         weights = [(path, d, s) for path, d, s in p['model']['files'] if path.startswith('weights/')][0]
@@ -486,7 +600,11 @@ def eval_model(run: JobRun) -> dict:
     cfg = deteval_sets(folder / 'data', images, p['model']['classes'], deteval.get('imgsz'))
     sets = folder / 'eval_sets.yaml'
     sets.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    env = dict(os.environ, PYTHONUNBUFFERED='1')
+    _readable(folder)
+    for x in written:
+        x.mkdir()
+        os.chmod(x, 0o777)  # the model account writes here (and nothing else of the job's folder)
+    env = {'PYTHONUNBUFFERED': '1', 'TMPDIR': str(folder / 'tmp')}
     name = deteval['name']
     argv = ['deteval', 'predict', '--sets', str(sets), '--weights', str(folder / 'model' / Path(weights[0]).name),
             '--name', name, '--framework', runner['framework'], '--out', str(folder / 'preds')]
@@ -494,13 +612,13 @@ def eval_model(run: JobRun) -> dict:
         argv += ['--src', runner['src_dir']]
     if deteval.get('batch'):
         argv += ['--batch', str(deteval['batch'])]
-    code = run.run(conda_run(runner['conda_env'], *argv), cwd=str(folder), env=env)
+    code = run.run(model.argv(conda_run(runner['conda_env'], *argv), env), cwd=str(folder))
     if code != 0:
         raise WorkerError(f'deteval predict 没有成功（返回 {code}），原因见日志')
     results = folder / 'results'
-    code = run.run(conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets), '--preds',
-                             str(folder / 'preds' / f'{name}.json'), '--out', str(results), '--conf-set', 'eval'),
-                   cwd=str(folder), env=env)
+    code = run.run(model.argv(conda_run(runner['conda_env'], 'deteval', 'evaluate', '--sets', str(sets), '--preds',
+                                        str(folder / 'preds' / f'{name}.json'), '--out', str(results),
+                                        '--conf-set', 'eval'), env), cwd=str(folder))
     if code != 0:
         raise WorkerError(f'deteval evaluate 没有成功（返回 {code}），原因见日志')
     run.check()
@@ -515,8 +633,6 @@ def eval_model(run: JobRun) -> dict:
     except ops.FwError as e:
         raise WorkerError(str(e)) from None
     run.log(f'评了 {metrics.get("images")} 张图，mAP50 {metrics.get("mAP50")}，mAP50-95 {metrics.get("mAP50-95")}')
-    if not os.environ.get('FW_KEEP_WORK'):
-        shutil.rmtree(folder, ignore_errors=True)
     return {'files': rows, 'tool_version': str(info.get('deteval_version', ''))}
 
 

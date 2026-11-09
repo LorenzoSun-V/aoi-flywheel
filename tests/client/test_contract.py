@@ -184,3 +184,10 @@ def test_short_paths_for_fw_get():
     assert lay('coco') == ['train/1.bmp', 'train/_annotations.coco.json']
     assert lay('all') == [p for p, _, _ in stored]
     assert lay('yolo', False) == ['images/train/SES/TX/images_/1.bmp', 'labels/train/SES/TX/images_/1.txt']
+
+
+def test_eval_selection_with_two_json_labels_differing_in_case():
+    from fw.contract import eval_selection
+    d = 'a' * 64
+    files, images, problems = eval_selection([('x/1.png', d, 1), ('x/1.json', d, 1), ('x/1.JSON', d, 1)], False)
+    assert problems and 'JSON' in problems[0]

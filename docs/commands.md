@@ -357,13 +357,14 @@ fw eval run SES-TX-detr@3 --data SES-TX-det@2:test --runner detr-pro --wait
 | `--batch` | 批量（RF-DETR 默认逐张，和部署一致） |
 | `--wait` | 等任务跑完，跟着显示输出，最后给出评估报告编号 |
 
-- 读哪些标注：快照用它的 YOLO 标注，类别编号就是快照的类别表，也就是模型的。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表；没有标注的图算正常图（没有缺陷）。只有 YOLO txt 的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
+- 读哪些标注：快照用它的 YOLO 标注，类别编号按快照的类别表；快照的类别表要和模型的完全一样（顺序也一样），不一样就不收（否则对的框会被算成错的类别）。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表（扩展名大小写都认，`x.JSON` 摆成 `x.json` 给 aoi-deteval）；没有标注的图算正常图（没有缺陷）。只有 YOLO txt（`.txt`、`.TXT` 都算）的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
 - 提交时就定下要评哪些图：图片清单存进文件库，任务重试、版本以后再变都还是这些图。评完的张数和清单对不上（有图没读到），不登记，任务算失败。
 - 选的图里有和模型训练集快照 train、val 里内容相同的图（按文件哈希，不看路径），提交时提醒，并写进报告的备注：这些图的成绩会偏好。
 - worker 先核对推理环境还是登记时那样（包清单、源码），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
 - aoi-deteval 一个集合只读一层目录，按文件名对应预测和真值，所以 worker 把每个有图的目录作为一个集合（`d1`、`d2`…），再把它们合成一组 `eval`；登记的指标是 `eval` 这一组的（只有一个目录时就是那个目录）。工作点阈值（f1 等）也是在这一组上定的，看 mAP 不受影响，看阈值类指标时要知道这一点。
 - 报告的文件：`metrics.json`，`files/` 下是 aoi-deteval 的整个输出目录、用的集合配置（`eval_sets.yaml`）和预测 JSON（`preds/`）。`fw eval show` 会写明是哪个评估任务、哪个推理环境算的。
-- 取消、租约失效的评估不登记报告。
+- 取消、租约失效的评估不登记报告。两个任务算出的结果一字不差时，各自登记一份报告（文件只存一份），报告里各记各的任务和推理环境。
+- aoi-deteval 加载上传的权重：`.pt`、`.pth` 是 pickle，加载时会执行里面的代码。所以 worker 一定在单独的低权限系统账号（`FW_RUN_AS`）下运行它，见 [fw worker](#fw-worker)；没配就不跑评估。
 
 ### fw eval register、list、show
 
@@ -479,6 +480,20 @@ fw worker
 - 每次领取有自己的令牌和租约；worker 每 20 秒续一次。平台说租约已收回，或者连不上平台、按这台机器的时钟租约已经到期，worker 就停下正在跑的命令（连同子进程），这次的结果不交；平台那边同时把任务放回队列，所以同一个任务不会在两处同时跑。
 - 命令自己结束时，它留下还在跑的子进程也一起杀掉，任务不会被它们拖住。
 - Ctrl+C 立即退出；正在跑的任务在租约到期后回到队列。常驻运行用 systemd，见[部署](#部署备份恢复)。
+
+**跑模型用单独的账号（必配）。** 评估要加载上传的权重，`.pt`、`.pth` 是 pickle，加载时会执行里面的代码，带恶意代码的权重能以运行它的账号做任何事。worker 自己的账号存着 worker 令牌，所以加载权重的命令（aoi-deteval）由 worker 通过 sudo 切到另一个低权限账号运行，环境变量清空（只留 `CUDA_VISIBLE_DEVICES`、`NVIDIA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LANG`、`LC_ALL`、`TZ`）。在 GPU 机上配一次（以 worker 账号 `fwworker`、模型账号 `fwmodel` 为例）：
+
+```
+sudo useradd --system --create-home --shell /usr/sbin/nologin fwmodel
+echo 'fwworker ALL=(fwmodel) NOPASSWD: /usr/bin/env' | sudo tee /etc/sudoers.d/fw-worker
+sudo chmod 0440 /etc/sudoers.d/fw-worker && sudo visudo -c
+sudo chmod 0700 /home/fwworker                 # worker 的配置（令牌）和缓存，模型账号读不到
+export FW_RUN_AS=fwmodel                         # 写进 worker 的 systemd 服务
+```
+
+- 模型账号要能读推理环境（conda 环境目录、`--src` 的框架源码）和 GPU（一般要在 `video` 组：`sudo usermod -aG video fwmodel`）。任务目录（`FW_WORK_DIR`）的上级目录要让它能进入（至少 `o+x`），worker 会把权重和图片设成它可读，只有输出目录可写。
+- 一台 worker 用一个专用的模型账号，不要给别的用途：命令结束或取消时，worker 会杀掉这个账号的所有进程（worker 杀不了别的账号的进程，只能这样清理）。
+- 没配 `FW_RUN_AS`、账号不存在、是 root 或 worker 自己、sudo 切不过去，评估任务都直接失败并说明原因。检查任务（`fw runner check`）不加载权重，不需要它。
 
 ## 在训练脚本里用
 
@@ -701,7 +716,8 @@ FW_SERVER=http://<平台>:8000 FW_TOKEN=<凭据> python tools/bench.py --pairs 1
 | `FW_CONFIG` | 设置文件的位置 |
 | `FW_CACHE` | 本机缓存的位置 |
 | `FW_CONDA` | `fw runner`、`fw worker` 用的 conda 可执行文件；不设就找 PATH 里的 `conda`，再找 `CONDA_EXE` |
-| `FW_WORK_DIR` | `fw worker` 摆放任务文件（权重、图片、输出）的目录，默认是缓存目录下的 `jobs/`；每个任务一个子目录，跑完删掉 |
+| `FW_WORK_DIR` | `fw worker` 摆放任务文件（权重、图片、输出）的目录，默认是缓存目录下的 `jobs/`；相对路径按启动 worker 时的当前目录算；每个任务一个子目录，跑完删掉 |
+| `FW_RUN_AS` | `fw worker` 运行模型代码（aoi-deteval）用的低权限系统账号，必配，见 [fw worker](#fw-worker) |
 | `FW_KEEP_WORK` | 设了（例如 `1`）就不删跑完的任务目录，查问题时用 |
 
 默认位置：

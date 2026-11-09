@@ -421,7 +421,8 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
     class name. An image with only a YOLO txt is a problem: its class numbers are the pool's own, which need
     not be the model's (make a snapshot with --label-classes and evaluate its test split instead). So is an
     image without a label next to another image of the same name with another extension (they would share
-    one label). Images without any label are normal images (no defects)."""
+    one label). Label extensions are matched in any case (x.JSON is laid out as x.json). Images without any
+    label are normal images (no defects)."""
     entries = list(entries)
     if snapshot:
         if split not in TRAINSET_SPLITS:
@@ -433,7 +434,13 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
         labels = [e for e in laid if e[0] in wanted]
         return sorted(images + labels), images, []
     chosen = eval_dirs(dirs)
-    by_path = {p: (p, d, s) for p, d, s in entries}
+    # labels by their path with the extension in lower case: deteval only looks for .json / .txt, so x.JSON is
+    # laid out as x.json (and x.TXT counts as a txt label)
+    by_label: Dict[str, List[Entry]] = {}
+    for e in entries:
+        suffix = PurePosixPath(e[0]).suffix
+        if suffix.lower() in LABEL_EXTS:
+            by_label.setdefault(e[0][: len(e[0]) - len(suffix)] + suffix.lower(), []).append(e)
 
     def inside(path: str) -> bool:
         return not chosen or any(path.startswith(d + '/') for d in chosen)
@@ -442,17 +449,22 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
     problems: List[str] = []
     found = {d for d in chosen if any(p.startswith(d + '/') for p, _, _ in images)}
     problems += [f'{d} 下没有图片（目录写成版本里的相对路径，注意大小写）' for d in chosen if d not in found]
-    files, txt_only, stems = [], [], {}
+    files, txt_only, stems, twice = [], [], {}, []
     for path, digest, size in images:
         stem = path[: len(path) - len(PurePosixPath(path).suffix)]
         stems.setdefault(stem, []).append(path)
         files.append((path, digest, size))
-        if stem + '.json' in by_path:
-            files.append(by_path[stem + '.json'])
+        json_labels = by_label.get(stem + '.json', [])
+        if len(json_labels) > 1:
+            twice.append('、'.join(sorted(e[0] for e in json_labels)))
+        elif json_labels:
+            files.append((stem + '.json', json_labels[0][1], json_labels[0][2]))
         else:
             yolo = yolo_label_stem(path)
-            if stem + '.txt' in by_path or (yolo is not None and yolo + '.txt' in by_path):
+            if stem + '.txt' in by_label or (yolo is not None and yolo + '.txt' in by_label):
                 txt_only.append(path)
+    if twice:
+        problems.append(f'{len(twice)} 张图的 JSON 标注有几份（只差扩展名大小写），不知道用哪份：{"；".join(twice[:3])}')
     if txt_only:
         problems.append(f'{len(txt_only)} 张图只有 YOLO txt 标注，类别编号是数据池自己的，不一定和模型的类别表一致：'
                         f'{"、".join(txt_only[:3])}；先用 fw trainset create --label-classes 建快照，再评快照的划分')

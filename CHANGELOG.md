@@ -10,6 +10,8 @@
 - 提交时定下评哪些图（清单存进文件库）。数据集版本读图旁边的 JSON 标注（按类别名），快照读它的 YOLO 标注；只有 YOLO txt 的图不收，先建快照。选的图和模型训练集 train、val 里的图内容相同时提醒，并写进报告备注。
 - 推理环境登记时加 `--framework ultralytics|rfdetr`（aoi-deteval 用哪个框架推理）；评估前 worker 核对环境和源码没变。
 - 数据库迁移 0006（推理环境的框架、评估任务、评估报告的目录和任务）。
+- worker 在单独的低权限系统账号（`FW_RUN_AS`，必配）下用 sudo 运行 aoi-deteval，环境变量清空：上传的权重加载时会执行代码，不能让它读到 worker 的令牌。配置步骤见 docs/commands.md「fw worker」。
+- 复审后修正（合并前）：测试快照的类别表和模型不同（包括只是顺序不同）时不收；数据池里 `x.JSON` 这样大写扩展名的标注照常读，只有 `labels/x.TXT` 的图和只有 `.txt` 的一样不收；两个任务结果完全相同时各自登记报告；`FW_WORK_DIR` 可以写相对路径。
 
 - 新角色 `worker`（GPU worker）：每台 GPU 机一个账号，`fw-server user add gpu-01 --role worker`。
 - 推理环境：`fw runner register <名称> --env <conda 环境> [--src <框架源码>]` 在 GPU 机上登记，记下 `conda list --explicit` 的包清单（传到平台）和源码的 git 提交号；变了再登记就是新版本。`fw runner list`、`show`；`fw runner check` 提交一个任务，在那台机器上检查环境和源码有没有变。
