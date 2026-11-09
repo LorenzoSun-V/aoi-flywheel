@@ -84,10 +84,11 @@ function token() {
   try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
 }
 
-async function call(path, { method = 'GET', body, raw = false, stay = false } = {}) {
+async function call(path, { method = 'GET', body, blob, raw = false, stay = false } = {}) {
   const headers = { Authorization: `Bearer ${token()}` };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const r = await fetch(`/api/v1${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (blob !== undefined) headers['Content-Type'] = 'application/octet-stream';
+  const r = await fetch(`/api/v1${path}`, { method, headers, body: blob !== undefined ? blob : body === undefined ? undefined : JSON.stringify(body) });
   if (r.status === 401 && !stay) {
     location.hash = '#/login';
     throw new ApiError(401, '要先登录');
@@ -123,6 +124,11 @@ export const api = {
   submitJob: (kind, runner, params) => call('/jobs', { method: 'POST', body: { kind, runner, params } }),
   predictionSets: async (model = '') => (await call(`/predictions?model=${encodeURIComponent(model)}`)).prediction_sets,
   predictionSet: (id) => call(`/predictions/${Number(id)}`),
+  createDataset: (body) => call('/datasets', { method: 'POST', body }),
+  folderCheck: (paths, allowOtherFiles, force) => call('/folder-check', { method: 'POST', body: { paths, allow_other_files: allowOtherFiles, force } }),
+  missing: async (objects) => (await call('/objects/missing', { method: 'POST', body: { objects } })).missing,
+  putObject: (digest, blob) => call(`/objects/${digest}`, { method: 'PUT', blob }),
+  createVersion: (name, body) => call(`/datasets/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
 };
 
 // The signed-in account (null before /me answered): pages show forms only to roles that may use them.
@@ -222,7 +228,8 @@ async function datasetsPage() {
     el('td', { class: 'muted' }, d.note)));
   show(el('h1', {}, '数据集'),
     rows.length ? el('table', {}, el('tr', {}, ['名称', '类型', '现场 / 产线', '版本数', '最新版本', '大小', '最新版本时间', '备注']
-      .map((h) => el('th', {}, h))), body) : el('p', { class: 'muted' }, '还没有数据集：用 fw dataset create 建一个，再 fw dataset import 导入。'));
+      .map((h) => el('th', {}, h))), body) : el('p', { class: 'muted' }, '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
+    el('div', { style: 'margin-top:16px' }, newDatasetForm()));
 }
 
 async function datasetPage(name) {
@@ -250,6 +257,8 @@ async function datasetPage(name) {
         el('td', {}, String(v.file_count)), el('td', {}, sizeText(v.total_bytes)),
         el('td', { class: 'muted' }, v.source), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
         el('td', { class: 'muted' }, v.note)))),
+    d.kind === 'trainset' ? null : el('div', { class: 'row', style: 'margin-top:12px' },
+      el('a', { class: 'button primary', href: hrefOf(['upload', d.name]) }, '从浏览器上传新版本')),
     el('h2', {}, '比较两个版本'),
     el('div', { class: 'row' }, '从', a, '到', b, compare));
 }
@@ -533,14 +542,26 @@ function fileTable(files) {
   return el('table', {}, el('tr', {}, ['文件', 'sha256', '大小', ''].map((h) => el('th', {}, h))),
     files.map((f) => el('tr', {}, el('td', {}, f.path), el('td', { class: 'mono' }, f.sha256.slice(0, 12)),
       el('td', {}, sizeText(f.size)),
-      el('td', {}, el('button', { onclick: () => download(f) }, '下载')))));
+      el('td', {}, el('button', { onclick: (ev) => download(f, ev.currentTarget) }, '下载')))));
 }
 
-async function download(f) {
-  const a = el('a', { href: await blobUrl(f.sha256), download: f.path.slice(f.path.lastIndexOf('/') + 1) });
-  document.body.append(a);
-  a.click();
-  a.remove();
+// Downloads go through the API with the token, so the file is fetched whole and handed to the browser; the
+// object URL is let go right after (an ONNX can be hundreds of MB).
+async function download(f, button) {
+  button.disabled = true;
+  try {
+    const blob = await (await api.object(f.sha256)).blob();
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: f.path.slice(f.path.lastIndexOf('/') + 1) });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    button.after(el('span', { class: 'bad' }, ` 下载不了：${e.message}`));
+  } finally {
+    button.disabled = false;
+  }
 }
 
 const vref = (ref) => {  // NAME@N -> link to the dataset version page
@@ -866,6 +887,248 @@ async function predictionPage(id, query) {
       el('button', { disabled: page >= pages, onclick: () => { location.hash = keep({ page: page + 1 }); } }, '下一页')) : null);
 }
 
+
+// --- upload a folder from the browser (the same checks, dedupe and freezing as fw dataset import) ------------
+// The path of each picked file inside the picked folder (the browser puts the folder's own name first).
+export function relPaths(files) {
+  return files.map((f) => {
+    const p = f.webkitRelativePath || f.name;
+    return p.slice(p.indexOf('/') + 1);
+  });
+}
+
+const utf8 = new TextEncoder();
+
+function byteOrder(a, b) {  // the order of the manifest: by the UTF-8 bytes of the path (= fw.contract.path_key)
+  const x = utf8.encode(a);
+  const y = utf8.encode(b);
+  for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return x.length - y.length;
+}
+
+// Manifest format 1 (fw.contract.manifest_bytes): header, then path \t sha256 \t size sorted by path bytes.
+export function manifestText(entries) {
+  const rows = entries.slice().sort((a, b) => byteOrder(a.path, b.path));
+  return ['fw-manifest 1', ...rows.map((e) => `${e.path}\t${e.sha256}\t${e.size}`)].join('\n') + '\n';
+}
+
+export function diffManifests(old, entries) {
+  const before = new Map(old.map((f) => [f.path, f.sha256]));
+  const now = new Set(entries.map((e) => e.path));
+  const added = entries.filter((e) => !before.has(e.path)).map((e) => e.path);
+  const modified = entries.filter((e) => before.has(e.path) && before.get(e.path) !== e.sha256).map((e) => e.path);
+  const deleted = old.filter((f) => !now.has(f.path)).map((f) => f.path);
+  return { added, deleted, modified };
+}
+
+// Hash files in a few workers; onProgress(done bytes, total bytes).
+async function hashAll(files, onProgress) {
+  const n = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 6, files.length));
+  const total = files.reduce((a, f) => a + f.size, 0);
+  const out = new Array(files.length);
+  let next = 0;
+  let done = 0;
+  const workers = Array.from({ length: n }, () => new Worker('/web/sha256.js'));
+  try {
+    await Promise.all(workers.map((w) => new Promise((resolve, reject) => {
+      const give = () => {
+        if (next >= files.length) { resolve(); return; }
+        const id = next++;
+        w.onmessage = (ev) => {
+          if (ev.data.error) { reject(new Error(`${files[id].name}：${ev.data.error}`)); return; }
+          out[id] = ev.data.sha256;
+          done += files[id].size;
+          onProgress(done, total);
+          give();
+        };
+        w.postMessage({ id, file: files[id] });
+      };
+      w.onerror = (e) => reject(new Error(e.message || '算哈希出错'));
+      give();
+    })));
+  } finally {
+    for (const w of workers) w.terminate();
+  }
+  return out;
+}
+
+async function inParallel(items, n, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) { const i = next++; await fn(items[i], i); }
+  }));
+}
+
+function bar() {
+  const fill = el('div', { class: 'fill' });
+  const text = el('span', { class: 'muted' });
+  const node = el('div', { class: 'progress' }, el('div', { class: 'track' }, fill), text);
+  node.set = (part, whole, what) => {
+    fill.style.width = `${whole ? Math.round((part / whole) * 100) : 100}%`;
+    text.textContent = what;
+  };
+  return node;
+}
+
+let uploading = false;
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', (ev) => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
+}
+
+async function uploadPage(name) {
+  const show = live();
+  const d = await api.dataset(name);
+  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
+  const latest = d.latest;
+  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const allowOther = el('input', { type: 'checkbox' });
+  const force = el('input', { type: 'checkbox' });
+  const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
+  const result = el('div');
+  let files = [];
+  let paths = [];
+
+  const listOf = (title, part, cls = '') => (part && part.count ? el('details', { class: cls },
+    el('summary', {}, `${title}：${part.count}`),
+    el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, Array.isArray(x) ? x.join('  ') : x))),
+    part.count > part.examples.length ? el('p', { class: 'muted' }, `只列出前 ${part.examples.length} 个`) : null) : null);
+
+  // Each pick or check box starts a new round; an answer, hashing or plan of an older round is dropped, and the
+  // controls stay locked while hashing and uploading, so what is uploaded is always what was checked.
+  let round = 0;
+  const lock = (on) => { for (const c of [picker, allowOther, force]) c.disabled = on; };
+
+  const check = async () => {
+    if (!files.length) return;
+    const mine = ++round;
+    const picked = files;
+    const pickedPaths = paths;
+    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
+    if (mine !== round) return;
+    const junk = new Set(r.junk);
+    const keep = picked.map((f, i) => [f, pickedPaths[i]]).filter(([, p]) => !junk.has(p));
+    const folder = (picked[0].webkitRelativePath || '').split('/')[0];
+    const report = [
+      el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
+        + (r.junk.length ? `；系统文件 ${r.junk.length} 个不入库` : '')),
+      listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
+      listOf('同名不同扩展名的图片', r.same_stem_images, 'warn'), listOf('图片和标注以外的文件', r.others, 'warn'),
+      listOf('没有标注的图片（当正常图）', r.unlabeled_images), listOf('找不到图片的标注', r.orphan_labels),
+      listOf('不同目录里的同名图片（训练时把目录摊平会互相覆盖）', r.same_name_in_dirs), listOf('说明文件（一起入库）', r.meta)];
+    if (r.reasons.length) {
+      result.replaceChildren(...present([report, el('div', { class: 'error' }, '不能入库：\n' + r.reasons.join('\n'))]));
+      return;
+    }
+    const go = el('button', { class: 'primary', onclick: () => hashAndCompare(mine, keep, folder, report)
+      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '算哈希，和最新版本比较');
+    result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
+  };
+
+  const hashAndCompare = async (mine, keep, folder, report) => {
+    if (mine !== round) return;
+    const progress = bar();
+    result.replaceChildren(...present([report, progress]));
+    uploading = true;
+    lock(true);
+    let digests;
+    try {
+      digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
+    } finally { uploading = false; lock(false); }
+    if (mine !== round) return;
+    const entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
+    const text = manifestText(entries);
+    const manifest = new Blob([text]);
+    const [manifestDigest] = await hashAll([manifest], () => {});
+    const old = latest ? await filesOf(latest) : [];
+    const total = entries.reduce((a, e) => a + e.size, 0);
+    if (latest && latest.manifest_sha256 === manifestDigest) {
+      result.replaceChildren(...present([report, el('p', { class: 'panel' }, `和 ${latest.ref} 完全一样，不用建新版本`)]));
+      return;
+    }
+    const change = diffManifests(old, entries);
+    const number = (latest ? latest.number : 0) + 1;
+    if (mine !== round) return;
+    const start = el('button', { class: 'primary', onclick: () => send(mine, entries, manifest, manifestDigest, number, folder, report) }, `上传并建 ${d.name}@${number}`);
+    result.replaceChildren(...present([report,
+      el('p', {}, latest ? `相比 ${latest.ref}：新增 ${change.added.length}，删除 ${change.deleted.length}，修改 ${change.modified.length}` : `这是 ${d.name} 的第一个版本`),
+      change.deleted.length ? el('div', { class: 'error' }, `会删掉 ${latest.ref} 里的 ${change.deleted.length} 个文件（新版本只含这个目录里的文件），例如：\n`
+        + change.deleted.slice(0, 5).join('\n')) : null,
+      el('p', {}, `新版本 ${d.name}@${number}：${entries.length} 个文件，${sizeText(total)}`),
+      el('div', { class: 'row' }, start)]));
+  };
+
+  const send = async (mine, entries, manifest, manifestDigest, number, folder, report) => {
+    if (mine !== round) return;
+    const here = location.hash;
+    const progress = bar();
+    result.replaceChildren(...present([report, progress]));
+    uploading = true;
+    lock(true);
+    try {
+      const unique = new Map();
+      for (const e of entries) if (!unique.has(e.sha256)) unique.set(e.sha256, e);
+      const all = [...unique.values()];
+      const missing = new Set();
+      for (let i = 0; i < all.length; i += 20000) {
+        for (const x of await api.missing(all.slice(i, i + 20000).map((e) => [e.sha256, e.size]))) missing.add(x);
+      }
+      const todo = all.filter((e) => missing.has(e.sha256));
+      const bytes = todo.reduce((a, e) => a + e.size, 0);
+      let sent = 0;
+      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${all.length - todo.length} 个服务器上已经有了）`);
+      await inParallel(todo, 4, async (e) => {
+        await api.putObject(e.sha256, e.file);
+        sent += e.size;
+        progress.set(sent, bytes, `上传 ${sizeText(sent)} / ${sizeText(bytes)}`);
+      });
+      await api.putObject(manifestDigest, manifest);
+      const v = await api.createVersion(d.name, { manifest_sha256: manifestDigest, parent_id: latest ? latest.id : null,
+        expect_latest_id: latest ? latest.id : null, source: `网页上传 ${folder}`, note: note.value.trim() });
+      uploading = false;
+      if (location.hash === here) location.hash = hrefOf(['v', d.name, String(v.number)]);  // not if they went elsewhere
+    } catch (e) {
+      result.replaceChildren(...present([report, errorBox(e)]));
+    } finally { uploading = false; lock(false); }
+  };
+
+  picker.addEventListener('change', () => {
+    files = [...picker.files];
+    paths = relPaths(files);
+    check().catch((e) => result.replaceChildren(errorBox(e)));
+  });
+  for (const box of [allowOther, force]) box.addEventListener('change', () => check().catch((e) => result.replaceChildren(errorBox(e))));
+  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传'),
+    el('h1', {}, `上传到 ${d.name}`),
+    el('p', { class: 'muted' }, `选一个目录：目录里的全部文件成为新版本（${latest ? `父版本 ${latest.ref}；目录里没有的文件在新版本里就是删除` : '第一个版本'}）。`
+      + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
+      + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
+    el('div', { class: 'panel form' },
+      el('label', {}, '目录', picker),
+      el('label', {}, '备注', note),
+      el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
+      el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
+    result);
+}
+
+function newDatasetForm() {
+  const name = el('input', { type: 'text', placeholder: '名称，例如 SES-TX' });
+  const site = el('input', { type: 'text', placeholder: '现场' });
+  const line = el('input', { type: 'text', placeholder: '产线' });
+  const note = el('input', { type: 'text', placeholder: '备注' });
+  const msg = el('div');
+  const go = async (ev) => {
+    ev.preventDefault();
+    try {
+      const d = await api.createDataset({ name: name.value.trim(), site: site.value.trim(), line: line.value.trim(), note: note.value.trim() });
+      location.hash = hrefOf(['upload', d.name]);
+    } catch (e) { msg.replaceChildren(errorBox(e)); }
+  };
+  return el('details', { class: 'panel' }, el('summary', {}, '新建数据池'),
+    el('form', { class: 'form', onsubmit: go }, msg, el('label', {}, '名称', name), el('label', {}, '现场', site),
+      el('label', {}, '产线', line), el('label', {}, '备注', note), el('button', { class: 'primary', type: 'submit' }, '建好后上传')));
+}
+
 // --- frame and routing ------------------------------------------------------------------------------------
 // [link, text, the roles that see it, the pages it stands for]
 const NAV = [
@@ -924,6 +1187,7 @@ async function render() {
     else if (parts[0] === 'job' && parts[1]) await jobPage(parts[1], query);
     else if (parts[0] === 'predictions') await predictionsPage();
     else if (parts[0] === 'p' && parts[1]) await predictionPage(parts[1], query);
+    else if (parts[0] === 'upload' && parts[1]) await uploadPage(parts[1]);
     else show(el('h1', {}, '没有这个页面'), el('a', { href: '#/' }, '回首页'));
   } catch (e) {
     if (e.status === 401) return;

@@ -96,7 +96,9 @@ sudo docker compose exec server fw-server user disable zhangsan
 - 看模型、版本、评估报告（两份比较），在模型版本页提交评估和预标注，在任务页看排队、实时日志、取消；
 - 看预测集：每张图几个框，拖阈值，大图上实线是标注、虚线是预测。
 
-网页由 fw-server 直接提供（`server/fwserver/web/`，原生 JS，不用构建），部署不加东西。浏览器上传入库在下一个 PR 里加。
+- 新建数据池，从浏览器选目录上传新版本（和 `fw dataset import` 一样检查、去重、冻结；大批数据还是用命令行）。
+
+网页由 fw-server 直接提供（`server/fwserver/web/`，原生 JS，不用构建），部署不加东西。
 
 ## fw 命令行
 

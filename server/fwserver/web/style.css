@@ -71,8 +71,21 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .form h2 { margin-top: 0; }
 .form label { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 8px; margin-bottom: 10px; }
 .form input, .form select { width: 100%; }
+.form label.check { display: flex; gap: 8px; }
+.form label.check input { width: auto; }
 pre.log { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; max-height: 60vh; overflow: auto;
           white-space: pre-wrap; word-break: break-all; font-size: 12px; min-height: 3em; }
 th .muted { font-weight: 400; }
 input[type=range] { width: 200px; }
+a.button { display: inline-block; padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+a.button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+a.button:hover { text-decoration: none; }
+.progress { margin: 12px 0; }
+.progress .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 4px; }
+.progress .fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+details { margin: 6px 0; }
+details summary { cursor: pointer; }
+details ul { margin: 6px 0; max-height: 240px; overflow: auto; }
+details.bad summary { color: var(--bad); }
+details.warn summary { color: var(--warn); }
 @media (max-width: 900px) { .viewer { grid-template-columns: 1fr; } }

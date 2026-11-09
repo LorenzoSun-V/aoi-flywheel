@@ -1,8 +1,10 @@
 // node --test tests/web/helpers.test.mjs: the parts of the web pages that do not need a browser.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
 import {
-  flattenMetrics, hrefOf, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText,
+  diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText,
 } from '../../server/fwserver/web/app.js';
 
 const files = parseManifest('fw-manifest 1\nA/a.png\taa\t10\nA/a.JSON\tbb\t5\nA/x/b.jpg\tcc\t7\nA/x/y/c.png\tdd\t1\nr.bmp\tee\t2\nnote.txt\tff\t1\n');
@@ -68,4 +70,30 @@ test('TIFF is not shown by browsers', () => {
   assert.equal(shownByBrowsers('A/a.TIF'), false);
   assert.equal(shownByBrowsers('A/a.tiff'), false);
   assert.equal(shownByBrowsers('A/a.bmp'), true);
+});
+
+test('the manifest is sorted by UTF-8 bytes like fw', () => {
+  const e = (path) => ({ path, sha256: 'ab', size: 1 });
+  // UTF-16 order would put the emoji (a surrogate pair) before U+FF5E; UTF-8 bytes put it after
+  const text = manifestText(['b', '\u{1F600}.png', 'a/x', '\uFF5E.png', 'a.png', 'B'].map(e));
+  assert.equal(text, 'fw-manifest 1\nB\tab\t1\na.png\tab\t1\na/x\tab\t1\nb\tab\t1\n\uFF5E.png\tab\t1\n\u{1F600}.png\tab\t1\n');
+});
+
+test('paths inside the picked folder and changes against the parent', () => {
+  assert.deepEqual(relPaths([{ webkitRelativePath: 'top/A/a.png' }, { webkitRelativePath: 'top/b.json' }]), ['A/a.png', 'b.json']);
+  const old = [{ path: 'a', sha256: '1' }, { path: 'b', sha256: '2' }, { path: 'c', sha256: '3' }];
+  const now = [{ path: 'a', sha256: '1' }, { path: 'b', sha256: '9' }, { path: 'd', sha256: '4' }];
+  assert.deepEqual(diffManifests(old, now), { added: ['d'], deleted: ['c'], modified: ['b'] });
+});
+
+test('sha256 in plain JS', async () => {
+  const { Sha256, hashFile } = createRequire(import.meta.url)('../../server/fwserver/web/sha256.js');
+  for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 120, 4096, 100003]) {
+    const data = randomBytes(n);
+    const s = new Sha256();
+    for (let i = 0; i < n; i += 37) s.update(data.subarray(i, i + 37));
+    assert.equal(s.hex(), createHash('sha256').update(data).digest('hex'), `${n} bytes`);
+  }
+  const big = randomBytes((4 << 20) + 5);  // more than one chunk of a file
+  assert.equal(await hashFile(new Blob([big])), createHash('sha256').update(big).digest('hex'));
 });

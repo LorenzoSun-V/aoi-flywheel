@@ -22,6 +22,7 @@ MANIFEST_HEADER = 'fw-manifest 1'
 IMAGE_EXTS = frozenset({'.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.webp'})
 LABEL_EXTS = frozenset({'.json', '.txt'})  # LiteAnno / X-AnyLabeling JSON, YOLO txt
 META_NAMES = frozenset({'classes.txt', 'classes.names', 'obj.names', 'data.yaml', 'dataset.yaml', 'mask_colors.json'})
+JUNK_NAMES = frozenset({'thumbs.db', 'desktop.ini', '.ds_store'})  # left out of a folder before it is imported
 CHUNK = 1 << 20
 MAX_PATH_BYTES = 1024
 
@@ -495,3 +496,67 @@ def predict_selection(entries: Iterable[Entry], dirs: Iterable[str] = ()) -> Tup
         problems.append(f'有 {len(shared)} 组图片同名不同扩展名（或只差大小写），预标注会写进同一个 JSON：'
                         + '；'.join('、'.join(ps) for ps in shared[:3]))
     return images, problems
+
+
+# --- the checks on a folder before it becomes a dataset version (fw dataset import and the web upload) -------
+def _stem(rel: str) -> str:
+    suffix = PurePosixPath(rel).suffix
+    return rel[: len(rel) - len(suffix)] if suffix else rel
+
+
+def classify_paths(paths: Iterable[str]) -> dict:
+    """The files of a folder (relative posix paths, junk names already left out) sorted into images, labels,
+    meta files and others, with what is wrong with them. Same rules as the pilot's intake script."""
+    rels = list(paths)
+    out: dict = {'images': [], 'labels': [], 'meta': [], 'others': [], 'bad_paths': []}
+    image_stems: Dict[str, List[str]] = {}
+    label_stems = set()
+    txt_stems = set()
+    for rel in rels:
+        problem = path_problem(rel)
+        if problem:
+            out['bad_paths'].append(f'{rel}：{problem}')
+        name = PurePosixPath(rel).name.lower()
+        ext = PurePosixPath(rel).suffix.lower()
+        if ext in IMAGE_EXTS:
+            out['images'].append(rel)
+            image_stems.setdefault(_stem(rel), []).append(rel)
+        elif name in META_NAMES:
+            out['meta'].append(rel)
+        elif ext in LABEL_EXTS:
+            out['labels'].append(rel)
+            label_stems.add(_stem(rel))
+            if ext == '.txt':
+                txt_stems.add(_stem(rel))
+        else:
+            out['others'].append(rel)
+    out['collisions'] = collisions(rels)
+    out['same_stem_images'] = [v for v in image_stems.values() if len(v) > 1]
+    # a label pairs like on the server (trainsets._samples): the same stem in the image's folder, or the .txt
+    # where YOLO looks for it (images/ -> labels/)
+    yolo = {s: yolo_label_stem(s + '.x') for s in image_stems}
+    out['unlabeled_images'] = sorted(s for s in image_stems if s not in label_stems and yolo[s] not in txt_stems)
+    yolo_found = {y for y in yolo.values() if y in txt_stems}  # only the .txt there is YOLO's
+    out['orphan_labels'] = sorted({_stem(rel) for rel in out['labels'] if _stem(rel) not in image_stems and not (
+        _stem(rel) in yolo_found and rel.lower().endswith('.txt'))})
+    by_name: Dict[str, List[str]] = {}
+    for rel in out['images']:
+        by_name.setdefault(PurePosixPath(_stem(rel)).name.lower(), []).append(rel)
+    out['same_name_in_dirs'] = [v for _, v in sorted(by_name.items())
+                                if len({PurePosixPath(r).parent for r in v}) > 1]
+    return out
+
+
+def blocking_reasons(found: dict, allow_other_files: bool, force: bool) -> List[str]:
+    """Reasons a classified folder (classify_paths) must not become a version as it stands. The flags are
+    fw dataset import's --allow-other-files and --force (the same check boxes on the web)."""
+    reasons = []
+    if found['bad_paths']:
+        reasons.append('有文件名在 Windows 或 Linux 上用不了，先改名')
+    if found['collisions']:
+        reasons.append('有只差大小写、或同名的文件和目录，在 Windows 上会互相覆盖，先改名')
+    if found['same_stem_images'] and not force:
+        reasons.append('有同名不同扩展名的图片（比如 a.bmp 和 a.png），标注对不上；先清理，或确认无妨后加 --force')
+    if found['others'] and not allow_other_files:
+        reasons.append('有图片和标注以外的文件；先清理，或确认要一起入库后加 --allow-other-files')
+    return reasons
