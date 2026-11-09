@@ -28,7 +28,7 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
   layout.py          把缓存里的文件摆成版本的目录：reflink、复制、硬链接，每个文件摆完都核对哈希
   pool.py            并行跑一组任务（上传、下载）：出错或 Ctrl+C 时取消还没开始的，不等手上的
   worker.py          fw worker 和 fw runner：领任务、续租、传日志、在 conda 环境里跑命令、交结果；读 conda
-                     包清单和源码提交号；评估任务（摆 ONNX 和图片、本机建 TensorRT 引擎、trt_predict.py 推理、deteval evaluate、上传结果）
+                     包清单和源码提交号；推理任务（交回 predictions.json）；评估任务（摆 ONNX 和图片、本机建 TensorRT 引擎、trt_predict.py 推理、deteval evaluate、上传结果）
   onnx_check.py      检查 ONNX 是单个文件（没有 external data），不用 onnx 包，直接走 protobuf
   trt_predict.py     在推理环境里跑 TensorRT 引擎，写 aoi-deteval 的预测文件（只用 OpenCV 和部署代码的推理模块）
   ops.py             每条命令真正做的事（import_folder、get、export、verify、diff、get_version、
@@ -40,6 +40,7 @@ server/fwserver/     fw-server：只支持 Linux
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
   evals.py           评估任务：提交时定下模型权重、要评的图片清单和推理环境，交回时在同一个事务里登记评估报告
+  predictions.py     推理任务和预测集：提交时定下模型、图片清单、推理环境和最低分数，同样的请求复用已有任务；交回时核对 predictions.json 再登记预测集
   jobs.py            任务队列（领取、租约令牌、续租、过期回队、取消、日志）和推理环境的登记
   models.py          模型、模型版本、评估报告、发布、标签、追溯链；部署账号能下载哪些文件
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
@@ -161,6 +162,10 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 缓存的引擎要完整：fsync 后改名，再写 `.sha256`；对不上就删掉重建，加载不了重建一次 | `worker.build_engine`、`_cached_engine`、`_predict`、`trt_predict.py` 退出码 3 | `test_a_cached_engine_that_is_not_whole_is_built_again`、`test_an_engine_that_does_not_load_is_built_again_once` |
 | 引擎按实际跑的显卡缓存：`CUDA_VISIBLE_DEVICES` 第一块 + `CUDA_DEVICE_ORDER=PCI_BUS_ID` | `worker.gpu_device`、`gpu_env` | `test_the_engine_is_built_and_run_on_the_gpu_the_worker_was_given` |
 | 超出类别表的框比留下的多就不登记报告 | `worker._predict` | `test_an_engine_with_another_class_table_fails_the_eval` |
+| 同一模型版本、推理环境版本、图片清单和最低分数的推理只跑一次：再提交返回已有任务（advisory lock 防并发） | `predictions.submit`、0007 的 UNIQUE | `test_the_same_prediction_is_not_run_twice` |
+| 预测集要和输入清单一一对应，框的类别在类别表里、分数不低于 conf，否则不登记 | `predictions.check_predictions` | `test_predictions_that_do_not_match_the_input_list_register_nothing` |
+| 预测集只由运行中的推理任务写一次，不改不删；文件集只属于一条记录 | 0007 的触发器、`require_fileset_owner` | `test_the_database_keeps_prediction_sets` |
+| 预标注：`checked=false`、带分数、框裁到图内；已有标注默认保留；阈值不低于 conf | `ops.get_predictions`、`prelabel_json` | `test_pre_labels_from_a_prediction_set` |
 | 推理环境变了（包清单、源码或 onnx2engine 程序）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails`、`test_an_engine_is_built_once_per_onnx_and_machine` |
 | 平台从不加载上传的权重：评估任务只带 `model.onnx`，worker 用推理环境登记的 onnx2engine 在本机建引擎（按 ONNX、程序、环境、显卡和驱动缓存，不上传），用部署代码的推理模块跑；写了框架就要登记 onnx2engine（路径和哈希） | `evals._onnx`、`worker.build_engine`、`fw/trt_predict.py`、`jobs.register_runner`、0006 的 CHECK | `test_eval_on_folders_of_a_pool`、`test_an_engine_is_built_once_per_onnx_and_machine`、`test_a_runner_for_evaluations_names_its_onnx2engine` |
 | 数据池上评估时，JSON 标注里的类别名都要在模型的类别表里 | `evals._known_names` | `test_pool_labels_must_name_classes_of_the_model` |

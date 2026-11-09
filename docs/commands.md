@@ -398,6 +398,44 @@ fw eval show 12
 - 用 `--deteval` 时，先把整个输出目录复制一份，指标从这份复制里读，归档的也是这份：登记途中评估程序再改、删、加文件都不影响这次登记。
 - 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按原路径可能分了几层（0.2.3 起取回时已去掉现场、产线两层），要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
 
+### fw predict run、list、show、get
+
+```
+fw predict run SES-TX-detr@3 --data SES-TX@6 --dirs SES/TX/new_1109 --runner detr-pro --wait
+fw predict get 7 ~/label/new_1109                   # 图片 + 预标注，LiteAnno 直接打开
+fw predict get 7 ~/label/new_1109_t5 --threshold 0.5 --replace
+```
+
+预标注分两步：`fw predict run` 排一个推理任务，GPU 机用模型版本的 TensorRT 引擎（和评估同一套：本机从 ONNX 建、缓存）跑选中目录里的全部图片，结果存成不可变的「预测集」；`fw predict get` 把预测集按分数阈值写成 LiteAnno / X-AnyLabeling 的 JSON，和图片一起放到一个目录里，用 LiteAnno 打开就能改。
+
+| 选项 | 说明 |
+|---|---|
+| `模型版本` | 例如 `SES-TX-detr@3`，推理的是它的 `model.onnx` |
+| `--data` | 数据集版本（数据池等），例如 `SES-TX@6`；训练集快照不收 |
+| `--dirs` | 只推理这几个目录（连同子目录）；不写就是整个版本 |
+| `--runner` | 推理环境，要登记过 `--framework` 和 `--onnx2engine` |
+| `--conf` | 预测集里保留的最低分数，默认 0.1；以后预标注的阈值只能在它之上调，要更低就重新推理 |
+| `--wait` | 等任务跑完，最后给出预测集编号 |
+
+- 同一个模型版本、同一个推理环境版本、同样的图片（按清单哈希）和同样的 `--conf` 再提交，直接返回已有的任务（排队中、运行中或已完成），不再占 GPU；任务失败、取消或正在取消才会重新排。复用不看引擎哈希：提交时引擎还没建，同一推理环境版本在同一台机器上，只有换显卡、换驱动或缓存重建时引擎才会不同；要强制重跑就换一个 `--conf`（以后网页上加「重新推理」）。
+- 部署代码自己按 conf 过滤的方式不一定和平台一样（比如用 `>`，或 FP16 下分数有舍入），`trt_predict.py` 写出前再按「分数不低于 conf」过滤一遍。
+- worker 交回 `predictions.json`（每张图在版本里的路径、宽高和框 `[x1, y1, x2, y2, 分数, 类别]`）和 `engine.json`；平台核对每张图都在、只有这些图、类别在模型的类别表里、分数不低于 `--conf`，都对才登记预测集。
+- 同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会写进同一个 `a.json`，不收。
+- `fw predict list [模型]`、`fw predict show <编号>` 看预测集。
+
+`fw predict get <编号> <目录>`：
+
+| 选项 | 说明 |
+|---|---|
+| `--threshold` | 分数阈值，默认 0.3；不能低于预测集的 `--conf` |
+| `--replace` | 已有 JSON 标注的图也写预标注（默认保留已有标注原样）；模型在这张图上没有够阈值的框时，仍保留原来的标注，不会让它消失 |
+| `--link`、`--workers` | 同 `fw get` |
+
+- 目录里是预测集的全部图片（保持版本里的目录结构）。有框的图旁边写一个 JSON：矩形框、`score` 是分数、`checked` 为 `false`（未确认，LiteAnno 里由人确认），顶层的 `flywheel` 记下预测集编号、模型版本、推理环境和阈值（LiteAnno 和 X-AnyLabeling 都会原样保留不认识的顶层字段）。框裁到图片范围内。
+- 已有标注的图默认保留原来的 JSON，不写预标注；`--replace` 时换成预标注（原来的 `x.JSON` 之类会删掉，一张图只留一个 JSON），没有够阈值的框就保留原来的。没有标注也没有框的图不写 JSON。输出的统计分开列出写了预标注、换掉原标注、保留原标注的张数。
+- 顶层写一个 `classes.txt`（模型的类别表，一行一个），LiteAnno 的普通文件夹模式导出时用；版本里已有 `classes.txt` 就不写。
+- 改好的标注再用 `fw dataset import` 导入成数据池的新版本。批次复核做好以后，预标注会直接写回批次。
+
 ### fw release register、list、current、show
 
 ```

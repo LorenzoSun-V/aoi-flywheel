@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .datasets import NAME, DatasetError, check_digest
 from .store import Store, StoreError
 
-KINDS = {'check': '检查推理环境', 'eval': '评估'}
+KINDS = {'check': '检查推理环境', 'eval': '评估', 'predict': '推理（预标注）'}
 FRAMEWORKS = ('rfdetr',)  # TensorRT inference adapters (rfdetr: py_rfdetr of the deploy code)
 STATUSES = {'queued': '排队', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消'}
 OUTCOMES = ('done', 'failed', 'cancelled')

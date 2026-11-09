@@ -473,3 +473,25 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
         problems.append(f'有 {len(shared)} 组图片同名不同扩展名，会共用一份标注：'
                         + '；'.join('、'.join(ps) for ps in shared[:3]))
     return sorted(set(files)), images, problems
+
+
+def predict_selection(entries: Iterable[Entry], dirs: Iterable[str] = ()) -> Tuple[List[Entry], List[str]]:
+    """What a prediction job over a version reads: (the images under the chosen folders, every folder below
+    them too; problems). Labels are not read. Two images of the same name with other extensions are a problem:
+    their pre-labels would be the same JSON file."""
+    chosen = eval_dirs(dirs)
+
+    def inside(path: str) -> bool:
+        return not chosen or any(path.startswith(d + '/') for d in chosen)
+
+    images = sorted(e for e in entries if inside(e[0]) and PurePosixPath(e[0]).suffix.lower() in IMAGE_EXTS)
+    problems = [f'{d} 下没有图片（目录写成版本里的相对路径，注意大小写）' for d in chosen
+                if not any(p.startswith(d + '/') for p, _, _ in images)]
+    stems: Dict[str, List[str]] = {}
+    for path, _, _ in images:
+        stems.setdefault(path[: len(path) - len(PurePosixPath(path).suffix)].lower(), []).append(path)
+    shared = [ps for ps in stems.values() if len(ps) > 1]
+    if shared:
+        problems.append(f'有 {len(shared)} 组图片同名不同扩展名（或只差大小写），预标注会写进同一个 JSON：'
+                        + '；'.join('、'.join(ps) for ps in shared[:3]))
+    return images, problems

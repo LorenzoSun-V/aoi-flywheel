@@ -79,10 +79,15 @@ class RfdetrDetector:
         pass
 '''
 FAKE_CV2 = r'''
-import os
+import os, struct
 IMREAD_COLOR = 1
+class Image:
+    def __init__(self, path):
+        head = open(path, 'rb').read(24)
+        w, h = struct.unpack('>II', head[16:24]) if head.startswith(b'\x89PNG') else (640, 480)
+        self.shape = (h, w, 3)
 def imread(path, flag):
-    return path if os.path.isfile(path) else None
+    return Image(path) if os.path.isfile(path) else None
 '''
 
 

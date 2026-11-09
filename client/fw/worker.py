@@ -661,19 +661,22 @@ def eval_model(run: JobRun) -> dict:
 
 
 def _predict(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str, sets: Path, name: str, nc: int,
-             folder: Path) -> Tuple[Path, dict]:
-    """Run the engine over the sets into preds/<name>.json; an engine that does not load is built again once."""
+             folder: Path, conf: float = PREDICT_CONF) -> Tuple[Path, dict]:
+    """Run the engine over the sets into preds/<name>.json (and the image sizes into predict-sizes.json); an
+    engine that does not load is built again once."""
     import json
     pred = folder / 'preds' / f'{name}.json'
     stats = folder / 'predict-stats.json'
+    sizes = folder / 'predict-sizes.json'
     pred.parent.mkdir(exist_ok=True)
     for attempt in (1, 2):
         engine, built = build_engine(run, runner, onnx, onnx_sha256)
         run.check()
         code = run.run(conda_run(runner['conda_env'], 'python', str(Path(__file__).with_name('trt_predict.py')),
                                  '--framework', runner['framework'], '--engine', str(engine), '--sets', str(sets),
-                                 '--name', name, '--nc', str(nc), '--conf', f'{PREDICT_CONF:g}',
-                                 '--out', str(pred), '--stats', str(stats)), cwd=str(folder), env=gpu_env())
+                                 '--name', name, '--nc', str(nc), '--conf', repr(float(conf)),
+                                 '--out', str(pred), '--stats', str(stats), '--sizes', str(sizes)),
+                       cwd=str(folder), env=gpu_env())
         if code == ENGINE_LOAD_FAILED and attempt == 1:
             run.log('引擎加载不了，删掉缓存里的这个引擎，重建一次再试')
             _drop_engine(engine)
@@ -740,6 +743,81 @@ def _eval_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
     return {'files': rows, 'tool_version': str(info.get('deteval_version', ''))}
 
 
+def predict_model(run: JobRun) -> dict:
+    """A prediction job: check the runner, lay out the ONNX and the images of the input list, build (or reuse)
+    this machine's engine, run it over the images with the job's lowest score (conf) and send back
+    predictions.json (every image by its path in the version: its size and its boxes) and engine.json; the
+    platform keeps them as a prediction set, from which pre-labels are written (fw predict get)."""
+    p = run.job['params']
+    runner = p['runner']
+    now = check_runner(run, runner)
+    if not now['same_env'] or not now['same_src']:
+        raise WorkerError('推理环境和登记时不一样了（见上面），没有推理；确认没问题后在这台机器上重新 fw runner register，'
+                          '再提交')
+    run.check()
+    root = work_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    folder = root / f'job-{run.id}-{run.job["attempt"]}'
+    try:
+        return _predict_in(run, p, runner, folder)
+    finally:
+        if not os.environ.get('FW_KEEP_WORK'):
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _predict_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
+    import json
+    from . import ops
+    from .cache import Cache
+    from .contract import parse_manifest
+
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir()
+    cache = Cache()
+    try:
+        ops._lay_out(run.api, cache, p['model']['ref'], p['model']['files'], folder / 'model', 'auto', 4, run.log)
+        run.check()
+        images = parse_manifest(run.api.read_object(p['data']['inputs_sha256']))
+        if len(images) != p['data']['images']:
+            raise WorkerError(f'输入清单里有 {len(images)} 张图，提交时是 {p["data"]["images"]} 张')
+        ops._lay_out(run.api, cache, p['data']['ref'], images, folder / 'data', 'auto', 8, run.log)
+        run.check()
+    finally:
+        cache.close()
+    onnx = [f for f in p['model']['files'] if f[0] == 'model.onnx'][0]
+    classes = p['model']['classes']
+    data = folder / 'data'
+    cfg = deteval_sets(data, [e[0] for e in images], classes)
+    sets = folder / 'sets.json'
+    sets.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    pred, built = _predict(run, runner, folder / 'model' / 'model.onnx', onnx[1], sets, 'predict', len(classes),
+                           folder, conf=p['conf'])
+    found = json.loads(pred.read_text(encoding='utf-8'))['sets']
+    sizes = json.loads((folder / 'predict-sizes.json').read_text(encoding='utf-8'))
+    rows = {}
+    for set_name, set_dir in cfg['sets'].items():
+        rel = Path(set_dir).relative_to(data).as_posix()
+        for name, boxes in found.get(set_name, {}).items():
+            rows[name if rel == '.' else f'{rel}/{name}'] = {'size': sizes[set_name][name], 'boxes': boxes}
+    missing = sorted({e[0] for e in images} - set(rows))
+    if missing:
+        raise WorkerError(f'有 {len(missing)} 张图没有推理结果（例如 {missing[0]}）')
+    doc = {'schema_version': 1, 'model': p['model']['ref'], 'classes': classes, 'conf': p['conf'],
+           'framework': f'{runner["framework"]}-tensorrt', 'images': rows}
+    out = folder / 'predictions.json'
+    out.write_text(json.dumps(doc, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+    engine_info = folder / 'engine.json'
+    engine_info.write_text(json.dumps(built, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    run.check()
+    try:
+        sent = ops._send_files(run.api, [('predictions.json', out), ('engine.json', engine_info)], 4, run.log)
+    except ops.FwError as e:
+        raise WorkerError(str(e)) from None
+    run.log(f'推理了 {len(rows)} 张图，{sum(len(r["boxes"]) for r in rows.values())} 个框（分数不低于 {p["conf"]:g}）')
+    return {'files': sent}
+
+
 def deteval_metrics(results: Path, name: str, ops) -> dict:
     """The result of the set (or group) 'eval' for this model, with the model's thresholds and settings."""
     undefined: List[str] = []
@@ -761,7 +839,8 @@ FINISH_RETRY_SECONDS = 600.0  # how long a result the platform cannot take is re
 
 
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}
-HANDLERS: Dict[str, Callable[[JobRun], dict]] = {'check': check_runner, 'eval': eval_model}
+HANDLERS: Dict[str, Callable[[JobRun], dict]] = {
+    'check': check_runner, 'eval': eval_model, 'predict': predict_model}
 
 
 def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,

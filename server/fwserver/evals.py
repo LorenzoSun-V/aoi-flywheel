@@ -23,7 +23,7 @@ from typing import Any, List, Optional
 
 from fw.contract import ContractError, eval_dirs, eval_selection, manifest_bytes
 
-from . import datasets, formats, jobs, models, trainsets
+from . import datasets, formats, jobs, models, predictions, trainsets
 from .datasets import DatasetError
 from .store import Store, StoreError
 
@@ -166,7 +166,8 @@ def _note(p: dict, job_id: int) -> str:
 
 
 def finish(conn, store: Store, job_id: int, token: str, outcome: str, result: Any = None, error: str = '') -> dict:
-    """Finish any job; a done evaluation sends {files: [[path, sha256, size], ...], tool_version} (metrics.json and
+    """Finish any job; a done prediction job registers its prediction set (predictions.register); a done
+    evaluation sends {files: [[path, sha256, size], ...], tool_version} (metrics.json and
     files/...) and is registered as an evaluation report while the job row is held, so that a claim that lost its
     lease registers nothing and a retried finish registers nothing twice."""
     with conn.transaction():
@@ -188,4 +189,6 @@ def finish(conn, store: Store, job_id: int, token: str, outcome: str, result: An
                 images=p['data']['images'])
             result = {'eval_id': e['id'], 'metrics': {k: e['metrics'].get(k) for k in
                                                       ('images', 'boxes', 'mAP50', 'mAP50-95', 'P', 'R')}}
+        elif row['kind'] == 'predict' and outcome == 'done':
+            result = predictions.register(conn, store, row, result)
         return jobs.finish(conn, job_id, token, outcome, result, error)
