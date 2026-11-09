@@ -12,7 +12,7 @@ A failure anywhere leaves no version behind; objects already uploaded stay and a
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from fw.contract import ContractError, classify_changes, parse_manifest
 
@@ -132,6 +132,13 @@ def get_version(conn, name: str, number: str) -> dict:
     if row is None:
         raise DatasetError(404, f'没有版本 {dataset["name"]}@{number}')
     return _version(row)
+
+
+def version_files(conn, version_id: int) -> List[Tuple[str, str, int]]:
+    """Every file of a version as (path, sha256 hex, size), by path."""
+    return [(r['path'], r['d'], r['size']) for r in conn.execute(
+        "SELECT path, encode(sha256, 'hex') AS d, size FROM version_files WHERE version_id = %s ORDER BY path",
+        (version_id,))]
 
 
 def get_version_by_id(conn, version_id: int) -> dict:

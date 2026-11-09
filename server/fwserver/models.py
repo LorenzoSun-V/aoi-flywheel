@@ -19,7 +19,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from fw.contract import ContractError, check_path, collisions, manifest_bytes
+from fw.contract import ContractError, check_path, collisions, eval_dirs, manifest_bytes
 
 from . import datasets, trainsets
 from .datasets import NAME, DatasetError, check_digest
@@ -415,7 +415,8 @@ _EVAL = """
 SELECT e.id, e.model_version_id, m.name AS model, mv.number AS model_number, e.testset_id,
        td.name AS testset_dataset, tv.number AS testset_number, td.kind AS testset_kind, e.split, e.fileset_id,
        encode(s.manifest_sha256, 'hex') AS manifest_sha256, s.file_count, s.total_bytes, e.metrics, e.tool,
-       e.tool_version, e.note, u.name AS created_by, e.created_at
+       e.tool_version, e.note, u.name AS created_by, e.created_at, e.dirs, e.job_id,
+       r.name || '@' || rv.number AS runner
 FROM eval_reports e
 JOIN model_versions mv ON mv.id = e.model_version_id
 JOIN models m ON m.id = mv.model_id
@@ -423,6 +424,8 @@ JOIN versions tv ON tv.id = e.testset_id
 JOIN datasets td ON td.id = tv.dataset_id
 JOIN filesets s ON s.id = e.fileset_id
 JOIN users u ON u.id = e.created_by
+LEFT JOIN runner_versions rv ON rv.id = e.runner_version_id
+LEFT JOIN runners r ON r.id = rv.runner_id
 """
 
 
@@ -434,7 +437,8 @@ def _eval(r: dict) -> dict:
             'split': r['split'], 'fileset_id': r['fileset_id'], 'manifest_sha256': r['manifest_sha256'],
             'file_count': r['file_count'], 'total_bytes': r['total_bytes'], 'metrics': r['metrics'],
             'tool': r['tool'], 'tool_version': r['tool_version'], 'note': r['note'], 'created_by': r['created_by'],
-            'created_at': _stamp(r['created_at'])}
+            'created_at': _stamp(r['created_at']), 'dirs': list(r['dirs']), 'job_id': r['job_id'],
+            'runner': r['runner']}
 
 
 def list_evals(conn, model: Optional[str] = None, model_version_id: Optional[int] = None) -> List[dict]:
@@ -457,8 +461,13 @@ def get_eval(conn, eval_id: int) -> dict:
 
 
 def register_eval(conn, store: Store, user_id: int, name: str, number: str, testset_id: int, split: str,
-                  files: Sequence, tool: str = '', tool_version: str = '', note: str = '') -> dict:
-    """files: metrics.json and optionally files/... (for aoi-deteval its output folder)."""
+                  files: Sequence, tool: str = '', tool_version: str = '', note: str = '',
+                  dirs: Sequence[str] = (), job_id: Optional[int] = None, runner_version_id: Optional[int] = None,
+                  images: Optional[int] = None) -> dict:
+    """files: metrics.json and optionally files/... (for aoi-deteval its output folder). dirs: the folders of
+    the test set that were evaluated (none = all of it). job_id, runner_version_id: the evaluation job that made
+    it, in a transaction that holds that job (evals.finish). images: how many images the metrics must say were
+    evaluated (an aoi-deteval result counts them as 'images')."""
     mv = get_model_version(conn, name, _pinned(name, number))
     testset = datasets.get_version_by_id(conn, testset_id)
     split = split or ''
@@ -470,26 +479,35 @@ def register_eval(conn, store: Store, user_id: int, name: str, number: str, test
             raise DatasetError(400, f'{testset["ref"]} 里没有 {split} 划分的样本')
     elif split:
         raise DatasetError(400, f'{testset["ref"]} 不是训练集快照，不用写划分')
+    try:
+        dirs = eval_dirs(dirs)
+    except ContractError as e:
+        raise DatasetError(400, str(e)) from None
+    if split and dirs:
+        raise DatasetError(400, '训练集快照的划分整个评，不选目录')
     entries = _entries(files, METRICS, (METRICS,))
     tool = _text(tool, '评估工具名', 100, line=True)
     tool_version = _text(tool_version, '评估工具版本', 100, line=True)
     note = _text(note, '备注')
     _check_stored(store, entries)
     metrics = _metrics(store, entries)
+    if images is not None and metrics.get('images') != images:
+        raise DatasetError(400, f'指标里评了 {metrics.get("images")} 张图，应为 {images} 张：有图没评到，没有登记')
     manifest = _prepare(store, entries)
     with conn.transaction():
         conn.execute('SELECT id FROM model_versions WHERE id = %s FOR UPDATE', (mv['id'],))
         same = conn.execute(_EVAL + ' WHERE e.model_version_id = %s AND e.testset_id = %s AND e.split = %s '
-                                    'AND s.manifest_sha256 = %s ORDER BY e.id LIMIT 1',
-                            (mv['id'], testset_id, split, bytes.fromhex(manifest))).fetchone()
+                                    'AND e.dirs = %s AND s.manifest_sha256 = %s ORDER BY e.id LIMIT 1',
+                            (mv['id'], testset_id, split, dirs, bytes.fromhex(manifest))).fetchone()
         if same:
             return dict(_eval(same), existing=True)
         fid = _insert_fileset(conn, entries, manifest)
         eval_id = conn.execute(
             'INSERT INTO eval_reports (model_version_id, testset_id, split, fileset_id, metrics, tool, tool_version, '
-            'note, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+            'note, created_by, dirs, job_id, runner_version_id) '
+            'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
             (mv['id'], testset_id, split, fid, json.dumps(metrics, ensure_ascii=False), tool, tool_version, note,
-             user_id)).fetchone()['id']
+             user_id, dirs, job_id, runner_version_id)).fetchone()['id']
     return dict(get_eval(conn, eval_id), existing=False)
 
 

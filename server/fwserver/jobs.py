@@ -21,7 +21,8 @@ from typing import Any, List, Optional
 from .datasets import NAME, DatasetError, check_digest
 from .store import Store
 
-KINDS = {'check': '检查推理环境'}
+KINDS = {'check': '检查推理环境', 'eval': '评估'}
+FRAMEWORKS = ('ultralytics', 'rfdetr')  # the aoi-deteval predict adapters
 STATUSES = {'queued': '排队', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消'}
 OUTCOMES = ('done', 'failed', 'cancelled')
 COMMIT = re.compile(r'[0-9a-f]{7,64}\Z')
@@ -56,7 +57,7 @@ def _runner_version(r: dict) -> dict:
     return {'id': r['id'], 'runner': r['name'], 'number': r['number'], 'ref': f'{r["name"]}@{r["number"]}',
             'worker': r['worker'], 'conda_env': r['conda_env'], 'env_sha256': bytes(r['env_sha256']).hex(),
             'src_dir': r['src_dir'], 'src_commit': r['src_commit'], 'src_dirty': r['src_dirty'],
-            'registered_by': r['registered_by'], 'created_at': _stamp(r['created_at'])}
+            'framework': r['framework'], 'registered_by': r['registered_by'], 'created_at': _stamp(r['created_at'])}
 
 
 _RV = ('SELECT rv.*, r.name, w.name AS worker, u.name AS registered_by FROM runner_versions rv '
@@ -96,7 +97,8 @@ def get_runner_version_by_id(conn, rv_id: int) -> dict:
 
 
 def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str, env_sha256: str,
-                    src_dir: str = '', src_commit: Optional[str] = None, src_dirty: bool = False) -> dict:
+                    src_dir: str = '', src_commit: Optional[str] = None, src_dirty: bool = False,
+                    framework: str = '') -> dict:
     """A new version of the runner when anything differs from its newest one (another machine, another
     environment listing, another source commit); the newest one again otherwise. Only worker accounts
     register: what is recorded is what that machine has."""
@@ -117,6 +119,9 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     if not src_dir and (src_commit or src_dirty):
         raise DatasetError(400, '没有源码目录时不能有提交号')
     src_dirty = bool(src_dirty)
+    framework = framework or ''
+    if framework and framework not in FRAMEWORKS:
+        raise DatasetError(400, f'框架只能是 {"、".join(FRAMEWORKS)}（aoi-deteval predict 的 --framework）')
     with conn.transaction():
         conn.execute('INSERT INTO runners (name) VALUES (%s) ON CONFLICT DO NOTHING', (name,))
         runner = conn.execute('SELECT id, name FROM runners WHERE lower(name) = lower(%s) FOR UPDATE',
@@ -124,15 +129,15 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
         last = conn.execute('SELECT * FROM runner_versions WHERE runner_id = %s ORDER BY number DESC LIMIT 1',
                             (runner['id'],)).fetchone()
         same = last is not None and (last['worker_id'], last['conda_env'], bytes(last['env_sha256']).hex(),
-                                     last['src_dir'], last['src_commit'], last['src_dirty']) == (
-            worker['user_id'], conda_env, env_sha256, src_dir, src_commit, src_dirty)
+                                     last['src_dir'], last['src_commit'], last['src_dirty'], last['framework']) == (
+            worker['user_id'], conda_env, env_sha256, src_dir, src_commit, src_dirty, framework)
         if same:
             return dict(get_runner_version_by_id(conn, last['id']), created=False)
         row = conn.execute(
             'INSERT INTO runner_versions (runner_id, number, worker_id, conda_env, env_sha256, src_dir, src_commit, '
-            'src_dirty, registered_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+            'src_dirty, framework, registered_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
             (runner['id'], (last['number'] if last else 0) + 1, worker['user_id'], conda_env,
-             bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, worker['user_id'])).fetchone()
+             bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, framework, worker['user_id'])).fetchone()
     return dict(get_runner_version_by_id(conn, row['id']), created=True)
 
 
@@ -205,24 +210,36 @@ def list_jobs(conn, status: str = '', limit: int = 50) -> List[dict]:
     return [_job(conn, r) for r in rows]
 
 
-def submit(conn, user: dict, kind: str, runner: Optional[str] = None, params: Optional[dict] = None) -> dict:
+def runner_params(rv: dict) -> dict:
+    """What a job needs to know of its runner version: the worker checks the machine still has it."""
+    return {'conda_env': rv['conda_env'], 'env_sha256': rv['env_sha256'], 'src_dir': rv['src_dir'],
+            'src_commit': rv['src_commit'], 'src_dirty': rv['src_dirty'], 'framework': rv['framework']}
+
+
+def find_runner(conn, runner: Optional[str], what: str) -> dict:
+    if not runner:
+        raise DatasetError(400, f'要写{what}用哪个推理环境（fw runner list 看有哪些）')
+    name, _, number = runner.partition('@')
+    return get_runner_version(conn, name, number or 'latest')
+
+
+def enqueue(conn, user: dict, kind: str, rv: Optional[dict], params: dict) -> dict:
     if kind not in KINDS:
         raise DatasetError(400, f'任务类型只能是 {"、".join(KINDS)}')
-    params = dict(params or {})
-    rv = None
-    if kind == 'check':
-        if not runner:
-            raise DatasetError(400, '要写检查哪个推理环境')
-        if params:
-            raise DatasetError(400, '检查推理环境不带参数')
-        name, _, number = runner.partition('@')
-        rv = get_runner_version(conn, name, number or 'latest')
-        params = {'conda_env': rv['conda_env'], 'env_sha256': rv['env_sha256'], 'src_dir': rv['src_dir'],
-                  'src_commit': rv['src_commit'], 'src_dirty': rv['src_dirty']}
     row = conn.execute('INSERT INTO jobs (kind, params, runner_version_id, submitted_by) VALUES (%s, %s, %s, %s) '
                        'RETURNING id', (kind, json.dumps(params, ensure_ascii=False), rv['id'] if rv else None,
                                         user['user_id'])).fetchone()
     return get_job(conn, row['id'])
+
+
+def submit(conn, user: dict, kind: str, runner: Optional[str] = None, params: Optional[dict] = None) -> dict:
+    """A job that needs nothing but its runner (a check). Evaluations are submitted through evals.submit."""
+    if kind != 'check':
+        raise DatasetError(400, f'任务类型只能是 {"、".join(KINDS)}')
+    if params:
+        raise DatasetError(400, '检查推理环境不带参数')
+    rv = find_runner(conn, runner, '检查')
+    return enqueue(conn, user, kind, rv, runner_params(rv))
 
 
 def cancel(conn, job_id: int) -> dict:
@@ -265,8 +282,9 @@ def claim(conn, worker: dict, lease_seconds: int) -> Optional[dict]:
 
 def _held(conn, job_id: int, token: str) -> dict:
     """The job row, locked, if this token's claim still holds its lease; 409 otherwise."""
-    row = conn.execute('SELECT id, status, attempts, lease_sha256, lease_expires < now() AS expired, '
-                       'cancel_requested FROM jobs WHERE id = %s FOR UPDATE', (job_id,)).fetchone()
+    row = conn.execute('SELECT id, kind, params, runner_version_id, submitted_by, status, attempts, lease_sha256, '
+                       'lease_expires < now() AS expired, cancel_requested FROM jobs WHERE id = %s FOR UPDATE',
+                       (job_id,)).fetchone()
     if row is None:
         raise DatasetError(404, f'没有任务 {job_id}')
     if row['status'] != 'running' or bytes(row['lease_sha256']) != _hash(token or '') or row['expired']:
@@ -315,6 +333,9 @@ def _check_result(kind: str, result: Any) -> dict:
         raise DatasetError(400, '任务结果应为 JSON 对象')
     if len(json.dumps(result, ensure_ascii=False)) > MAX_RESULT:
         raise DatasetError(400, '任务结果太大')
+    if kind == 'eval':
+        if not isinstance(result.get('eval_id'), int) or isinstance(result['eval_id'], bool):
+            raise DatasetError(400, '评估结果里要有评估报告的编号')
     if kind == 'check':
         if not isinstance(result.get('env_sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', result['env_sha256']):
             raise DatasetError(400, '检查结果里要有环境包清单的哈希')
@@ -324,6 +345,19 @@ def _check_result(kind: str, result: Any) -> dict:
     return result
 
 
+def finished_already(conn, job_id: int, token: str, outcome: str) -> bool:
+    """Did this claim already end the job with this outcome (a finish sent again after a network error)?"""
+    done = conn.execute('SELECT a.outcome FROM job_attempts a JOIN jobs j ON j.id = a.job_id '
+                        'WHERE a.job_id = %s AND a.lease_sha256 = %s AND j.status = a.outcome',
+                        (job_id, _hash(token or ''))).fetchone()
+    return done is not None and done['outcome'] == outcome
+
+
+def held(conn, job_id: int, token: str) -> dict:
+    """In a transaction: the job, locked until it ends, while this claim holds its lease (409 otherwise)."""
+    return _held(conn, job_id, token)
+
+
 def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, error: str = '') -> dict:
     """Ends the job as done (with its result), failed (with why) or cancelled. Sending the same finish again
     after a network error returns the job instead of an error."""
@@ -331,13 +365,10 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
         raise DatasetError(400, f'结果只能是 {"、".join(OUTCOMES)}')
     error = _text(error or '', '出错原因', MAX_ERROR)
     with conn.transaction():
-        done = conn.execute('SELECT a.outcome FROM job_attempts a JOIN jobs j ON j.id = a.job_id '
-                            'WHERE a.job_id = %s AND a.lease_sha256 = %s AND j.status = a.outcome',
-                            (job_id, _hash(token or ''))).fetchone()
-        if done is not None and done['outcome'] == outcome:
+        if finished_already(conn, job_id, token, outcome):
             return get_job(conn, job_id)  # this claim already finished the job like this
         row = _held(conn, job_id, token)
-        kind = conn.execute('SELECT kind FROM jobs WHERE id = %s', (job_id,)).fetchone()['kind']
+        kind = row['kind']
         if outcome == 'done':
             result = _check_result(kind, result)
         elif result is not None:
