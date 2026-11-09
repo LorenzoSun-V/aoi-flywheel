@@ -330,10 +330,6 @@ def cmd_eval_register(args, api: Api) -> None:
 
 def cmd_eval_run(args, api: Api) -> int:
     params = {'model': args.model, 'data': args.data, 'dirs': args.dirs or []}
-    if args.imgsz:
-        params['imgsz'] = args.imgsz
-    if args.batch:
-        params['batch'] = args.batch
     job = api.submit_job('eval', runner=args.runner, params=params)
     p = job['params']
     where = p['data']['ref'] + (f':{p["data"]["split"]}' if p['data']['split'] else '')
@@ -387,11 +383,16 @@ def _runner_text(r: dict) -> str:
     src = (f'{r["src_dir"]} @ {r["src_commit"][:12]}{"（有未提交的改动）" if r["src_dirty"] else ""}'
            if r['src_dir'] else '（没登记源码）')
     return (f'conda 环境 {r["conda_env"]}（包清单 {r["env_sha256"][:12]}），源码 {src}'
-            + (f'，框架 {r["framework"]}' if r.get('framework') else '，没写框架（只能做检查，不能评估）'))
+            + (f'，框架 {r["framework"]}，onnx2engine {r["onnx2engine"]}（{(r.get("onnx2engine_sha256") or "")[:12]}）'
+               if r.get('framework') else '，没写框架（只能做检查，不能评估）'))
 
 
 def cmd_runner_register(args, api: Api) -> None:
-    r = worker.register_runner(api, args.name, args.env, args.src or '', args.framework or '')
+    try:
+        r = worker.register_runner(api, args.name, args.env, args.src or '', args.framework or '',
+                                   args.onnx2engine or '')
+    except worker.WorkerError as e:
+        raise ops.FwError(str(e)) from None
     if r['created']:
         print(f'已登记 {r["ref"]}（在 {r["worker"]} 上）：{_runner_text(r)}')
     else:
@@ -676,8 +677,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--dirs', nargs='+', metavar='目录',
                    help='只评版本里的这几个目录（包括下面的子目录），例如 SES/TX/test_1015；不写就是整个版本')
     s.add_argument('--runner', required=True, help='推理环境，例如 detr-pro 或 detr-pro@2（fw runner list 看有哪些）')
-    s.add_argument('--imgsz', type=int, help='推理尺寸（RF-DETR 以训练分辨率为准，不用写）')
-    s.add_argument('--batch', type=int, help='批量（RF-DETR 默认逐张，和部署一致）')
     s.add_argument('--wait', action='store_true', help='等任务跑完，跟着显示输出')
     s.set_defaults(func=cmd_eval_run)
     s = ev.add_parser('register', help='登记一个模型版本在测试集上的评估结果')
@@ -736,8 +735,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('name', help='推理环境名，例如 yolo26、detr-pro')
     s.add_argument('--env', required=True, help='conda 环境名')
     s.add_argument('--src', help='框架源码目录（git 仓库）；用 pip 装的官方版框架就不写')
-    s.add_argument('--framework', choices=['ultralytics', 'rfdetr'],
-                   help='aoi-deteval 用哪个框架推理；评估用的环境要写，环境里要装好 aoi-deteval')
+    s.add_argument('--framework', choices=['rfdetr'],
+                   help='用哪个部署代码的推理模块跑 TensorRT 引擎（rfdetr：py_rfdetr）；评估用的环境要写，'
+                        '环境里要有 tensorrt、OpenCV、这个推理模块和 aoi-deteval')
+    s.add_argument('--onnx2engine', help='部署代码的 onnx2engine 程序（从 ONNX 建 TensorRT 引擎），和 --framework 一起写')
     s.set_defaults(func=cmd_runner_register)
     s = rn.add_parser('list', help='列出推理环境（每个的最新版本）')
     s.set_defaults(func=cmd_runner_list)

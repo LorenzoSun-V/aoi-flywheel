@@ -6,13 +6,12 @@
 
 第三步之二：统一评估。
 
-- `fw eval run <模型版本> --data <数据集版本 | 快照:划分> [--dirs <目录…>] --runner <推理环境>`：GPU 机在推理环境里用模型版本的权重跑 `deteval predict` 和 `deteval evaluate`，结果自动登记成评估报告，报告记下评估任务、推理环境和评了哪些目录。`--wait` 跟到跑完。
+- `fw eval run <模型版本> --data <数据集版本 | 快照:划分> [--dirs <目录…>] --runner <推理环境>`：GPU 机用模型版本的 `model.onnx` 在本机建 TensorRT 引擎（onnx2engine，FP16，按 ONNX、程序、环境、显卡缓存，不上传不发布），用部署代码的推理模块跑测试图，写成 aoi-deteval 的预测文件，再跑 `deteval evaluate`，结果自动登记成评估报告，报告记下评估任务、推理环境、评了哪些目录和引擎信息（`files/engine.json`）。平台从不加载上传的权重。`--wait` 跟到跑完。
 - 提交时定下评哪些图（清单存进文件库）。数据集版本读图旁边的 JSON 标注（按类别名），快照读它的 YOLO 标注；只有 YOLO txt 的图不收，先建快照。选的图和模型训练集 train、val 里的图内容相同时提醒，并写进报告备注。
-- 推理环境登记时加 `--framework ultralytics|rfdetr`（aoi-deteval 用哪个框架推理）；评估前 worker 核对环境和源码没变。
+- 推理环境登记时加 `--framework rfdetr --onnx2engine <程序>`（部署代码的推理模块和建引擎程序，记下程序的哈希）；评估前 worker 核对环境、源码和 onnx2engine 没变。
 - 数据库迁移 0006（推理环境的框架、评估任务、评估报告的目录和任务）。
-- worker 在单独的低权限系统账号（`FW_RUN_AS`，必配）下用 sudo 运行 aoi-deteval，环境变量清空：上传的权重加载时会执行代码，不能让它读到 worker 的令牌。配置步骤见 docs/commands.md「fw worker」。
 - 复审后修正（合并前）：测试快照的类别表和模型不同（包括只是顺序不同）时不收；数据池里 `x.JSON` 这样大写扩展名的标注照常读，只有 `labels/x.TXT` 的图和只有 `.txt` 的一样不收；两个任务结果完全相同时各自登记报告；`FW_WORK_DIR` 可以写相对路径。
-- 第二轮审查后修正：模型账号的每条命令用新的空家目录和临时目录，跑之前自检它不能写自己的家目录、推理环境和源码，不能读 worker 配置，不能用 cron、at；它写出的文件只按它自己的普通文件拷出再读、再传（有链接就整次不用），上传的预测在 evaluate 之前读下。数据池上评估时，标注里有模型类别表里没有的类别名就不收。文档改了 GPU 机的配置步骤（任务目录 `/srv/fw-jobs`，模型账号不建家目录）。
+- 第二轮审查后修正：数据池上评估时，标注里有模型类别表里没有的类别名就不收。
 
 - 新角色 `worker`（GPU worker）：每台 GPU 机一个账号，`fw-server user add gpu-01 --role worker`。
 - 推理环境：`fw runner register <名称> --env <conda 环境> [--src <框架源码>]` 在 GPU 机上登记，记下 `conda list --explicit` 的包清单（传到平台）和源码的 git 提交号；变了再登记就是新版本。`fw runner list`、`show`；`fw runner check` 提交一个任务，在那台机器上检查环境和源码有没有变。

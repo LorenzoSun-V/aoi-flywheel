@@ -28,7 +28,7 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
   layout.py          把缓存里的文件摆成版本的目录：reflink、复制、硬链接，每个文件摆完都核对哈希
   pool.py            并行跑一组任务（上传、下载）：出错或 Ctrl+C 时取消还没开始的，不等手上的
   worker.py          fw worker 和 fw runner：领任务、续租、传日志、在 conda 环境里跑命令、交结果；读 conda
-                     包清单和源码提交号；评估任务（摆权重和图片、跑 deteval predict / evaluate、上传结果）
+                     包清单和源码提交号；评估任务（摆 ONNX 和图片、本机建 TensorRT 引擎、trt_predict.py 推理、deteval evaluate、上传结果）
   ops.py             每条命令真正做的事（import_folder、get、export、verify、diff、get_version、
                      create_trainset、get_trainset、register_model、get_model、register_eval、
                      register_release、show_chain）
@@ -153,11 +153,10 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | worker 收到取消或租约失效时，杀掉正在跑的命令和它启动的子进程（单独的进程组，读包清单的 conda、读源码的 git 也一样）；命令自己结束时，它留在组里的进程也杀掉，不会占着输出管道拖住任务；租约失效时不交结果 | `worker.JobRun._spawn`、`capture`、`_ended`、`_kill`、`execute` | `test_cancel`、`test_worker_stops_when_its_lease_is_taken_back`、`test_cancel_stops_a_real_check_with_its_children`、`test_what_a_command_leaves_running_never_holds_up_the_job`、`test_cancel_stops_a_check_whose_git_hangs` |
 | 平台重启、网络断开时 worker 不退出：领任务失败就等一会儿再领；交结果失败就重试并续租，最多 `FINISH_RETRY_SECONDS`（10 分钟），之后不再续租让租约到期，期间收到取消就交已取消；一个任务出错不影响下一个 | `worker.run_worker`、`JobRun._finish`、`transient` | `test_the_worker_rides_out_a_platform_restart`、`test_a_result_the_platform_keeps_refusing_with_5xx_does_not_hang_the_worker` |
 | 任务只发给推理环境所在的机器 | `jobs.claim` | `test_jobs_go_only_to_the_runners_machine` |
-| 评估任务提交时定下评哪些图（图片清单存进文件库）、哪个权重、哪个推理环境；只收能按模型类别表读的标注（类别表和模型完全相同的快照的 YOLO、数据池的 JSON；标注扩展名大小写都认，摆成小写），只有 txt 的图和共用标注的同名图不收；和训练集 train、val 内容相同的图按哈希提醒 | `evals.submit`、`_same_classes`、`contract.eval_selection` | `test_eval_on_folders_of_a_pool`、`test_eval_on_a_snapshot_split_warns_about_training_images`、`test_what_an_eval_needs`、`test_labels_next_to_images_are_read`、`test_a_snapshot_numbered_by_another_class_table_is_refused`、`test_labels_with_upper_case_extensions`、`test_eval_selection_with_two_json_labels_differing_in_case` |
+| 评估任务提交时定下评哪些图（图片清单存进文件库）、哪个 ONNX、哪个推理环境；只收能按模型类别表读的标注（类别表和模型完全相同的快照的 YOLO、数据池的 JSON；标注扩展名大小写都认，摆成小写），只有 txt 的图和共用标注的同名图不收；和训练集 train、val 内容相同的图按哈希提醒 | `evals.submit`、`_same_classes`、`contract.eval_selection` | `test_eval_on_folders_of_a_pool`、`test_eval_on_a_snapshot_split_warns_about_training_images`、`test_what_an_eval_needs`、`test_labels_next_to_images_are_read`、`test_a_snapshot_numbered_by_another_class_table_is_refused`、`test_labels_with_upper_case_extensions`、`test_eval_selection_with_two_json_labels_differing_in_case` |
 | 评估报告和它的任务一起成立：交回结果时持有任务行锁，在同一个事务里登记报告、结束任务；租约失效、已取消的不登记；评的张数和清单不一样不登记；数据库只收「正在运行的同一推理环境的评估任务」的报告，快照的划分不带目录；每个任务有自己的报告（结果和别的任务一字不差也是，记各自的任务和推理环境） | `evals.finish`、`models.register_eval`，触发器 `check_eval_report_dirs`（`0006_eval_jobs.sql`） | `test_a_cancelled_or_lost_eval_registers_nothing`、`test_an_eval_that_missed_images_registers_nothing`、`test_the_database_keeps_eval_reports_consistent`、`test_two_jobs_with_the_same_result_keep_a_report_each` |
-| 推理环境变了（包清单或源码）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails` |
-| 加载上传权重的命令（aoi-deteval）只在单独的低权限账号（`FW_RUN_AS`）下用 sudo 运行，环境变量清空，读不到 worker 的令牌；没配就不评；结束或取消时杀掉这个账号的所有进程；任务目录用绝对路径 | `worker.RunAs`、`run_as`、`eval_model`、`work_dir` | `test_model_code_runs_under_its_own_account_with_nothing_of_the_workers`、`test_model_code_cannot_read_the_workers_files_and_is_killed_on_cancel`（要能免密 sudo，CI 上会跑）、`test_a_relative_work_dir` |
-| 模型命令之间不留东西：每条命令新的空 HOME、TMPDIR，`PYTHONNOUSERSITE`；跑之前自检账号写不了家目录、环境、源码，读不了 worker 配置，用不了 cron、at；它写出的文件只按「它自己的普通文件」拷出（不跟链接，核对属主和链接数）再读、再传，预测在 evaluate 之前读下 | `RunAs.check`、`command_env`、`take_output`、`_model_run`、`_eval_in` | `test_nothing_a_model_command_leaves_reaches_the_next_one`、`test_check_refuses_an_account_that_can_reach_what_the_worker_runs`、`test_what_a_model_command_wrote_is_taken_only_as_its_own_plain_files`、`test_a_link_among_the_model_outputs_uploads_nothing` |
+| 推理环境变了（包清单、源码或 onnx2engine 程序）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails`、`test_an_engine_is_built_once_per_onnx_and_machine` |
+| 平台从不加载上传的权重：评估任务只带 `model.onnx`，worker 用推理环境登记的 onnx2engine 在本机建引擎（按 ONNX、程序、环境、显卡和驱动缓存，不上传），用部署代码的推理模块跑；写了框架就要登记 onnx2engine（路径和哈希） | `evals._onnx`、`worker.build_engine`、`fw/trt_predict.py`、`jobs.register_runner`、0006 的 CHECK | `test_eval_on_folders_of_a_pool`、`test_an_engine_is_built_once_per_onnx_and_machine`、`test_a_runner_for_evaluations_names_its_onnx2engine` |
 | 数据池上评估时，JSON 标注里的类别名都要在模型的类别表里 | `evals._known_names` | `test_pool_labels_must_name_classes_of_the_model` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 

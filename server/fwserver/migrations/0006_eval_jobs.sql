@@ -2,9 +2,16 @@
 -- folders of a dataset version (or one split of a training-set snapshot), and the platform registers the
 -- result as an evaluation report that names the job, the runner version and the folders.
 
--- Which aoi-deteval adapter a runner's environment runs ('' = none; such a runner only runs checks).
+-- Which TensorRT inference adapter a runner's environment runs ('' = none; such a runner only runs checks),
+-- and the onnx2engine program that builds the machine's engines from a model version's ONNX (its path, and
+-- the sha256 of the program file, so that another build of it is another runner version). Models are only
+-- ever run as TensorRT engines built on the machine from the registered ONNX, never from uploaded weights.
 ALTER TABLE runner_versions ADD COLUMN framework text NOT NULL DEFAULT ''
-  CHECK (framework IN ('', 'ultralytics', 'rfdetr'));
+  CHECK (framework IN ('', 'rfdetr'));
+ALTER TABLE runner_versions ADD COLUMN onnx2engine text NOT NULL DEFAULT '';
+ALTER TABLE runner_versions ADD COLUMN onnx2engine_sha256 bytea CHECK (length(onnx2engine_sha256) = 32);
+ALTER TABLE runner_versions ADD CONSTRAINT runner_versions_engine_tools CHECK (
+  (framework = '') = (onnx2engine = '') AND (onnx2engine = '') = (onnx2engine_sha256 IS NULL));
 
 ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check;
 ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check CHECK (kind IN ('check', 'eval'));

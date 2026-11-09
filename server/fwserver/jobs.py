@@ -22,7 +22,7 @@ from .datasets import NAME, DatasetError, check_digest
 from .store import Store, StoreError
 
 KINDS = {'check': '检查推理环境', 'eval': '评估'}
-FRAMEWORKS = ('ultralytics', 'rfdetr')  # the aoi-deteval predict adapters
+FRAMEWORKS = ('rfdetr',)  # TensorRT inference adapters (rfdetr: py_rfdetr of the deploy code)
 STATUSES = {'queued': '排队', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消'}
 OUTCOMES = ('done', 'failed', 'cancelled')
 COMMIT = re.compile(r'[0-9a-f]{7,64}\Z')
@@ -58,7 +58,9 @@ def _runner_version(r: dict) -> dict:
             'worker': r['worker'], 'conda_env': r['conda_env'], 'env_sha256': bytes(r['env_sha256']).hex(),
             'src_dir': r['src_dir'], 'src_commit': r['src_commit'], 'src_dirty': r['src_dirty'],
             'src_state_sha256': bytes(r['src_state_sha256']).hex() if r['src_state_sha256'] else None,
-            'framework': r['framework'], 'registered_by': r['registered_by'], 'created_at': _stamp(r['created_at'])}
+            'framework': r['framework'], 'onnx2engine': r['onnx2engine'],
+            'onnx2engine_sha256': bytes(r['onnx2engine_sha256']).hex() if r['onnx2engine_sha256'] else None,
+            'registered_by': r['registered_by'], 'created_at': _stamp(r['created_at'])}
 
 
 _RV = ('SELECT rv.*, r.name, w.name AS worker, u.name AS registered_by FROM runner_versions rv '
@@ -99,7 +101,8 @@ def get_runner_version_by_id(conn, rv_id: int) -> dict:
 
 def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str, env_sha256: str,
                     src_dir: str = '', src_commit: Optional[str] = None, src_dirty: bool = False,
-                    src_state_sha256: Optional[str] = None, framework: str = '') -> dict:
+                    src_state_sha256: Optional[str] = None, framework: str = '', onnx2engine: str = '',
+                    onnx2engine_sha256: Optional[str] = None) -> dict:
     """A new version of the runner when anything differs from its newest one (another machine, another
     environment listing, another source commit); the newest one again otherwise. Only worker accounts
     register: what is recorded is what that machine has."""
@@ -131,7 +134,13 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     state = bytes.fromhex(src_state_sha256) if src_state_sha256 else None
     framework = framework or ''
     if framework and framework not in FRAMEWORKS:
-        raise DatasetError(400, f'框架只能是 {"、".join(FRAMEWORKS)}（aoi-deteval predict 的 --framework）')
+        raise DatasetError(400, f'框架只能是 {"、".join(FRAMEWORKS)}（用 TensorRT 引擎推理的部署代码）')
+    onnx2engine = _text(onnx2engine or '', 'onnx2engine 路径', 1000).strip()
+    if any(c in onnx2engine for c in '\r\n\t'):
+        raise DatasetError(400, 'onnx2engine 路径里有不能用的字符')
+    if bool(framework) != bool(onnx2engine) or bool(onnx2engine) != (onnx2engine_sha256 is not None):
+        raise DatasetError(400, '写了框架就要同时登记 onnx2engine（路径和它的哈希），没写框架就都不登记')
+    tool = bytes.fromhex(check_digest(onnx2engine_sha256)) if onnx2engine_sha256 is not None else None
     with conn.transaction():
         conn.execute('INSERT INTO runners (name) VALUES (%s) ON CONFLICT DO NOTHING', (name,))
         runner = conn.execute('SELECT id, name FROM runners WHERE lower(name) = lower(%s) FOR UPDATE',
@@ -141,16 +150,18 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
         same = last is not None and (last['worker_id'], last['conda_env'], bytes(last['env_sha256']).hex(),
                                      last['src_dir'], last['src_commit'], last['src_dirty'],
                                      bytes(last['src_state_sha256']) if last['src_state_sha256'] else None,
-                                     last['framework']) == (
-            worker['user_id'], conda_env, env_sha256, src_dir, src_commit, src_dirty, state, framework)
+                                     last['framework'], last['onnx2engine'],
+                                     bytes(last['onnx2engine_sha256']) if last['onnx2engine_sha256'] else None) == (
+            worker['user_id'], conda_env, env_sha256, src_dir, src_commit, src_dirty, state, framework, onnx2engine,
+            tool)
         if same:
             return dict(get_runner_version_by_id(conn, last['id']), created=False)
         row = conn.execute(
             'INSERT INTO runner_versions (runner_id, number, worker_id, conda_env, env_sha256, src_dir, src_commit, '
-            'src_dirty, src_state_sha256, framework, registered_by) '
-            'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+            'src_dirty, src_state_sha256, framework, onnx2engine, onnx2engine_sha256, registered_by) '
+            'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
             (runner['id'], (last['number'] if last else 0) + 1, worker['user_id'], conda_env,
-             bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, state, framework,
+             bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, state, framework, onnx2engine, tool,
              worker['user_id'])).fetchone()
     return dict(get_runner_version_by_id(conn, row['id']), created=True)
 
@@ -229,7 +240,8 @@ def runner_params(rv: dict) -> dict:
     """What a job needs to know of its runner version: the worker checks the machine still has it."""
     return {'conda_env': rv['conda_env'], 'env_sha256': rv['env_sha256'], 'src_dir': rv['src_dir'],
             'src_commit': rv['src_commit'], 'src_dirty': rv['src_dirty'],
-            'src_state_sha256': rv['src_state_sha256'], 'framework': rv['framework']}
+            'src_state_sha256': rv['src_state_sha256'], 'framework': rv['framework'],
+            'onnx2engine': rv['onnx2engine'], 'onnx2engine_sha256': rv['onnx2engine_sha256']}
 
 
 def find_runner(conn, runner: Optional[str], what: str) -> dict:

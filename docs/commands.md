@@ -288,12 +288,12 @@ fw model register SES-TX-detr --onnx runs/best.onnx --weights runs/best.pt --tra
   --file configs/train.yaml
 ```
 
-把 ONNX 和权重传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。模型好不好以平台用 aoi-deteval 统一算的指标为准（第三步由 GPU worker 用权重和从 ONNX 构建的引擎评估），不看各训练框架自己算的指标，所以指标和训练代码都是选填。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
+把 ONNX 和权重传到服务器，登记成模型的下一个版本（`SES-TX-detr@3`）。模型好不好以平台用 aoi-deteval 统一算的指标为准（第三步由 GPU worker 用从 ONNX 构建的 TensorRT 引擎评估），不看各训练框架自己算的指标，所以指标和训练代码都是选填。先传文件、后登记，所以登记了的模型版本，文件一定在服务器上。
 
 | 选项 | 说明 |
 |---|---|
 | `--onnx` | 必填，ONNX 文件，用来构建引擎。文件开头不像 ONNX 时拒绝（常见的是传成了 `.pt`） |
-| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，用来统一评估 |
+| `--weights` | 训练出的权重（`.pt`、`.pth`，一个文件，不能是空文件），登记在 `weights/` 下，只作存档（以后接着训练、对照用）；平台从不加载它，评估、推理都用 ONNX 建的引擎 |
 | `--trainset` | 必填，训练用的训练集快照，例如 `SES-TX-det@2`。追溯链就是从这里接到数据的；类别表也用这个快照的，登记时一起放进模型版本 |
 | `--metrics` | 选填：训练框架自己算的验证指标 JSON（一个 JSON 对象），只作参考；`fw model show`、`fw model compare` 会列出里面的数值 |
 | `--file` | 附件：训练配置等，登记在 `files/` 下；写目录就带上整个目录；可写多次 |
@@ -345,26 +345,26 @@ fw eval run SES-TX-detr@3 --data SES-TX@5 --dirs SES/TX/test_1015 SES/TX/test_10
 fw eval run SES-TX-detr@3 --data SES-TX-det@2:test --runner detr-pro --wait
 ```
 
-排一个评估任务：推理环境所在的 GPU 机用模型版本登记的权重（`weights/`），在那个 conda 环境里跑 `deteval predict` 和 `deteval evaluate`，结果自动登记成评估报告（`fw eval show` 看）。指标以平台用 aoi-deteval 算的为准。
+排一个评估任务：推理环境所在的 GPU 机用模型版本的 `model.onnx` 在本机建 TensorRT 引擎（onnx2engine，FP16），用部署代码的推理模块跑完全部测试图，写成 aoi-deteval 的预测文件，再跑 `deteval evaluate`，结果自动登记成评估报告（`fw eval show` 看）。指标以平台用 aoi-deteval 算的为准，量的就是部署时那条 TensorRT 推理。
 
 | 选项 | 说明 |
 |---|---|
-| `模型版本` | 例如 `SES-TX-detr@3`；只写名称就是最新版，提交时定下。要登记过权重（`fw model register --weights`）；RF-DETR 登记时用 `--file training_config.json` 带上训练配置，worker 把它放在权重旁边，aoi-deteval 从里面读训练分辨率 |
+| `模型版本` | 例如 `SES-TX-detr@3`；只写名称就是最新版，提交时定下。评的是它的 `model.onnx`（输入尺寸由 ONNX 定） |
 | `--data` | 在哪个版本上评。数据集版本（数据池、测试集）直接写，例如 `SES-TX@5`；训练集快照写划分，例如 `SES-TX-det@2:test` |
 | `--dirs` | 只评数据集版本里的这几个目录（连同下面所有子目录），写版本里的相对路径；不写就是整个版本。快照按划分评，不用写 |
-| `--runner` | 推理环境，例如 `detr-pro` 或 `detr-pro@2`；登记时要写了 `--framework`，环境里要装好 aoi-deteval |
-| `--imgsz` | 推理尺寸（ultralytics 用；RF-DETR 以训练分辨率为准） |
-| `--batch` | 批量（RF-DETR 默认逐张，和部署一致） |
+| `--runner` | 推理环境，例如 `detr-pro` 或 `detr-pro@2`；登记时要写了 `--framework` 和 `--onnx2engine` |
 | `--wait` | 等任务跑完，跟着显示输出，最后给出评估报告编号 |
 
 - 读哪些标注：快照用它的 YOLO 标注，类别编号按快照的类别表；快照的类别表要和模型的完全一样（顺序也一样），不一样就不收（否则对的框会被算成错的类别）。数据集版本用每张图旁边的 LiteAnno / X-AnyLabeling JSON，按类别名对到模型的类别表，有模型类别表里没有的类别名（包括只差大小写的）就不收（扩展名大小写都认，`x.JSON` 摆成 `x.json` 给 aoi-deteval）；没有标注的图算正常图（没有缺陷）。只有 YOLO txt（`.txt`、`.TXT` 都算）的图不收（txt 的类别编号是数据池自己的，不一定和模型的一样），先用 `fw trainset create --label-classes` 建快照，再评快照的划分。同一个目录里同名不同扩展名的两张图（`a.png`、`a.jpg`）会共用一份标注，也不收。
 - 提交时就定下要评哪些图：图片清单存进文件库，任务重试、版本以后再变都还是这些图。评完的张数和清单对不上（有图没读到），不登记，任务算失败。
 - 选的图里有和模型训练集快照 train、val 里内容相同的图（按文件哈希，不看路径），提交时提醒，并写进报告的备注：这些图的成绩会偏好。
-- worker 先核对推理环境还是登记时那样（包清单、源码），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
+- worker 先核对推理环境还是登记时那样（包清单、源码、onnx2engine 程序），变了就不评；确认没问题后在 GPU 机上重新 `fw runner register`，再提交。
+- 本机的引擎只是缓存：按 ONNX、onnx2engine 程序、环境、显卡和驱动存在 fw 缓存目录的 `engines/` 下，同一台机器同一个 ONNX 只建一次；不上传、不发布。发布到现场的是 ONNX，现场用同一个 onnx2engine 自己建引擎（本机建的引擎换了显卡或 TensorRT 版本不一定能用）。报告的 `files/engine.json` 记下引擎的哈希、显卡和驱动、TensorRT 版本、精度。
+- 推理时置信度下限 0.001（算 mAP 要几乎所有框，和 `deteval predict` 一样）；引擎输出的类别超出模型类别表的框不计入，日志里写去掉了多少个。
 - aoi-deteval 一个集合只读一层目录，按文件名对应预测和真值，所以 worker 把每个有图的目录作为一个集合（`d1`、`d2`…），再把它们合成一组 `eval`；登记的指标是 `eval` 这一组的（只有一个目录时就是那个目录）。工作点阈值（f1 等）也是在这一组上定的，看 mAP 不受影响，看阈值类指标时要知道这一点。
-- 报告的文件：`metrics.json`，`files/` 下是 aoi-deteval 的整个输出目录、用的集合配置（`eval_sets.yaml`）和预测 JSON（`preds/`）。`fw eval show` 会写明是哪个评估任务、哪个推理环境算的。
+- 报告的文件：`metrics.json`，`files/` 下是 aoi-deteval 的整个输出目录、用的集合配置（`eval_sets.yaml`）、预测 JSON（`preds/`）和引擎信息（`engine.json`）。`fw eval show` 会写明是哪个评估任务、哪个推理环境算的。
 - 取消、租约失效的评估不登记报告。两个任务算出的结果一字不差时，各自登记一份报告（文件只存一份），报告里各记各的任务和推理环境。
-- aoi-deteval 加载上传的权重：`.pt`、`.pth` 是 pickle，加载时会执行里面的代码。所以 worker 一定在单独的低权限系统账号（`FW_RUN_AS`）下运行它，见 [fw worker](#fw-worker)；没配就不跑评估。
+- 平台从不加载上传的权重（`.pt`、`.pth` 是 pickle，加载时会执行里面的代码）：worker 只拿到 ONNX，ONNX 里没有能执行的代码。
 
 ### fw eval register、list、show
 
@@ -428,7 +428,7 @@ fw release show SES-TX-r3                  # 这次发布和它的追溯链
 推理环境就是 GPU 机上搭好的 conda 环境，一个框架一个（例如 `yolo26`、`detr-pro`）。平台只做 TensorRT 推理，推理环境都在 NVIDIA GPU 机上。评估、推理任务（第三步后面几个 PR）在模型登记的推理环境里跑。
 
 ```
-fw runner register detr-pro --env detr-pro --src ~/code/rf-detr-pro --framework rfdetr   # 在 GPU 机上，用 worker 账号
+fw runner register detr-pro --env detr-pro --framework rfdetr --onnx2engine /opt/deploy/onnx2engine   # 在 GPU 机上，用 worker 账号
 fw runner list
 fw runner show detr-pro
 fw runner check detr-pro                                              # 算法工程师：提交一个检查任务
@@ -438,14 +438,17 @@ fw runner check detr-pro                                              # 算法�
 |---|---|
 | `名称` | 推理环境名：字母、数字和 `. _ -`，全平台唯一 |
 | `--env` | conda 环境名 |
-| `--src` | 框架源码目录（git 仓库），团队改过框架时写；用 pip 装的官方版就不写。评估时传给 `deteval predict --src` |
-| `--framework` | `ultralytics` 或 `rfdetr`：aoi-deteval 用哪个框架推理。要用来评估的环境必须写，环境里要装好 aoi-deteval；改了也是新版本 |
+| `--src` | 框架源码目录（git 仓库），要记下哪个提交时写；不写也行 |
+| `--framework` | 用哪个部署代码的推理模块跑 TensorRT 引擎，现在只有 `rfdetr`（`py_rfdetr`）。要用来评估的环境必须写；改了也是新版本 |
+| `--onnx2engine` | 部署代码的 onnx2engine 程序（`onnx2engine model.onnx` 在旁边写出 `model.engine`），和 `--framework` 一起写；登记它的路径和文件哈希，程序换了（重新编译）就是新版本 |
+
+评估用的环境里要有：`tensorrt`（Python 包，读版本用）、OpenCV（`cv2`）、部署代码的推理模块（`py_rfdetr`，能 `import`）、aoi-deteval（只用 `deteval evaluate`）。onnx2engine 在这个环境里运行（`conda run`），所以它找得到环境里的 TensorRT 库；机器上要有 `nvidia-smi`。
 
 - 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希（包清单里网址带的账号密码、`?token=...` 这类参数和 conda 的 `/t/<token>/` 先去掉再传，私有源的凭据不会被别的账号看到；包的哈希保留）；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
 - 用 `pip install -e` 装的包，pip 的清单只记它的位置，不记它的代码；这样装的框架源码用 `--src` 登记，改动才看得出来。
 - 包清单、源码提交号或改动、所在机器有任何一样和最新一版不同，就登记成新版本（`detr-pro@2`）；完全一样就说「没有新版本」。版本只增不改。
 - 迁到别的 GPU 机：在那台机器装好同名环境，用它的 worker 账号再登记一次，新版本记的是新机器；以后的任务都发给那台机器。
-- `fw runner check` 提交一个任务：那台 GPU 机上的 worker 重新读包清单和源码，和登记的比，结果用 `fw job show` 看（「包清单没变 / 变了」「源码没变 / 变了」）。有人在环境里装了包、改了源码，这样就能看出来；要以新状态为准就再 `register` 一次。
+- `fw runner check` 提交一个任务：那台 GPU 机上的 worker 重新读包清单和源码，和登记的比（onnx2engine 程序算在环境里），结果用 `fw job show` 看（「包清单没变 / 变了」「源码没变 / 变了」）。有人在环境里装了包、改了源码，这样就能看出来；要以新状态为准就再 `register` 一次。
 
 ### fw job list、show、log、cancel
 
@@ -501,28 +504,6 @@ WantedBy=multi-user.target
 ```
 
 `sudo systemctl daemon-reload && sudo systemctl enable --now fw-worker`；看输出用 `journalctl -u fw-worker -f`。`ExecStart` 写 `which fw` 给出的路径。`Restart=always` 保证 worker 万一退出（升级、出错）也会重新起来。
-
-**跑模型用单独的账号（必配）。** 评估要加载上传的权重，`.pt`、`.pth` 是 pickle，加载时会执行里面的代码，带恶意代码的权重能以运行它的账号做任何事。worker 自己的账号存着 worker 令牌，所以加载权重的命令（aoi-deteval）由 worker 通过 sudo 切到另一个低权限账号运行，环境变量清空（只留 `CUDA_VISIBLE_DEVICES`、`NVIDIA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、`LANG`、`LC_ALL`、`TZ`）。在 GPU 机上配一次（以 worker 账号 `fwworker`、模型账号 `fwmodel` 为例）：
-
-```
-sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin fwmodel
-echo 'fwworker ALL=(fwmodel) NOPASSWD: /usr/bin/env' | sudo tee /etc/sudoers.d/fw-worker
-sudo chmod 0440 /etc/sudoers.d/fw-worker && sudo visudo -c
-echo fwmodel | sudo tee -a /etc/cron.deny /etc/at.deny   # 装了 cron、at 时：不让它留定时任务
-sudo usermod -aG video fwmodel                           # 用 GPU（按机器上的设备权限）
-sudo mkdir -p /srv/fw-jobs && sudo chown fwworker: /srv/fw-jobs && sudo chmod 0711 /srv/fw-jobs
-chmod 0700 /home/fwworker                                # worker 的配置（令牌）和缓存，模型账号读不到
-```
-
-worker 的 systemd 服务里加上 `Environment=FW_RUN_AS=fwmodel` 和 `Environment=FW_WORK_DIR=/srv/fw-jobs`。
-
-- 任务目录（`FW_WORK_DIR`）要放在 worker 家目录以外（家目录是 0700，模型账号进不去），上面的 `/srv/fw-jobs` 就是。conda 和推理环境、`--src` 的框架源码也要放在模型账号能读、但不能写的地方（例如 `/opt/conda`，属主 worker 账号或 root，0755）：它能写的话，可以改掉 worker 运行的 `pip freeze`、`git` 和以后的评估。
-- 模型账号自己的家目录它不能写（上面用的是不存在的 `/nonexistent`）。每条命令另给一个新的空家目录和临时目录（在任务目录里，跑完删掉），并设 `PYTHONNOUSERSITE=1`：一条命令放下的东西（`~/.local` 里的 `.pth`、`~/.condarc`）到不了下一条命令。
-- worker 每次跑模型前自检，有一项不满足就不跑、任务失败并说明：sudo 切得过去；模型账号写不了自己的家目录、读不了 worker 的配置文件、写不了推理环境和框架源码、进得了任务目录；装了 cron、at 时它用不了。
-- 模型命令写出的文件，worker 先拷到自己的目录再读、再上传：只收模型账号自己的普通文件，有链接（指向 worker 令牌的符号链接、硬链接）整次输出都不用，任务失败。evaluate 读的是 worker 拷出的预测文件，上传的预测是 evaluate 运行之前读下的。
-- 一台 worker 用一个专用的模型账号，不要给别的用途：命令结束或取消时，worker 会杀掉这个账号的所有进程（worker 杀不了别的账号的进程，只能这样清理）。
-- 没配 `FW_RUN_AS`、账号不存在、是 root 或 worker 自己，评估任务都直接失败并说明原因。检查任务（`fw runner check`）不加载权重，不需要它。
-- 权重里自带的类别顺序平台看不到，以模型版本登记的类别表为准；两者不一致时指标会错，由训练时保证（aoi-deteval 以后可以加核对）。
 
 ## 在训练脚本里用
 
@@ -746,7 +727,6 @@ FW_SERVER=http://<平台>:8000 FW_TOKEN=<凭据> python tools/bench.py --pairs 1
 | `FW_CACHE` | 本机缓存的位置 |
 | `FW_CONDA` | `fw runner`、`fw worker` 用的 conda 可执行文件；不设就找 PATH 里的 `conda`，再找 `CONDA_EXE` |
 | `FW_WORK_DIR` | `fw worker` 摆放任务文件（权重、图片、输出）的目录，默认是缓存目录下的 `jobs/`；相对路径按启动 worker 时的当前目录算；每个任务一个子目录，跑完删掉 |
-| `FW_RUN_AS` | `fw worker` 运行模型代码（aoi-deteval）用的低权限系统账号，必配，见 [fw worker](#fw-worker) |
 | `FW_KEEP_WORK` | 设了（例如 `1`）就不删跑完的任务目录，查问题时用 |
 
 默认位置：

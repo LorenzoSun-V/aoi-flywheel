@@ -1,6 +1,11 @@
 """Evaluation jobs: the platform runs aoi-deteval on a model version (docs/architecture.md, 统一评估).
 
-Submitting pins everything the job will read: the model version (its weights), the test images (chosen folders
+Models are only ever run as TensorRT engines: the worker builds one on its GPU machine from the model version's
+registered ONNX with the runner's onnx2engine (cached there by ONNX, program, environment and GPU; never uploaded
+or released: a site builds its own engine from the same ONNX) and runs it with the deploy code's inference
+module. Uploaded weights (.pt / .pth, pickles that run code when loaded) are never loaded.
+
+Submitting pins everything the job will read: the model version (its ONNX), the test images (chosen folders
 of a dataset version, or one split of a training-set snapshot, written to the store as a manifest of their
 own: the job's input list) and the runner version (the conda environment and framework source on one GPU
 machine). The worker lays out those files, runs `deteval predict` and `deteval evaluate` in that environment
@@ -24,8 +29,6 @@ from .store import Store, StoreError
 
 TOOL = 'aoi-deteval'
 DETEVAL_NAME = re.compile(r'[^A-Za-z0-9._+-]')
-MAX_IMGSZ = 8192
-MAX_BATCH = 256
 
 
 def _ref(ref: Any, what: str) -> tuple:
@@ -37,25 +40,13 @@ def _ref(ref: Any, what: str) -> tuple:
     return name, (number if sep else 'latest')
 
 
-def _option(params: dict, key: str, top: int, what: str) -> Optional[int]:
-    value = params.get(key)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= top:
-        raise DatasetError(400, f'{what}应为 1 到 {top} 的整数')
-    return value
-
-
-def _weights(conn, mv: dict) -> List[list]:
-    """The model version's weights file and, for RF-DETR, files/training_config.json (aoi-deteval reads the
-    training resolution from it, next to the weights)."""
+def _onnx(conn, mv: dict) -> List[list]:
+    """The model version's ONNX, which the worker builds its engine from."""
     files = models.fileset_files(conn, mv['fileset_id'])
-    weights = [f for f in files if f['path'].startswith(models.WEIGHTS)]
-    if not weights:
-        raise DatasetError(400, f'{mv["ref"]} 没有登记权重（weights/），评不了；登记时用 --weights 带上 .pt 或 .pth')
-    out = [[weights[0]['path'], weights[0]['sha256'], weights[0]['size']]]
-    out += [[f['path'], f['sha256'], f['size']] for f in files if f['path'] == 'files/training_config.json']
-    return out
+    onnx = [f for f in files if f['path'] == 'model.onnx']
+    if not onnx:
+        raise DatasetError(400, f'{mv["ref"]} 没有 model.onnx，评不了')
+    return [['model.onnx', onnx[0]['sha256'], onnx[0]['size']]]
 
 
 def _overlap(conn, mv: dict, images: List[tuple]) -> Optional[str]:
@@ -118,9 +109,9 @@ def _known_names(store: Store, files: List[tuple], mv: dict) -> None:
 
 def submit(conn, store: Store, user: dict, runner: Optional[str], params: Optional[dict]) -> dict:
     """params: model (a model version), data (a dataset version, or a snapshot's split as NAME@N:test), dirs (folders
-    of the dataset version; none = all of it), imgsz and batch (passed on to deteval predict)."""
+    of the dataset version; none = all of it)."""
     params = dict(params or {})
-    unknown = sorted(set(params) - {'model', 'data', 'dirs', 'imgsz', 'batch'})
+    unknown = sorted(set(params) - {'model', 'data', 'dirs'})
     if unknown:
         raise DatasetError(400, f'评估任务不认识这些参数：{"、".join(unknown)}')
     mv = models.get_model_version(conn, *_ref(params.get('model'), '评哪个模型版本'))
@@ -136,13 +127,11 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
         raise DatasetError(400, '训练集快照按划分评，不选目录')
     if not snapshot and split:
         raise DatasetError(400, f'{version["ref"]} 不是训练集快照，不用写划分；要评其中几个目录就用 --dirs')
-    imgsz = _option(params, 'imgsz', MAX_IMGSZ, '推理尺寸')
-    batch = _option(params, 'batch', MAX_BATCH, '批量')
     rv = jobs.find_runner(conn, runner, '评估')
     if not rv['framework']:
-        raise DatasetError(400, f'推理环境 {rv["ref"]} 登记时没写框架（--framework ultralytics 或 rfdetr），'
-                                '评不了；在 GPU 机上带 --framework 再登记一次')
-    weights = _weights(conn, mv)
+        raise DatasetError(400, f'推理环境 {rv["ref"]} 登记时没写框架和 onnx2engine，评不了；'
+                                '在 GPU 机上带 --framework rfdetr --onnx2engine <程序> 再登记一次')
+    onnx = _onnx(conn, mv)
     try:
         files, images, problems = eval_selection(datasets.version_files(conn, version['id']), snapshot, split, dirs)
         dirs = [] if snapshot else eval_dirs(dirs)
@@ -163,11 +152,11 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     except StoreError as e:
         raise DatasetError(503, str(e)) from None
     job_params = {
-        'model': {'id': mv['id'], 'ref': mv['ref'], 'files': weights, 'classes': mv['classes']},
+        'model': {'id': mv['id'], 'ref': mv['ref'], 'files': onnx, 'classes': mv['classes']},
         'data': {'id': version['id'], 'ref': version['ref'], 'snapshot': snapshot, 'split': split, 'dirs': dirs,
                  'inputs_sha256': inputs, 'images': len(images), 'files': len(files)},
         'runner': jobs.runner_params(rv),
-        'deteval': {'name': DETEVAL_NAME.sub('_', f'{mv["model"]}_{mv["number"]}'), 'imgsz': imgsz, 'batch': batch},
+        'deteval': {'name': DETEVAL_NAME.sub('_', f'{mv["model"]}_{mv["number"]}')},
         'warnings': warnings}
     return jobs.enqueue(conn, user, 'eval', rv, job_params)
 
