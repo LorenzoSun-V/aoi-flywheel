@@ -74,6 +74,7 @@ docker save aoi-flywheel-server:local postgres:16.15-bookworm | gzip > fw-images
 | `algo` 算法工程师 | 数据集、训练集快照；建模型、登记模型版本和评估报告、打标签；看发布和追溯链 |
 | `field` 现场实施 | 还不能用平台的数据和模型（批次上传下载在网页那步） |
 | `deploy` 部署 | 看模型和评估、取模型版本的文件（取不了数据集）；登记发布；看追溯链 |
+| `worker` GPU worker | 每台 GPU 机一个：登记推理环境（conda 环境），领取、运行和交回任务 |
 
 每台机器一个凭据，能列出、能吊销；停用账号会立即吊销它的全部凭据。
 
@@ -109,6 +110,9 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 | `fw eval register SES-TX-detr@3 --testset SES-TX-det@2:test --deteval results/` | 登记 aoi-deteval 的评估结果 |
 | `fw release register --model SES-TX-detr@3 --deploy-repo … --deploy-commit …` | 部署成功后登记发布（部署账号） |
 | `fw model chain SES-TX-r3 --check` | 追溯链：发布 → 模型版本 → 训练集快照 → 数据池版本 |
+| `fw runner register detr-pro --env detr-pro --src ~/code/rf-detr-pro` | 在 GPU 机上登记推理环境（worker 账号） |
+| `fw worker` | 在 GPU 机上常驻，领取并运行任务 |
+| `fw job list` / `fw job show 12` / `fw job cancel 12` | 看任务队列、任务结果；取消任务 |
 
 每条命令的全部选项、输出怎么看、缓存放在哪和怎么挪（`FW_CACHE`）、Windows 上的安装问题，见[命令手册](docs/commands.md)。
 

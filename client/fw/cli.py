@@ -7,16 +7,17 @@ import getpass
 import os
 import signal
 import sys
+import time
 import unicodedata
 
 import httpx
 
-from . import __version__, config, ops
+from . import __version__, config, ops, worker
 from .api import Api, ApiError
 from .cache import Cache
 from .contract import ContractError
 
-ROLE_NAMES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'deploy': '部署'}
+ROLE_NAMES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'deploy': '部署', 'worker': 'GPU worker'}
 KINDS = {'pool': '数据池', 'test': '测试集', 'regression': '回归集', 'other': '其他'}  # what fw dataset create makes
 KIND_NAMES = dict(KINDS, trainset='训练集快照')  # trainsets are made by fw trainset create only
 
@@ -352,6 +353,114 @@ def cmd_eval_show(args, api: Api) -> None:
     _show_metrics(e['metrics'])
 
 
+def _runner_text(r: dict) -> str:
+    src = (f'{r["src_dir"]} @ {r["src_commit"][:12]}{"（有未提交的改动）" if r["src_dirty"] else ""}'
+           if r['src_dir'] else '（没登记源码）')
+    return f'conda 环境 {r["conda_env"]}（包清单 {r["env_sha256"][:12]}），源码 {src}'
+
+
+def cmd_runner_register(args, api: Api) -> None:
+    r = worker.register_runner(api, args.name, args.env, args.src or '')
+    if r['created']:
+        print(f'已登记 {r["ref"]}（在 {r["worker"]} 上）：{_runner_text(r)}')
+    else:
+        print(f'和 {r["ref"]} 一样，没有新版本：{_runner_text(r)}')
+
+
+def cmd_runner_list(args, api: Api) -> None:
+    rows = api.runners()
+    if not rows:
+        print('还没有推理环境；在 GPU 机上用 worker 账号运行 fw runner register 登记')
+        return
+    _table(['推理环境', '机器', 'conda 环境', '包清单', '源码提交', '登记时间'],
+           [[r['ref'], r['worker'], r['conda_env'], r['env_sha256'][:12],
+             (r['src_commit'][:12] + ('*' if r['src_dirty'] else '')) if r['src_commit'] else '-',
+             _when(r['created_at'])] for r in rows])
+
+
+def cmd_runner_show(args, api: Api) -> None:
+    for r in api.runner(args.name):
+        print(f'{r["ref"]}  {_when(r["created_at"])}  {r["worker"]}：{_runner_text(r)}')
+
+
+def cmd_runner_check(args, api: Api) -> None:
+    job = api.submit_job('check', runner=args.name)
+    print(f'已提交任务 {job["id"]}：在 {job["runner"]} 所在的机器上检查环境和源码有没有变；'
+          f'前面还有 {job["queued_ahead"]} 个任务。看结果：fw job show {job["id"]}')
+
+
+def _job_row(j: dict) -> list:
+    status = j['status_text'] + ('（取消中）' if j['cancel_requested'] and j['status'] == 'running' else '')
+    if j['status'] == 'queued' and j['queued_ahead']:
+        status += f'（前面 {j["queued_ahead"]} 个）'
+    return [j['id'], j['kind_text'], j['runner'] or '-', status, j['worker'] or '-', j['submitted_by'],
+            _when(j['created_at'])]
+
+
+def cmd_job_list(args, api: Api) -> None:
+    rows = api.jobs(args.status or '', args.limit)
+    if not rows:
+        print('没有任务')
+        return
+    _table(['编号', '类型', '推理环境', '状态', 'worker', '提交人', '提交时间'], [_job_row(j) for j in rows])
+
+
+def _print_job(j: dict) -> None:
+    print(f'任务 {j["id"]}：{j["kind_text"]}' + (f'，推理环境 {j["runner"]}' if j['runner'] else '')
+          + f'，{j["submitted_by"]} 提交于 {_when(j["created_at"])}')
+    print(f'状态：{_job_row(j)[3]}，领取 {j["attempts"]}/{j["max_attempts"]} 次'
+          + (f'，在 {j["worker"]} 上运行' if j['worker'] else ''))
+    for h in j.get('history', []):
+        how = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '失联（租约过期）', None: '运行中'}
+        print(f'  第 {h["attempt"]} 次：{h["worker"]}，{_when(h["started_at"])} 开始，{how[h["outcome"]]}')
+    if j['error']:
+        print(f'原因：{j["error"]}')
+    if j['result'] is not None:
+        if j['kind'] == 'check':
+            r = j['result']
+            print('结果：包清单' + ('没变' if r['same_env'] else '变了') + '，源码' + ('没变' if r['same_src'] else '变了'))
+        else:
+            print(f'结果：{j["result"]}')
+
+
+def cmd_job_show(args, api: Api) -> None:
+    _print_job(api.job(args.id))
+
+
+def cmd_job_log(args, api: Api) -> None:
+    after = -1
+    while True:
+        piece = api.job_log(args.id, args.attempt, after)
+        for p in piece['pieces']:
+            sys.stdout.write(p['text'])
+            after = p['seq']
+        sys.stdout.flush()
+        if not args.follow or piece['status'] in ('done', 'failed', 'cancelled'):
+            if args.follow:
+                print(f'（任务{api.job(args.id)["status_text"]}）')
+            return
+        time.sleep(2)
+
+
+def cmd_job_cancel(args, api: Api) -> None:
+    j = api.cancel_job(args.id)
+    if j['status'] == 'cancelled':
+        print(f'任务 {j["id"]} 已取消')
+    else:
+        print(f'已通知 {j["worker"]} 停下任务 {j["id"]}；它在下次续租时停下（默认最多约 20 秒）并报告已取消')
+
+
+def cmd_worker(args, api: Api) -> None:
+    me = api.me()
+    if me['role'] != 'worker':
+        raise ops.FwError(f'fw worker 要用 worker 账号的凭据（现在是 {ROLE_NAMES.get(me["role"], me["role"])}账号 '
+                          f'{me["name"]}）；管理员用 fw-server user add <名字> --role worker 建账号')
+    print(f'worker {me["name"]} 开始领任务（Ctrl+C 停止；停下时正在跑的任务会在租约到期后回到队列）')
+    n = worker.run_worker(api, print, poll=args.poll, once=args.once)
+    if args.once:
+        print(f'队列里没有这台机器能做的任务了，这次做了 {n} 个')
+
+
 def cmd_release_register(args, api: Api) -> None:
     ops.register_release(api, args.model, args.deploy_repo, args.deploy_commit, args.deployed_at, args.site,
                          args.line, args.gpu, args.trt, args.precision, args.engine_file, args.note)
@@ -568,6 +677,44 @@ def build_parser() -> argparse.ArgumentParser:
     s = rl.add_parser('show', help='看一次发布和它的追溯链')
     s.add_argument('ref', help='发布编号，例如 SES-TX-r3')
     s.set_defaults(func=cmd_release_show)
+
+    rn = sub.add_parser('runner', help='推理环境（GPU 机上的 conda 环境）：register、list、show、check').add_subparsers(
+        dest='cmd', required=True)
+    s = rn.add_parser('register', help='在 GPU 机上用 worker 账号登记一个推理环境；环境或源码变了再登记就是新版本')
+    s.add_argument('name', help='推理环境名，例如 yolo26、detr-pro')
+    s.add_argument('--env', required=True, help='conda 环境名')
+    s.add_argument('--src', help='框架源码目录（git 仓库）；用 pip 装的官方版框架就不写')
+    s.set_defaults(func=cmd_runner_register)
+    s = rn.add_parser('list', help='列出推理环境（每个的最新版本）')
+    s.set_defaults(func=cmd_runner_list)
+    s = rn.add_parser('show', help='一个推理环境的全部版本')
+    s.add_argument('name')
+    s.set_defaults(func=cmd_runner_show)
+    s = rn.add_parser('check', help='提交一个任务，在 GPU 机上检查环境和源码有没有变')
+    s.add_argument('name', help='推理环境，例如 yolo26 或 yolo26@2')
+    s.set_defaults(func=cmd_runner_check)
+
+    jb = sub.add_parser('job', help='任务：list、show、log、cancel').add_subparsers(dest='cmd', required=True)
+    s = jb.add_parser('list', help='列出任务，最新的在前')
+    s.add_argument('--status', choices=['queued', 'running', 'done', 'failed', 'cancelled'])
+    s.add_argument('--limit', type=int, default=50)
+    s.set_defaults(func=cmd_job_list)
+    s = jb.add_parser('show', help='看一个任务的状态、每次领取和结果')
+    s.add_argument('id', type=int)
+    s.set_defaults(func=cmd_job_show)
+    s = jb.add_parser('log', help='看任务的输出')
+    s.add_argument('id', type=int)
+    s.add_argument('--attempt', type=int, default=0, help='第几次领取的输出（默认最近一次）')
+    s.add_argument('-f', '--follow', action='store_true', help='一直跟着，直到任务结束')
+    s.set_defaults(func=cmd_job_log)
+    s = jb.add_parser('cancel', help='取消任务：排队的立即取消，运行中的通知 worker 停下')
+    s.add_argument('id', type=int)
+    s.set_defaults(func=cmd_job_cancel)
+
+    s = sub.add_parser('worker', help='在 GPU 机上常驻，领取并运行任务（要 worker 账号）')
+    s.add_argument('--poll', type=float, default=5.0, help='没有任务时每隔几秒问一次（默认 5）')
+    s.add_argument('--once', action='store_true', help='把能做的任务做完就退出')
+    s.set_defaults(func=cmd_worker)
 
     s = sub.add_parser('get', help='把一个版本取到本地目录')
     s.add_argument('ref', help='版本，例如 SES-TX@3；只写名称就是最新版')

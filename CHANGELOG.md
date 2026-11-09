@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.3.0（未发布）
+
+第三步之一：任务队列和 GPU worker。后面的评估、预标注、引擎构建都是在这上面排队的任务。
+
+- 新角色 `worker`（GPU worker）：每台 GPU 机一个账号，`fw-server user add gpu-01 --role worker`。
+- 推理环境：`fw runner register <名称> --env <conda 环境> [--src <框架源码>]` 在 GPU 机上登记，记下 `conda list --explicit` 的包清单（传到平台）和源码的 git 提交号；变了再登记就是新版本。`fw runner list`、`show`；`fw runner check` 提交一个任务，在那台机器上检查环境和源码有没有变。
+- 任务队列：`fw job list`、`show`、`log [-f]`、`cancel`。任务按提交顺序排队，只发给推理环境所在的机器。
+- `fw worker`：在 GPU 机上常驻，领取、运行、交回任务，输出实时传回平台。每次领取有自己的令牌和 60 秒的租约（`FW_JOB_LEASE_SECONDS`），每 20 秒续一次；worker 掉线后任务自动回到队列，旧令牌的续租、日志和结果一律拒绝；领取 3 次都失联算失败。取消运行中的任务时，worker 杀掉正在跑的命令连同它的子进程。
+- 平台上的模型只做 TensorRT 推理（NVIDIA GPU），不支持其他硬件（2026-11-09 定）。
+- 数据库迁移 0005（任务、推理环境、worker 角色）。
+
 ## 0.2.3（未发布）
 
 按 SES-TX 实测（`tx_v8`：`images/1.bmp` + `labels/1.txt`）修正。
