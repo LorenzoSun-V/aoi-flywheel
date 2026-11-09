@@ -150,7 +150,7 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 结束的任务不再变，任务不能删；推理环境的版本只增不改 | 数据库触发器（`0005_jobs.sql`） | `test_finish_is_safe_to_repeat_and_final` |
 | 交结果、发日志可以安全重发（同一次领取、同样的结束方式返回已有的，两个同时到也一样：先拿行锁再查；同一序号的日志只存一次）；日志每段编号一次，没收到回应就带原编号重发，下一段不会占用它；同一时刻只有一个线程发日志，任务结束时等续租线程还没回来的请求，不并发重发同一段；`fw job log -f` 遇到重新领取时从新一次的开头读 | `jobs.finish`、`add_log`，`Api.post_retried`，`worker.JobRun._send_log`，`cli.cmd_job_log` | `test_finish_is_safe_to_repeat_and_final`、`test_two_identical_finishes_at_once_both_get_the_job`、`test_the_end_of_a_job_waits_for_a_log_request_still_on_its_way`、`test_a_log_piece_whose_answer_was_lost_keeps_its_number`、`test_following_the_log_across_a_second_claim` |
 | worker 收到取消或租约失效时，杀掉正在跑的命令和它启动的子进程（单独的进程组，读包清单的 conda、读源码的 git 也一样）；命令自己结束时，它留在组里的进程也杀掉，不会占着输出管道拖住任务；租约失效时不交结果 | `worker.JobRun._spawn`、`capture`、`_ended`、`_kill`、`execute` | `test_cancel`、`test_worker_stops_when_its_lease_is_taken_back`、`test_cancel_stops_a_real_check_with_its_children`、`test_what_a_command_leaves_running_never_holds_up_the_job`、`test_cancel_stops_a_check_whose_git_hangs` |
-| 平台重启、网络断开时 worker 不退出：领任务失败就等一会儿再领；交结果失败就重试并续租，到租约到期为止；一个任务出错不影响下一个 | `worker.run_worker`、`JobRun._finish`、`transient` | `test_the_worker_rides_out_a_platform_restart` |
+| 平台重启、网络断开时 worker 不退出：领任务失败就等一会儿再领；交结果失败就重试并续租，最多 `FINISH_RETRY_SECONDS`（10 分钟），之后不再续租让租约到期，期间收到取消就交已取消；一个任务出错不影响下一个 | `worker.run_worker`、`JobRun._finish`、`transient` | `test_the_worker_rides_out_a_platform_restart`、`test_a_result_the_platform_keeps_refusing_with_5xx_does_not_hang_the_worker` |
 | 任务只发给推理环境所在的机器 | `jobs.claim` | `test_jobs_go_only_to_the_runners_machine` |
 | 恢复时核对全部通过才对外服务，失败换回原数据库；恢复后追溯链一样完整 | `deploy/restore.sh` | CI 的部署演练（`tools/deploy-drill.sh`） |
 
