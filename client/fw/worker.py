@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -48,14 +49,24 @@ def conda_executable() -> str:
     return found
 
 
-Capture = Callable[[List[str]], Tuple[int, bytes, bytes]]  # argv -> (exit status, stdout, stderr)
+Capture = Callable[..., Tuple[int, bytes, bytes]]  # (argv, env=None) -> (exit status, stdout, stderr)
 PIP_HEADER = b'\n# pip freeze --all\n'
+# What a package listing must not keep (it is stored and other accounts can read it): the user and password in
+# a URL, its query (signed URLs, ?token=...) and conda's token path (/t/<token>/). The fragment stays: it is the
+# package's hash (#md5=..., #sha256=...).
+_URL = re.compile(rb'([A-Za-z][A-Za-z0-9+.-]*://)(?:[^/\s@]*@)?([^\s?#]*)(?:\?[^\s#]*)?')
+_CONDA_TOKEN = re.compile(rb'/t/[^/\s]+/')
 
 
-def plain_capture(argv: List[str]) -> Tuple[int, bytes, bytes]:
+def redact(listing: bytes) -> bytes:
+    """The listing without credentials (see _URL); the same listing always gives the same bytes."""
+    return _URL.sub(lambda m: m.group(1) + _CONDA_TOKEN.sub(b'/t/<token>/', m.group(2)), listing)
+
+
+def plain_capture(argv: List[str], env: Optional[dict] = None) -> Tuple[int, bytes, bytes]:
     """Outside a job (fw runner register): run and wait, at most 5 minutes."""
     try:
-        r = subprocess.run(argv, capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
+        r = subprocess.run(argv, capture_output=True, timeout=300, stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.SubprocessError) as e:
         raise WorkerError(f'运行 {argv[0]} 失败：{e}') from None
     return r.returncode, r.stdout, r.stderr
@@ -65,7 +76,7 @@ def conda_listing(env: str, capture: Optional[Capture] = None) -> bytes:
     """What the environment holds: `conda list -n <env> --explicit` (every conda package with its exact build),
     then `pip freeze --all` run in it (packages installed with pip, which the conda listing leaves out). Its
     sha256 tells whether the environment changed since it was registered. An environment without pip gets a
-    line saying so."""
+    line saying so. Credentials in package URLs are left out (redact)."""
     capture = capture or plain_capture
     conda = conda_executable()
     code, out, err = capture([conda, 'list', '-n', env, '--explicit'])
@@ -81,28 +92,29 @@ def conda_listing(env: str, capture: Optional[Capture] = None) -> bytes:
         if 'No module named pip' not in why:
             raise WorkerError(f'读不了 conda 环境 {env} 里 pip 装的包（返回 {code}）：{why[-2000:]}')
         pip = b'# no pip in this environment\n'
-    return out + PIP_HEADER + pip
+    return redact(out + PIP_HEADER + pip)
 
 
-def _git_bytes(folder: Path, *args: str) -> bytes:
+def _git(capture: Capture, folder: Path, *args: str) -> Tuple[int, bytes, bytes]:
+    # without GIT_* variables, which would point git at another repository than the folder asked for
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith('GIT_')}
-    try:
-        r = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, timeout=300, env=env,
-                           stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError) as e:
-        raise WorkerError(f'运行 git 失败：{e}') from None
-    if r.returncode != 0:
-        raise WorkerError(f'git {args[0]} 失败：{r.stderr.decode("utf-8", "replace").strip()[-500:]}')
-    return r.stdout
+    return capture(['git', '-C', str(folder), *args], env=env)
 
 
-def source_state(folder: Path) -> Optional[str]:
+def _git_bytes(folder: Path, *args: str, capture: Optional[Capture] = None) -> bytes:
+    code, out, err = _git(capture or plain_capture, folder, *args)
+    if code != 0:
+        raise WorkerError(f'git {args[0]} 失败：{err.decode("utf-8", "replace").strip()[-500:]}')
+    return out
+
+
+def source_state(folder: Path, capture: Optional[Capture] = None) -> Optional[str]:
     """sha256 of what the working copy has beyond its commit: the diff of tracked files (git diff HEAD --binary)
     and every untracked file that is not ignored, by path and content. None when there is nothing; so a second
     change to a source that already had uncommitted changes is seen too."""
-    diff = _git_bytes(folder, 'diff', 'HEAD', '--binary', '--no-color', '--no-ext-diff')
-    untracked = sorted(p for p in _git_bytes(folder, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0')
-                       if p)
+    diff = _git_bytes(folder, 'diff', 'HEAD', '--binary', '--no-color', '--no-ext-diff', capture=capture)
+    listed = _git_bytes(folder, 'ls-files', '--others', '--exclude-standard', '-z', capture=capture)
+    untracked = sorted(p for p in listed.split(b'\0') if p)
     if not diff and not untracked:
         return None
     h = hashlib.sha256(b'diff\0' + diff)
@@ -117,20 +129,24 @@ def source_state(folder: Path) -> Optional[str]:
     return h.hexdigest()
 
 
-def source_info(src_dir: str) -> Dict[str, object]:
+def source_info(src_dir: str, capture: Optional[Capture] = None) -> Dict[str, object]:
     """The framework source's commit, and whether (and how) the working copy differs from it (see
-    source_state); '' src_dir = no source."""
+    source_state); '' src_dir = no source. capture: how git is run (in a job: JobRun.capture, cancellable)."""
     if not src_dir:
         return {'src_dir': '', 'src_commit': None, 'src_dirty': False, 'src_state_sha256': None}
-    from .ops import git_info  # ops is the heavier module; only this needs it
+    capture = capture or plain_capture
     folder = Path(src_dir).expanduser()
     if not folder.is_dir():
         raise WorkerError(f'源码目录不存在：{folder}')
-    info = git_info(folder)
-    if info is None:
+    try:
+        code, out, _ = _git(capture, folder, 'rev-parse', 'HEAD')
+    except WorkerError:
+        code, out = 1, b''
+    commit = out.decode('ascii', 'replace').strip().lower()
+    if code != 0 or not re.fullmatch(r'[0-9a-f]{7,64}', commit):
         raise WorkerError(f'{folder} 不是 git 仓库（或者没装 git）：源码要能看出是哪个提交')
-    state = source_state(folder)
-    return {'src_dir': str(folder.resolve()), 'src_commit': info['commit'], 'src_dirty': state is not None,
+    state = source_state(folder, capture)
+    return {'src_dir': str(folder.resolve()), 'src_commit': commit, 'src_dirty': state is not None,
             'src_state_sha256': state}
 
 
@@ -162,6 +178,7 @@ class JobRun:
         self.lock = threading.Lock()
         self.pending: List[str] = []
         self.outbox: Deque[Tuple[int, str]] = deque()  # numbered pieces not yet confirmed by the platform
+        self.sending = threading.Lock()  # one sender at a time: the lease thread, or the end of the job
         self.seq = 0
         self.keeper = threading.Thread(target=self._keep, name=f'job-{self.id}-lease', daemon=True)
 
@@ -176,7 +193,12 @@ class JobRun:
     def _send_log(self) -> None:
         """Send the output so far. Each piece gets its number once and is sent again with that number until the
         platform answers, so a piece the platform stored but whose answer was lost is not stored twice, and the
-        next piece never reuses its number."""
+        next piece never reuses its number. One sender at a time: a request of the lease thread still waiting
+        for an answer when the job ends is waited for, not raced (both would send the same piece)."""
+        with self.sending:
+            self._send_pending()
+
+    def _send_pending(self) -> None:
         with self.lock:
             text, self.pending = ''.join(self.pending), []
             while text:
@@ -237,11 +259,11 @@ class JobRun:
         self.log('$ ' + ' '.join(argv))
         return self._spawn(argv, cwd, env, lambda raw: self.log(raw.decode('utf-8', 'replace')), None)
 
-    def capture(self, argv: List[str]) -> Tuple[int, bytes, bytes]:
+    def capture(self, argv: List[str], env: Optional[dict] = None) -> Tuple[int, bytes, bytes]:
         """Run a command for its output (not logged): (exit status, stdout, stderr); see _spawn."""
         out: List[bytes] = []
         err: List[bytes] = []
-        code = self._spawn(argv, None, None, out.append, err.append)
+        code = self._spawn(argv, None, env, out.append, err.append)
         return code, b''.join(out), b''.join(err)
 
     def _spawn(self, argv: List[str], cwd: Optional[str], env: Optional[dict], on_out: Callable[[bytes], None],
@@ -320,8 +342,8 @@ class JobRun:
             if self.lost.is_set():
                 return 'lost'
             try:
-                self.api.finish(self.id, self.token, outcome, result if outcome == 'done' else None,
-                                error if outcome == 'failed' else '')
+                job = self.api.finish(self.id, self.token, outcome, result if outcome == 'done' else None,
+                                      error if outcome == 'failed' else '')
             except ApiError as e:
                 if outcome != 'done' or e.status != 400:
                     raise
@@ -329,13 +351,15 @@ class JobRun:
                 outcome = 'failed'
                 self.log(f'失败：平台没有收下结果：{e.message}')
                 self._send_log()
-                self.api.finish(self.id, self.token, 'failed', None, f'平台没有收下结果：{e.message}')
+                job = self.api.finish(self.id, self.token, 'failed', None, f'平台没有收下结果：{e.message}')
         except ApiError as e:
             if e.status == 409:
                 self.echo(f'任务 {self.id} 的租约已失效，结果没交上：{e.message}')
                 return 'lost'
             raise
-        return outcome
+        # what the platform recorded: a cancel accepted before the result came wins over it
+        status = job.get('status') if isinstance(job, dict) else None
+        return status if status in ('done', 'failed', 'cancelled') else outcome
 
 
 def _ended(proc: subprocess.Popen) -> bool:
@@ -379,7 +403,7 @@ def check_runner(run: JobRun, p: Optional[dict] = None) -> dict:
     listing = conda_listing(p['conda_env'], run.capture)
     digest = hashlib.sha256(listing).hexdigest()
     run.check()
-    src = source_info(p['src_dir'])
+    src = source_info(p['src_dir'], run.capture)
     run.check()
     same_env = digest == p['env_sha256']
     same_src = (src['src_commit'], src['src_state_sha256']) == (p['src_commit'], p.get('src_state_sha256'))

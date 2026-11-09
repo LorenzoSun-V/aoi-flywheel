@@ -440,7 +440,7 @@ fw runner check detr-pro                                              # 算法�
 | `--src` | 框架源码目录（git 仓库），团队改过框架时写；用 pip 装的官方版就不写。评估时传给 `deteval predict --src` |
 | `--framework` | `ultralytics` 或 `rfdetr`：aoi-deteval 用哪个框架推理。要用来评估的环境必须写，环境里要装好 aoi-deteval；改了也是新版本 |
 
-- 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
+- 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希（包清单里网址带的账号密码、`?token=...` 这类参数和 conda 的 `/t/<token>/` 先去掉再传，私有源的凭据不会被别的账号看到；包的哈希保留）；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
 - 用 `pip install -e` 装的包，pip 的清单只记它的位置，不记它的代码；这样装的框架源码用 `--src` 登记，改动才看得出来。
 - 包清单、源码提交号或改动、所在机器有任何一样和最新一版不同，就登记成新版本（`detr-pro@2`）；完全一样就说「没有新版本」。版本只增不改。
 - 迁到别的 GPU 机：在那台机器装好同名环境，用它的 worker 账号再登记一次，新版本记的是新机器；以后的任务都发给那台机器。

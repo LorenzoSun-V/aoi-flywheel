@@ -367,7 +367,9 @@ def _check_result(kind: str, result: Any) -> dict:
 
 def finished_already(conn, job_id: int, token: str, outcome: str) -> bool:
     """Did this claim already end the job, with this outcome or cancelled (a finish sent again after a network
-    error)?"""
+    error)? In a transaction; locks the job's row first, so that a second finish of the same claim waiting for it
+    then sees the first one's record."""
+    conn.execute('SELECT 1 FROM jobs WHERE id = %s FOR UPDATE', (job_id,))
     done = conn.execute('SELECT a.outcome FROM job_attempts a JOIN jobs j ON j.id = a.job_id '
                         'WHERE a.job_id = %s AND a.lease_sha256 = %s AND j.status = a.outcome',
                         (job_id, _hash(token or ''))).fetchone()

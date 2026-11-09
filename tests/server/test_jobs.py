@@ -634,3 +634,137 @@ def test_a_log_piece_whose_answer_was_lost_keeps_its_number(api, make_worker, fa
     run.log('two')
     run._send_log()
     assert [p['text'] for p in api.job_log(job['id'])['pieces']] == ['one\n', 'two\n']
+
+
+# --- re-review of PR #12 ---------------------------------------------------------------------------------
+def test_a_runner_listing_keeps_no_credentials(api, make_worker, fake_conda):
+    """pip freeze keeps a private index's URL with its token and conda keeps /t/<token>/: the stored listing
+    (other accounts can read it) has neither, and the check compares the listing the same way."""
+    w = make_worker()
+    name = f'priv-{uuid.uuid4().hex[:6]}'
+    fake_conda(name, '@EXPLICIT\nhttps://conda.example/t/tk-SECRET1/main/linux-64/a-1.0-0.tar.bz2#0123abcd\n',
+               pip='numpy==1.26.4\n'
+                   'mylib @ https://bob:PASSWORD2@pypi.example/mylib-1.0-py3-none-any.whl?token=SECRET3#sha256=ab12\n'
+                   'other @ git+https://SECRET4@git.example/other.git@0123456789abcdef\n')
+    r = worker.register_runner(w, name, name, '')
+    stored = w.read_object(r['env_sha256'])
+    for secret in (b'SECRET1', b'PASSWORD2', b'bob', b'SECRET3', b'SECRET4'):
+        assert secret not in stored
+    assert b'https://pypi.example/mylib-1.0-py3-none-any.whl#sha256=ab12' in stored
+    assert b'https://conda.example/t/<token>/main/linux-64/a-1.0-0.tar.bz2#0123abcd' in stored
+    assert b'git.example/other.git@0123456789abcdef' in stored
+    job = api.submit_job('check', runner=r['ref'])
+    worker.run_worker(w, quiet, once=True)
+    assert api.job(job['id'])['result']['same_env'] is True
+
+
+def test_cancel_stops_a_check_whose_git_hangs(api, make_service, make_worker, fake_conda, tmp_path, monkeypatch):
+    """The check reads the source with git like any command: a git diff that hangs (a slow disk, a filter) is
+    killed by the cancel, and the job ends at once."""
+    import shutil
+    svc = make_service(job_lease_seconds=3)
+    w = make_worker(svc)
+    name = f'git-{uuid.uuid4().hex[:6]}'
+    fake_conda(name, '@EXPLICIT\n')
+    src = git_repo(tmp_path / 'src')
+    r = worker.register_runner(w, name, name, str(src))
+    real = shutil.which('git')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    pids = tmp_path / 'git.pids'
+    (bin_dir / 'git').write_text('#!/bin/sh\n'
+                                 'for a in "$@"; do [ "$a" = diff ] && '
+                                 f'{{ sleep 64 & echo "$$ $!" > "{pids}"; wait; exit 0; }}; done\n'
+                                 f'exec "{real}" "$@"\n')
+    (bin_dir / 'git').chmod(0o755)
+    monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    algo = Api(svc.url, api.http.headers['authorization'].split(' ', 1)[1])
+    job = algo.submit_job('check', runner=r['ref'])
+    t = threading.Thread(target=lambda: worker.run_worker(w, quiet, once=True))
+    t.start()
+    for _ in range(100):
+        if pids.exists() and pids.read_text().strip():
+            break
+        time.sleep(0.1)
+    parent, child = map(int, pids.read_text().split())
+    t0 = time.monotonic()
+    algo.cancel_job(job['id'])
+    t.join(30)
+    assert not t.is_alive() and time.monotonic() - t0 < 10
+    assert algo.job(job['id'])['status'] == 'cancelled'
+    assert not alive(parent) and not alive(child)
+    algo.close()
+
+
+def test_the_end_of_a_job_waits_for_a_log_request_still_on_its_way(api, make_worker, fake_conda):
+    """The lease thread's log request hangs past its join: the end of the job does not send the same piece
+    again beside it, and both senders finish without an error."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    run = worker.JobRun(w, w.claim(), quiet)
+    calls, release, errors = [], threading.Event(), []
+
+    class Slow:
+        def add_log(self, job_id, token, seq, text):
+            calls.append(seq)
+            if len(calls) == 1:
+                release.wait(10)  # the first request takes long
+            w.add_log(job_id, token, seq, text)
+
+    run.api = Slow()
+    run.log('one')
+
+    def send():
+        try:
+            run._send_log()
+        except Exception as e:  # noqa: BLE001 - the test reports it
+            errors.append(e)
+
+    keeper = threading.Thread(target=send)
+    keeper.start()
+    while not calls:
+        time.sleep(0.01)
+    threading.Timer(0.5, release.set).start()
+    send()  # the end of the job
+    keeper.join(10)
+    assert not errors and calls == [0]
+    assert [p['text'] for p in api.job_log(job['id'])['pieces']] == ['one\n']
+
+
+def test_two_identical_finishes_at_once_both_get_the_job(api, make_worker, fake_conda, database):
+    """A finish retried while the first one still waits for the row: both answer with the finished job."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    c = w.claim()
+    result = {'env_sha256': '0' * 64, 'same_env': True, 'same_src': True}
+    answers = []
+    with db.connect(database) as other:
+        with other.transaction():
+            other.execute('SELECT id FROM jobs WHERE id = %s FOR UPDATE', (job['id'],))
+            ts = [threading.Thread(target=lambda: answers.append(
+                status_of(lambda: w.finish(job['id'], c['token'], 'done', result))))
+                for _ in range(2)]
+            for t in ts:
+                t.start()
+            time.sleep(1)  # both are waiting for the row
+        for t in ts:
+            t.join(30)
+    assert answers == [200, 200]
+    assert api.job(job['id'])['status'] == 'done'
+
+
+def test_the_worker_says_cancelled_when_the_cancel_won(api, make_worker, fake_conda):
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    said = []
+
+    def cancelled_meanwhile(run):
+        api.cancel_job(job['id'])  # accepted before the result is sent, not yet heard by the worker
+        return {'env_sha256': '0' * 64, 'same_env': True, 'same_src': True}
+
+    worker.run_worker(w, said.append, once=True, handlers={'check': cancelled_meanwhile})
+    assert api.job(job['id'])['status'] == 'cancelled'
+    assert said[-1] == f'任务 {job["id"]}：已取消'
