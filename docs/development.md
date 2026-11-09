@@ -37,6 +37,7 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
   cli.py             命令行参数和输出格式，只调 ops
   config.py          设置文件和缓存的位置
 server/fwserver/     fw-server：只支持 Linux
+  web/               网页：index.html、app.js（原生 ES 模块，不用构建）、style.css；fw-server 在 / 和 /web/ 下提供
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
   evals.py           评估任务：提交时定下模型权重、要评的图片清单和推理环境，交回时在同一个事务里登记评估报告
@@ -166,6 +167,8 @@ tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 | 预测集要和输入清单一一对应，框的类别在类别表里、分数不低于 conf，否则不登记 | `predictions.check_predictions` | `test_predictions_that_do_not_match_the_input_list_register_nothing` |
 | 预测集只由运行中的推理任务写一次，不改不删；文件集只属于一条记录 | 0007 的触发器、`require_fileset_owner` | `test_the_database_keeps_prediction_sets` |
 | 预标注：`checked=false`、带分数、框裁到图内；已有标注默认保留；阈值不低于 conf | `ops.get_predictions`、`prelabel_json` | `test_pre_labels_from_a_prediction_set` |
+| 网页只加载自己的脚本和样式，平台里的文字只当文字显示（不用 innerHTML）；只提供列出的几个文件 | `app.py` 的 `WEB_HEADERS`、`WEB_FILES`，`web/app.js` 的 `el()` | `test_the_pages_are_served_with_a_strict_policy` |
+| 网页走一遍：登录（错的凭据说明原因）、数据集、版本、目录、缩略图、看图和标注框、翻图、比较、退出，浏览器控制台没有报错 | `web/app.js` | `test_a_walk_through_the_pages`（要装 node 的 Playwright，CI 上没有就跳过）、`tests/web/helpers.test.mjs`（node --test） |
 | 推理环境变了（包清单、源码或 onnx2engine 程序）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails`、`test_an_engine_is_built_once_per_onnx_and_machine` |
 | 平台从不加载上传的权重：评估任务只带 `model.onnx`，worker 用推理环境登记的 onnx2engine 在本机建引擎（按 ONNX、程序、环境、显卡和驱动缓存，不上传），用部署代码的推理模块跑；写了框架就要登记 onnx2engine（路径和哈希） | `evals._onnx`、`worker.build_engine`、`fw/trt_predict.py`、`jobs.register_runner`、0006 的 CHECK | `test_eval_on_folders_of_a_pool`、`test_an_engine_is_built_once_per_onnx_and_machine`、`test_a_runner_for_evaluations_names_its_onnx2engine` |
 | 数据池上评估时，JSON 标注里的类别名都要在模型的类别表里 | `evals._known_names` | `test_pool_labels_must_name_classes_of_the_model` |
