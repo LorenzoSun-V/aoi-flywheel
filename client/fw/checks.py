@@ -4,13 +4,11 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import List, Tuple
 
-from .contract import IMAGE_EXTS, LABEL_EXTS, META_NAMES, collisions, path_problem, yolo_label_stem
-JUNK_NAMES = {'thumbs.db', 'desktop.ini', '.ds_store'}
+from .contract import IMAGE_EXTS, JUNK_NAMES, blocking_reasons, classify_paths  # noqa: F401  (IMAGE_EXTS: ops)
 _NAME_SURROGATE = 0x20000000  # Windows reparse tags with this bit lead somewhere else: symlinks, junctions
 
 
@@ -39,20 +37,7 @@ class FolderReport:
             reasons.append('有目录读不了，里面的文件会漏掉，新版本里就成了删除；先修好权限或磁盘')
         if self.links:
             reasons.append('有链接或特殊文件，只收普通文件和目录；先换成普通文件和目录')
-        if self.bad_paths:
-            reasons.append('有文件名在 Windows 或 Linux 上用不了，先改名')
-        if self.collisions:
-            reasons.append('有只差大小写、或同名的文件和目录，在 Windows 上会互相覆盖，先改名')
-        if self.same_stem_images and not force:
-            reasons.append('有同名不同扩展名的图片（比如 a.bmp 和 a.png），标注对不上；先清理，或确认无妨后加 --force')
-        if self.others and not allow_other_files:
-            reasons.append('有图片和标注以外的文件；先清理，或确认要一起入库后加 --allow-other-files')
-        return reasons
-
-
-def _stem(rel: str) -> str:
-    suffix = PurePosixPath(rel).suffix
-    return rel[: len(rel) - len(suffix)] if suffix else rel
+        return reasons + blocking_reasons(vars(self), allow_other_files, force)
 
 
 def _is_link(entry: os.DirEntry) -> bool:
@@ -109,38 +94,7 @@ def scan_folder(folder) -> FolderReport:
         raise FileNotFoundError(f'目录不存在：{root}')
     report = FolderReport(root=root)
     _walk(root, report)
-    image_stems: Dict[str, List[str]] = defaultdict(list)
-    label_stems = set()
-    txt_stems = set()
-    for rel, _ in report.files:
-        problem = path_problem(rel)
-        if problem:
-            report.bad_paths.append(f'{rel}：{problem}')
-        name = PurePosixPath(rel).name.lower()
-        ext = PurePosixPath(rel).suffix.lower()
-        if ext in IMAGE_EXTS:
-            report.images.append(rel)
-            image_stems[_stem(rel)].append(rel)
-        elif name in META_NAMES:
-            report.meta.append(rel)
-        elif ext in LABEL_EXTS:
-            report.labels.append(rel)
-            label_stems.add(_stem(rel))
-            if ext == '.txt':
-                txt_stems.add(_stem(rel))
-        else:
-            report.others.append(rel)
-    report.collisions = collisions(rel for rel, _ in report.files)
-    report.same_stem_images = [v for v in image_stems.values() if len(v) > 1]
-    # a label pairs like on the server (trainsets._samples): the same stem in the image's folder, or the .txt
-    # where YOLO looks for it (images/ -> labels/)
-    yolo = {s: yolo_label_stem(s + '.x') for s in image_stems}
-    report.unlabeled_images = sorted(s for s in image_stems if s not in label_stems and yolo[s] not in txt_stems)
-    yolo_found = {y for y in yolo.values() if y in txt_stems}  # only the .txt there is YOLO's
-    report.orphan_labels = sorted({_stem(rel) for rel in report.labels if _stem(rel) not in image_stems and not (
-        _stem(rel) in yolo_found and rel.lower().endswith('.txt'))})
-    by_name: Dict[str, List[str]] = defaultdict(list)
-    for rel in report.images:
-        by_name[PurePosixPath(_stem(rel)).name.lower()].append(rel)
-    report.same_name_in_dirs = [v for _, v in sorted(by_name.items()) if len({PurePosixPath(r).parent for r in v}) > 1]
+    found = classify_paths(rel for rel, _ in report.files)
+    for key, value in found.items():
+        setattr(report, key, value)
     return report

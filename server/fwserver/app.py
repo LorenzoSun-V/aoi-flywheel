@@ -13,8 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from fw.contract import (BATCH_OBJECT_MAX, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, ObjectTooLarge,
-                         frame_header)
+from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser,
+                         ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
 
 from . import __version__, auth, datasets, db, evals, jobs, models, predictions, trainsets
 from .datasets import DatasetError, check_digest
@@ -30,11 +30,19 @@ UPLOADERS = DATA_ROLES + ('worker',)         # upload files; a worker sends runn
 JOB_READERS = ('admin', 'algo', 'worker')    # see jobs, their logs and the runners
 JOB_WRITERS = ('admin', 'algo')              # submit and cancel jobs
 MISSING_LIMIT = 20000
+FOLDER_LIMIT = 1_000_000   # files of one folder checked from the web page
+FOLDER_EXAMPLES = 50       # how many of each problem the check lists
 BUFFER = 1 << 20
 BATCH_BODY_MAX = 512 << 20   # one batch upload request
 FETCH_LIMIT = 5000           # objects per batch download request
 FETCH_BYTES_MAX = 512 << 20
 STORE_GROUP = 4 << 20        # batch uploads are written to the store in groups of about this many bytes
+
+
+class FolderCheckBody(BaseModel):
+    paths: List[str] = Field(max_length=FOLDER_LIMIT)  # relative posix paths of every file in the folder
+    allow_other_files: bool = False
+    force: bool = False
 
 
 class MissingBody(BaseModel):
@@ -76,7 +84,8 @@ class FinishBody(LeaseBody):
 
 
 WEB = Path(__file__).with_name('web')
-WEB_FILES = {'app.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}
+WEB_FILES = {'app.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8',
+             'style.css': 'text/css; charset=utf-8'}
 # Pages load only their own scripts and styles; images come from the API as blobs. no-cache: a new fw-server
 # version is picked up on the next load.
 WEB_HEADERS = {'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
@@ -311,6 +320,21 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def missing(body: MissingBody, user: dict = Depends(uploader)):
         """Which of these (sha256, size) the store lacks; an object with another size counts as missing."""
         return {'missing': [check_digest(d) for d, size in body.objects if store.size(check_digest(d)) != size]}
+
+    @app.post('/api/v1/folder-check')
+    def folder_check(body: FolderCheckBody, user: dict = Depends(data_user)):
+        """The checks of fw dataset import on a folder the web page picked (only its paths: the browser does
+        the hashing). junk: system files to leave out; reasons: why it must not be imported as it stands."""
+        junk = [p for p in body.paths if p.rpartition('/')[2].lower() in JUNK_NAMES]
+        rels = [p for p in body.paths if p.rpartition('/')[2].lower() not in JUNK_NAMES]
+        found = classify_paths(rels)
+        reasons = blocking_reasons(found, body.allow_other_files, body.force)
+        if not rels:
+            reasons.append('目录里没有文件')
+        out = {'files': len(rels), 'junk': junk, 'reasons': reasons}
+        for key, value in found.items():
+            out[key] = {'count': len(value), 'examples': value[:FOLDER_EXAMPLES]}
+        return out
 
     @app.post('/api/v1/objects/flush')
     def flush(user: dict = Depends(uploader)):

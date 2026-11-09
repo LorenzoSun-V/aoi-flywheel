@@ -37,7 +37,7 @@ client/fw/           fw：命令行 + 训练脚本用的 Python 包（Python 3.8
   cli.py             命令行参数和输出格式，只调 ops
   config.py          设置文件和缓存的位置
 server/fwserver/     fw-server：只支持 Linux
-  web/               网页：index.html、app.js（原生 ES 模块，不用构建）、style.css；fw-server 在 / 和 /web/ 下提供
+  web/               网页：index.html、app.js（原生 ES 模块，不用构建）、sha256.js（上传时在 worker 里算哈希）、style.css；fw-server 在 / 和 /web/ 下提供
   app.py             HTTP 接口 /api/v1（FastAPI）
   cli.py             fw-server 管理命令
   evals.py           评估任务：提交时定下模型权重、要评的图片清单和推理环境，交回时在同一个事务里登记评估报告
@@ -56,7 +56,7 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
-tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs 和 models.cjs（Playwright 走页面，由 test_web.py 调）
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、models.cjs、upload.cjs（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
@@ -171,6 +171,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 网页只加载自己的脚本和样式，平台里的文字只当文字显示（不用 innerHTML）；只提供列出的几个文件 | `app.py` 的 `WEB_HEADERS`、`WEB_FILES`，`web/app.js` 的 `el()` | `test_the_pages_are_served_with_a_strict_policy` |
 | 网页走一遍：登录（错的凭据说明原因）、数据集、版本、目录、缩略图、看图和标注框、翻图（看过几张后按一次方向键只翻一页）、比较、退出，浏览器控制台没有报错 | `web/app.js` | `test_a_walk_through_the_pages`（要装 node 的 Playwright，CI 上没有就跳过）、`tests/web/helpers.test.mjs`（node --test） |
 | 网页上的模型、评估比较、任务和日志、预测集；从网页提交预标注（错的数据说明原因），worker 跑完后预测集和叠框的看图页能看 | `web/app.js` | `test_a_walk_through_models_jobs_and_predictions`（`tests/web/models.cjs`） |
+| 网页上传目录和 `fw dataset import` 用同一套检查规则，建出的版本清单和 `fw dataset import` 同一目录完全一样；浏览器的 SHA-256 和清单排序（按 UTF-8 字节）和 Python 一致 | `fw/contract.py` 的 `classify_paths`、`blocking_reasons`，`app.py` 的 `/folder-check`，`web/sha256.js`，`web/app.js` 的 `manifestText` | `test_the_folder_check_is_the_one_of_fw_dataset_import`、`test_a_folder_uploaded_from_the_browser`（`tests/web/upload.cjs`）、`helpers.test.mjs` |
 | 网页切到别的页后，前一页慢到的结果不再盖上来；自动刷新只属于当前页 | `web/app.js` 的 `live()`、`render()` | 同上两项 |
 | 推理环境变了（包清单、源码或 onnx2engine 程序）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails`、`test_an_engine_is_built_once_per_onnx_and_machine` |
 | 平台从不加载上传的权重：评估任务只带 `model.onnx`，worker 用推理环境登记的 onnx2engine 在本机建引擎（按 ONNX、程序、环境、显卡和驱动缓存，不上传），用部署代码的推理模块跑；写了框架就要登记 onnx2engine（路径和哈希） | `evals._onnx`、`worker.build_engine`、`fw/trt_predict.py`、`jobs.register_runner`、0006 的 CHECK | `test_eval_on_folders_of_a_pool`、`test_an_engine_is_built_once_per_onnx_and_machine`、`test_a_runner_for_evaluations_names_its_onnx2engine` |

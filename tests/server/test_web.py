@@ -141,3 +141,70 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
     assert seen['imageHash'].startswith('/img/') and f'pred={set_id}' in seen['imageHash']
     assert 'A%2Fimg001.png' in seen['next'] and f'pred={set_id}' in seen['next']
     assert seen['errors'] == []
+
+
+def write_tree(root: Path, files: dict) -> Path:
+    for rel, data in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    return root
+
+
+def test_the_folder_check_is_the_one_of_fw_dataset_import(service, tokens, tmp_path):
+    from fw.checks import scan_folder
+    files = {'A/a.png': b'1', 'A/a.bmp': b'2', 'A/a.json': label('scratch'), 'A/b.png': b'3', 'B/b.png': b'4',
+             'B/x.json': b'{}', 'notes.docx': b'5', 'A/Thumbs.db': b'6', 'classes.txt': b'scratch\n',
+             'C/images/c.png': b'7', 'C/labels/c.txt': b'0 0.5 0.5 0.1 0.1\n', 'D/x.png': b'8', 'd/x.png': b'9'}
+    root = write_tree(tmp_path / 'top', files)
+    local = scan_folder(root)
+    r = httpx.post(service.url + '/api/v1/folder-check', headers={'Authorization': f'Bearer {tokens["algo"]}'},
+                   json={'paths': sorted(files)}, timeout=30).json()
+    assert r['junk'] == ['A/Thumbs.db'] and r['files'] == len(files) - 1
+    for key in ('images', 'labels', 'meta', 'others', 'bad_paths', 'collisions', 'same_stem_images',
+                'unlabeled_images', 'orphan_labels', 'same_name_in_dirs'):
+        assert r[key]['count'] == len(getattr(local, key)), key
+        assert sorted(map(str, r[key]['examples'])) == sorted(map(str, getattr(local, key))), key
+    assert r['reasons'] == local.blocking(False, False) and len(r['reasons']) == 3
+    allowed = httpx.post(service.url + '/api/v1/folder-check', headers={'Authorization': f'Bearer {tokens["algo"]}'},
+                         json={'paths': sorted(files), 'allow_other_files': True, 'force': True}).json()
+    assert allowed['reasons'] == local.blocking(True, True) == ['有只差大小写、或同名的文件和目录，在 Windows 上会互相覆盖，先改名']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    first = {'A/img0.png': real_png(64, 32, seed), 'A/img0.json': label('scratch'),
+             'A/img1.png': real_png(64, 32, seed + 1), 'A/中文 名.png': real_png(64, 32, seed + 2),
+             'B/b.png': real_png(64, 32, seed + 3), 'readme.docx': b'notes',
+             'A/Thumbs.db': b'junk'}
+    second = {k: v for k, v in first.items() if k not in ('B/b.png', 'A/Thumbs.db')}
+    second['A/img0.json'] = label('scratch', 'dent')
+    second['C/new.png'] = real_png(64, 32, seed + 4)
+    one = write_tree(tmp_path / 'one', first)
+    two = write_tree(tmp_path / 'two', second)
+    name = f'W-{os.urandom(4).hex()}'
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'upload.cjs'), service.url + '/', tokens['algo'], name, str(shots),
+                        str(one), str(two)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert '图片和标注以外的文件' in seen['refused'] and '系统文件 1 个不入库' in seen['report']
+    assert f'这是 {name} 的第一个版本' in seen['plan'] and '6 个文件' in seen['plan']
+    assert seen['first'] == f'/v/{name}/1'
+    assert '新增 1，删除 1，修改 1' in seen['plan2'] and '会删掉' in seen['plan2'] and 'B/b.png' in seen['plan2']
+    assert seen['second'] == f'/v/{name}/2'
+    assert seen['errors'] == []
+
+    v1, v2 = api.version(name, 1), api.version(name, 2)
+    assert v1['note'] == '第一批' and v1['source'] == '网页上传 one' and v2['parent']['ref'] == v1['ref']
+    d = api.dataset(name)
+    assert (d['site'], d['line'], d['kind']) == ('SES', 'TX', 'pool')
+    # the same version fw dataset import makes of the same folder: same manifest, every file readable
+    other = f'{name}-cli'
+    api.create_dataset(other, 'SES', 'TX', 'pool', '')
+    for folder, v in ((one, v1), (two, v2)):
+        mine = ops.import_folder(api, other, folder, allow_other_files=True, echo=quiet)
+        assert mine['manifest_sha256'] == v['manifest_sha256']
