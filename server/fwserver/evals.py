@@ -8,7 +8,8 @@ module. Uploaded weights (.pt / .pth, pickles that run code when loaded) are nev
 Submitting pins everything the job will read: the model version (its ONNX), the test images (chosen folders
 of a dataset version, or one split of a training-set snapshot, written to the store as a manifest of their
 own: the job's input list) and the runner version (the conda environment and framework source on one GPU
-machine). The worker lays out those files, runs `deteval predict` and `deteval evaluate` in that environment
+machine). The worker lays out those files, builds or reuses its engine, runs it over the images
+(fw/trt_predict.py) and then `deteval evaluate` in that environment
 and sends back the output folder; finishing the job registers it as an evaluation report in the same
 transaction, so a report exists exactly when its job is done.
 

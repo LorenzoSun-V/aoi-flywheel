@@ -8,6 +8,8 @@ Modes:
 - hardlink: only when asked for. The file IS the cache object: read-only, shared with the cache and with
   every other folder linked to it, so writing to it anyway (root ignores read-only) changes all of them.
 'auto' (the default) tries reflink and falls back to copy.
+- job: a worker's job folder, which is only read and is deleted when the job ends: reflink, else hardlink (no
+  second copy of tens of thousands of images on ext4), else copy (another file system, no permission).
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from pathlib import Path
 from .contract import CHUNK
 
 FICLONE = 0x40049409  # _IOW(0x94, 9, int) from linux/fs.h
+_NO_HARDLINK = {errno.EXDEV, errno.EPERM, errno.EACCES, errno.EMLINK, errno.EOPNOTSUPP, errno.ENOSYS}
 _NO_REFLINK = {errno.EOPNOTSUPP, errno.ENOTTY, errno.EXDEV, errno.EINVAL, errno.ENOSYS}
 MODE_NAMES = {'reflink': 'reflink（写时复制，改文件不影响缓存）', 'copy': '复制',
               'hardlink': '硬链接（只读，和缓存共用同一份数据，不要在这个目录里改文件）'}
@@ -71,7 +74,7 @@ def copy_hashed(src: Path, dst: Path) -> str:
 
 class Layout:
     def __init__(self, mode: str = 'auto'):
-        if mode not in ('auto', 'copy', 'hardlink'):
+        if mode not in ('auto', 'copy', 'hardlink', 'job'):
             raise ValueError(mode)
         self.mode = mode
         self.used = set()
@@ -83,12 +86,20 @@ class Layout:
 
     def place(self, src: Path, dst: Path) -> str:
         """Create dst from the cache object src; returns the sha256 of what dst now holds."""
-        if self.mode == 'auto':
+        if self.mode in ('auto', 'job'):
             if reflink(src, dst):
                 self._note('reflink')
                 return hash_file(dst)
-            with self._lock:
-                self.mode = 'copy'  # this file system cannot clone: copy everything else directly
+            with self._lock:  # this file system cannot clone: everything else directly the next way
+                self.mode = 'copy' if self.mode == 'auto' else 'job-hardlink'
+        if self.mode == 'job-hardlink':
+            try:
+                os.link(src, dst)
+                self._note('hardlink')
+                return hash_file(dst)
+            except OSError as e:
+                if e.errno not in _NO_HARDLINK:
+                    raise
         if self.mode == 'hardlink':
             try:
                 os.link(src, dst)

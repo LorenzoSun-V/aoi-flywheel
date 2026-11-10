@@ -543,12 +543,41 @@ def gpu_info(run: JobRun) -> str:
     return text.splitlines()[0].strip()
 
 
-def trt_version(run: JobRun, env: str) -> str:
+_NVINFER = re.compile(r'libnvinfer\.so(?:\.\d+)*\Z')
+
+
+def linked_trt_version(run: JobRun, env: str, program: str) -> Optional[str]:
+    """The version of the libnvinfer the program is linked with, from the library's real file name
+    (libnvinfer.so.10 -> libnvinfer.so.10.14.1), as the environment resolves it; None when that cannot be told
+    (linked statically, no ldd, a library named without its version)."""
+    code, out, _ = run.capture([conda_executable(), 'run', '-n', env, 'ldd', program])
+    if code != 0:
+        return None
+    for line in out.decode('utf-8', 'replace').splitlines():
+        name, arrow, rest = line.strip().partition(' => ')
+        if not arrow or not _NVINFER.match(name.strip()) or not rest.startswith('/'):
+            continue
+        real = os.path.basename(os.path.realpath(rest.split(' (')[0].strip()))
+        version = real.partition('.so.')[2]
+        if version.count('.') >= 1:
+            return version
+    return None
+
+
+def trt_version(run: JobRun, env: str, program: str = '') -> str:
+    """The TensorRT that builds and runs the engine: the library onnx2engine is linked with when that can be read
+    (the deploy code is C++; the tensorrt Python package may be missing or another version), else the Python
+    package of the environment."""
+    linked = linked_trt_version(run, env, program) if program else None
+    if linked:
+        return linked
     code, out, err = run.capture([conda_executable(), 'run', '-n', env, 'python', '-c',
                                   'import tensorrt; print(tensorrt.__version__)'])
     version = out.decode('utf-8', 'replace').strip().splitlines()[-1:] if code == 0 else []
     if not version:
-        raise WorkerError(f'环境 {env} 里读不到 TensorRT 版本：{err.decode("utf-8", "replace").strip()[-300:]}')
+        raise WorkerError(f'读不到 TensorRT 版本：{program or "onnx2engine"} 链接的 libnvinfer 文件名里没有完整版本号，环境 {env} '
+                          f'里也没有 tensorrt 这个 Python 包（装一个和 libnvinfer 同版本的）：'
+                          f'{err.decode("utf-8", "replace").strip()[-300:]}')
     return version[0].strip()
 
 
@@ -600,7 +629,7 @@ def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tup
     except OnnxError as e:
         raise WorkerError(f'没有建引擎：{e}') from None
     gpu = gpu_info(run)
-    trt = trt_version(run, runner['conda_env'])
+    trt = trt_version(run, runner['conda_env'], runner['onnx2engine'])
     info = {'onnx_sha256': onnx_sha256, 'onnx2engine_sha256': runner['onnx2engine_sha256'],
             'env_sha256': runner['env_sha256'], 'gpu': gpu, 'trt_version': trt, 'precision': ENGINE_PRECISION}
     key = hashlib.sha256(json.dumps(info, sort_keys=True).encode('utf-8')).hexdigest()
@@ -621,9 +650,13 @@ def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tup
                     f'{gpu}，TensorRT {trt}）')
             code = run.run(conda_run(runner['conda_env'], runner['onnx2engine'], str(build / 'model.onnx')),
                            cwd=str(build), env=gpu_env())
-            built = build / 'model.engine'  # onnx2engine writes it next to the ONNX
-            if code != 0 or not built.is_file() or built.stat().st_size == 0:
-                raise WorkerError(f'onnx2engine 没有建出引擎（返回 {code}），原因见日志')
+            # onnx2engine writes the engine next to the ONNX: model.bin (the deploy code's onnx2engine_st) or
+            # model.engine
+            found = [p for p in (build / 'model.bin', build / 'model.engine') if p.is_file() and p.stat().st_size]
+            if code != 0 or len(found) != 1:
+                raise WorkerError(f'onnx2engine 没有建出引擎（返回 {code}；应在 ONNX 旁边写出 model.bin 或 model.engine，'
+                                  f'找到 {len(found)} 个），原因见日志')
+            built = found[0]
             digest = file_sha256(built)
             _fsync(built)
             os.replace(built, engine)
@@ -709,7 +742,7 @@ def _eval_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
         images = [e[0] for e in entries if Path(e[0]).suffix.lower() in IMAGE_EXTS]
         if len(images) != p['data']['images']:
             raise WorkerError(f'输入清单里有 {len(images)} 张图，提交时是 {p["data"]["images"]} 张')
-        ops._lay_out(run.api, cache, p['data']['ref'], entries, folder / 'data', 'auto', 8, run.log)
+        ops._lay_out(run.api, cache, p['data']['ref'], entries, folder / 'data', 'job', 8, run.log)
         run.check()
     finally:
         cache.close()
@@ -781,7 +814,7 @@ def _predict_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
         images = parse_manifest(run.api.read_object(p['data']['inputs_sha256']))
         if len(images) != p['data']['images']:
             raise WorkerError(f'输入清单里有 {len(images)} 张图，提交时是 {p["data"]["images"]} 张')
-        ops._lay_out(run.api, cache, p['data']['ref'], images, folder / 'data', 'auto', 8, run.log)
+        ops._lay_out(run.api, cache, p['data']['ref'], images, folder / 'data', 'job', 8, run.log)
         run.check()
     finally:
         cache.close()

@@ -697,7 +697,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('name', help='模型名称（先用 fw model create 建）')
     s.add_argument('--onnx', required=True, help='ONNX 文件')
     s.add_argument('--trainset', required=True, help='训练用的训练集快照，例如 SES-TX-det@2')
-    s.add_argument('--weights', help='训练出的权重（.pt、.pth），登记在 weights/ 下，以后平台用它统一评估')
+    s.add_argument('--weights', help='训练出的权重（.pt、.pth），登记在 weights/ 下，只是存档：平台从不加载权重，评估和预标注只用 ONNX 建的 TensorRT 引擎')
     s.add_argument('--metrics', help='可选：训练框架自己的验证指标 JSON，只作参考')
     s.add_argument('--file', action='append', default=[], metavar='文件或目录',
                    help='附件：训练配置等，登记在 files/ 下；可写多次')

@@ -168,6 +168,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 预测集要和输入清单一一对应，框的类别在类别表里、分数不低于 conf，否则不登记 | `predictions.check_predictions` | `test_predictions_that_do_not_match_the_input_list_register_nothing` |
 | 预测集只由运行中的推理任务写一次，不改不删；文件集只属于一条记录 | 0007 的触发器、`require_fileset_owner` | `test_the_database_keeps_prediction_sets` |
 | 预标注：`checked=false`、带分数、框裁到图内；已有标注默认保留；阈值不低于 conf | `ops.get_predictions`、`prelabel_json` | `test_pre_labels_from_a_prediction_set` |
+| onnx2engine 写出 `model.bin`（部署代码的做法）或 `model.engine` 都能建引擎，两个都有或都没有算失败；TensorRT 版本取它链接的 libnvinfer；任务目录的图片是缓存的硬链接 | `worker.py` 的 `build_engine`、`linked_trt_version`，`layout.py` 的 `job` 方式 | `test_the_engine_file_onnx2engine_writes`、`test_the_tensorrt_version_is_the_linked_library_s`、`test_job_images_are_linked_not_copied`（测试里的假 onnx2engine 写 `.bin`） |
 | 网页只加载自己的脚本和样式，平台里的文字只当文字显示（不用 innerHTML）；只提供列出的几个文件 | `app.py` 的 `WEB_HEADERS`、`WEB_FILES`，`web/app.js` 的 `el()` | `test_the_pages_are_served_with_a_strict_policy` |
 | 网页走一遍：登录（错的凭据说明原因）、数据集、版本、目录、缩略图、看图和标注框、翻图（看过几张后按一次方向键只翻一页）、比较、退出，浏览器控制台没有报错 | `web/app.js` | `test_a_walk_through_the_pages`（要装 node 的 Playwright，CI 上没有就跳过）、`tests/web/helpers.test.mjs`（node --test） |
 | 网页上的模型、评估比较、任务和日志、预测集；从网页提交预标注（错的数据说明原因），worker 跑完后预测集和叠框的看图页能看 | `web/app.js` | `test_a_walk_through_models_jobs_and_predictions`（`tests/web/models.cjs`） |
