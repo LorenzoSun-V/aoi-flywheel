@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -100,7 +101,8 @@ def executable(path, text):
 @pytest.fixture
 def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
     """A GPU machine as the worker sees it: a fake conda (environments in listings/; `run` runs the command, a
-    python one with the fake py_rfdetr and cv2 importable), a fake onnx2engine (writes <onnx>.engine; each
+    python one with the fake py_rfdetr and cv2 importable), a fake onnx2engine (writes <onnx stem>.bin
+    like the deploy code's onnx2engine_st; each
     build is a line of builds.log: the ONNX and CUDA_DEVICE_ORDER), a fake nvidia-smi (its arguments go to
     nvidia-smi.log) and the fake deteval evaluate. listings/FAIL makes the inference fail, listings/SKIP makes
     deteval miss an image, listings/MANY makes the engine give mostly classes the model does not have."""
@@ -129,7 +131,7 @@ def gpu(tmp_path, monkeypatch, make_worker):  # noqa: F811
                '[ "$1" = list ] && [ -f "$d/$3.txt" ] && cat "$d/$3.txt"\n')
     onnx2engine = executable(tmp_path / 'onnx2engine', '#!/bin/sh\n'
                              f'echo "$1 $CUDA_DEVICE_ORDER" >> "{tmp_path / "builds.log"}"\n'
-                             '{ printf ENGINE; cat "$1"; } > "${1%.onnx}.engine"\n'
+                             '{ printf ENGINE; cat "$1"; } > "${1%.onnx}.bin"\n'
                              'echo "Convert onnx model to TensorRT engine model successfully!"\n')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -551,3 +553,80 @@ def test_pool_labels_must_name_classes_of_the_model(api, gpu, model, snapshot, t
             api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1', 'dirs': [d]})
         assert e.value.status == 400 and '类别表' in e.value.message
     assert api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1', 'dirs': ['C']})
+
+
+def log_of(api, job_id):
+    return ''.join(x['text'] for x in api.job_log(job_id)['pieces'])
+
+
+def test_the_engine_file_onnx2engine_writes(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """The deploy code's onnx2engine_st writes <stem>.bin next to the ONNX (the fixture's does too); one that
+    writes <stem>.engine works as well; one that leaves both, or neither, builds nothing."""
+    params = {'data': f'{snapshot["ref"]}:test'}
+
+    def run(script):
+        executable(Path(gpu.onnx2engine), '#!/bin/sh\n' + script)
+        r = add_runner(gpu)
+        mv = trained(api, model, snapshot, tmp_path)
+        job = api.submit_job('eval', runner=r['runner'], params={**params, 'model': mv['ref']})
+        worker.run_worker(gpu, quiet, once=True)
+        return api.job(job['id'])
+
+    assert run('printf ENGINE > "${1%.onnx}.engine"\n')['status'] == 'done'
+    both = run('printf ENGINE > "${1%.onnx}.engine"\nprintf ENGINE > "${1%.onnx}.bin"\n')
+    assert both['status'] == 'failed' and '找到 2 个' in log_of(api, both['id']) + both['error']
+    none = run('printf ENGINE > "${1%.onnx}.plan"\n')
+    assert none['status'] == 'failed' and 'model.bin 或 model.engine' in log_of(api, none['id']) + none['error']
+    assert not [p for p in gpu.engines.iterdir() if p.name.startswith('build-')]
+
+
+def test_the_tensorrt_version_is_the_linked_library_s(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """onnx2engine is C++: the version in the cache key and engine.json is the libnvinfer it is linked with (its
+    real file name), not the tensorrt Python package, which may be missing or another version."""
+    lib = tmp_path / 'lib'
+    lib.mkdir()
+    (lib / 'libnvinfer.so.10.9.0').write_bytes(b'x')
+    os.symlink('libnvinfer.so.10.9.0', lib / 'libnvinfer.so.10')
+    conda = tmp_path / 'conda'
+    text = conda.read_text()
+    ldd = ('[ "$1" = run ] && [ "$4" = ldd ] && { '
+           f'echo "\tlibnvinfer_plugin.so.10 => {lib}/libnvinfer_plugin.so.10 (0x1)"; '
+           f'echo "\tlibnvinfer.so.10 => {lib}/libnvinfer.so.10 (0x00007f)"; '
+           'echo "\tlibc.so.6 => /lib/libc.so.6 (0x2)"; exit 0; }\n')
+    python = [x for x in text.splitlines() if '"$5" = -c' in x][0]
+    conda.write_text(text.replace('#!/bin/sh\n', '#!/bin/sh\n' + ldd, 1).replace(
+        python, 'if [ "$1" = run ] && [ "$4" = python ] && [ "$5" = -c ]; then echo "No module named tensorrt" >&2; '
+                'exit 1; fi'))
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    done = api.job(job['id'])
+    assert done['status'] == 'done', done['error']
+    files = {f['path']: f['sha256'] for f in api.eval(done['result']['eval_id'])['files']}
+    assert json.loads(gpu.read_object(files['files/engine.json']))['trt_version'] == '10.9.0'
+    # neither the library's version nor the Python package: said plainly
+    os.remove(lib / 'libnvinfer.so.10')
+    (lib / 'libnvinfer.so.10').write_bytes(b'x')  # a file named without its full version
+    other = trained(api, model, snapshot, tmp_path)
+    job = api.submit_job('eval', runner=r['runner'], params={'model': other['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    failed = api.job(job['id'])
+    assert failed['status'] == 'failed' and '读不到 TensorRT 版本' in log_of(api, job['id']) + failed['error']
+
+
+def test_job_images_are_linked_not_copied(api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
+    """The job folder is read and thrown away: on a file system without reflink its images are hard links to
+    the cache, not second copies."""
+    from fw import layout
+    monkeypatch.setattr(layout, 'reflink', lambda src, dst: False)
+    monkeypatch.setenv('FW_KEEP_WORK', '1')
+    mv = trained(api, model, snapshot, tmp_path)
+    data = pool(api, tmp_path, sample_files('A', 3))
+    r = add_runner(gpu)
+    job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': f'{data}@1'})
+    worker.run_worker(gpu, quiet, once=True)
+    assert api.job(job['id'])['status'] == 'done'
+    images = list((tmp_path / 'fw-cache' / 'jobs').glob('job-*/data/A/*.png'))
+    assert len(images) == 3 and all(p.stat().st_nlink == 2 for p in images)
+    assert '硬链接' in log_of(api, job['id'])

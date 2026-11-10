@@ -304,7 +304,7 @@ fw model register SES-TX-detr --onnx runs/best.onnx --weights runs/best.pt --tra
 - 同一个模型里，一个 ONNX 只登记一次。同样的 ONNX、快照、代码和文件再登记一次（脚本跑了两遍，网络断了重试），返回已有的那个版本，不会多出一个；ONNX 一样而别的不一样就拒绝。
 - 训练代码三个选项都不写时不记，`fw model show` 和追溯链里显示「未记录」。不会自动读当前目录的 git：当前目录可能是别的仓库。
 - 模型版本里的文件：`model.onnx`、`classes.txt`（快照的类别表）、`weights/<权重文件>`（有 `--weights` 时）、`metrics.json`（有 `--metrics` 时）、`files/…`（附件）。
-- 引擎不在这里登记：上传的引擎不一定能在部署的机器上用，引擎要从 ONNX 在目标环境里构建（第三步由 GPU worker 调部署仓库的构建入口；在那之前现场自己构建，发布时记下 GPU、TensorRT 版本和引擎的哈希，见 `fw release register`）。
+- 引擎不在这里登记：上传的引擎不一定能在部署的机器上用，引擎要从 ONNX 在目标环境里构建（评估和预标注时 GPU worker 用登记的 onnx2engine 在本机建，只是那台机器的缓存；现场自己从同一个 ONNX 构建，发布时记下 GPU、TensorRT 版本和引擎的哈希，见 `fw release register`）。
 
 ### fw model get
 
@@ -467,7 +467,7 @@ fw release show SES-TX-r3                  # 这次发布和它的追溯链
 
 ### fw runner register、list、show、check
 
-推理环境就是 GPU 机上搭好的 conda 环境，一个框架一个（例如 `yolo26`、`detr-pro`）。平台只做 TensorRT 推理，推理环境都在 NVIDIA GPU 机上。评估、推理任务（第三步后面几个 PR）在模型登记的推理环境里跑。
+推理环境就是 GPU 机上搭好的 conda 环境，一个框架一个（例如 `yolo26`、`detr-pro`）。平台只做 TensorRT 推理，推理环境都在 NVIDIA GPU 机上。评估（`fw eval run`）和推理任务（`fw predict run`）在提交时指定的推理环境里跑。
 
 ```
 fw runner register detr-pro --env detr-pro --framework rfdetr --onnx2engine /opt/deploy/onnx2engine   # 在 GPU 机上，用 worker 账号
@@ -482,9 +482,9 @@ fw runner check detr-pro                                              # 算法�
 | `--env` | conda 环境名 |
 | `--src` | 框架源码目录（git 仓库），要记下哪个提交时写；不写也行 |
 | `--framework` | 用哪个部署代码的推理模块跑 TensorRT 引擎，现在只有 `rfdetr`（`py_rfdetr`）。要用来评估的环境必须写；改了也是新版本 |
-| `--onnx2engine` | 部署代码的 onnx2engine 程序（`onnx2engine model.onnx` 在旁边写出 `model.engine`），和 `--framework` 一起写；登记它的路径和文件哈希，程序换了（重新编译）就是新版本。建议放在 `--src` 指的部署仓库里编译：哈希只管程序文件本身，它用到的动态库（TensorRT、自家的 .so）在环境或仓库里，这样 `fw runner check` 能一起看出变化 |
+| `--onnx2engine` | 部署代码的 onnx2engine 程序：只带一个参数（ONNX 路径）运行，在 ONNX 旁边写出同名的 `.bin` 或 `.engine`（两个都有或都没有算失败）。RF-DETR 部署代码里登记静态的 `onnx2engine_st`；`onnx2engine_dy` 还要一个 batch 参数，用不了。和 `--framework` 一起写；登记它的路径和文件哈希，程序换了（重新编译）就是新版本。建议放在 `--src` 指的部署仓库里编译：哈希只管程序文件本身，它用到的动态库（TensorRT、自家的 .so）在环境或仓库里，这样 `fw runner check` 能一起看出变化 |
 
-评估用的环境里要有：`tensorrt`（Python 包，读版本用）、OpenCV（`cv2`）、部署代码的推理模块（`py_rfdetr`，能 `import`）、aoi-deteval（只用 `deteval evaluate`）。onnx2engine 在这个环境里运行（`conda run`），所以它找得到环境里的 TensorRT 库；机器上要有 `nvidia-smi`。
+评估用的环境里要有：OpenCV（`cv2`）、部署代码的推理模块（`py_rfdetr`，能 `import`）、aoi-deteval（只用 `deteval evaluate`）。onnx2engine 在这个环境里运行（`conda run`），所以它找得到环境里的 TensorRT 库；机器上要有 `nvidia-smi`。TensorRT 版本（进引擎缓存的键和 `engine.json`）取 onnx2engine 实际链接的 libnvinfer 的文件名（`ldd` 看到的 `libnvinfer.so.10` 指向的 `libnvinfer.so.10.x.y`）；读不出来（静态链接、没有 `ldd`）才用环境里 `tensorrt` 这个 Python 包的版本，这时要装和 libnvinfer 同版本的；两样都没有任务失败并说明。任务目录里的图片在 Linux 上是缓存的硬链接（文件系统支持 reflink 就用 reflink，跨盘才复制），不多占一份空间；任务跑完目录就删。
 
 - 登记时 fw 运行 `conda list -n <环境> --explicit`（conda 装的包）和在环境里运行 `python -m pip freeze --all`（pip 装的包，conda 的清单里没有），把这份包清单传到平台、记下它的哈希（包清单里网址带的账号密码、`?token=...` 这类参数和 conda 的 `/t/<token>/` 先去掉再传，私有源的凭据不会被别的账号看到；包的哈希保留）；写了 `--src` 就记下源码的 git 提交号，有没提交的改动时再记下改动内容的哈希（`git diff HEAD` 加上没被 `.gitignore` 忽略的新文件），所以已经有改动的源码再改一次也看得出来。找 conda 的顺序：环境变量 `FW_CONDA`、PATH 里的 `conda`、`CONDA_EXE`。
 - 用 `pip install -e` 装的包，pip 的清单只记它的位置，不记它的代码；这样装的框架源码用 `--src` 登记，改动才看得出来。
