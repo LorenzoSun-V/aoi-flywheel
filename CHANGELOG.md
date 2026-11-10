@@ -19,7 +19,7 @@
 
 - 真机上评估和预标注建不出引擎：部署代码的 `onnx2engine_st` 写出的是 `model.bin`，worker 原来只认 `model.engine`。现在两种都认（只能有一个）；文档写明登记 `onnx2engine_st`。
 - TensorRT 版本取 onnx2engine 实际链接的 libnvinfer（`ldd`），读不出才用 `tensorrt` Python 包；环境里不再必须装这个包。
-- 任务目录里的图片用缓存的硬链接（有 reflink 用 reflink），不再整份复制。
+- 任务目录里的图片用缓存的硬链接（有 reflink 用 reflink），不再整份复制。`fw get` 默认方式不变（reflink，否则复制），多线程下也不会变成硬链接（审查后修正）。
 - 改掉几处过时的帮助和文档（`--weights`、引擎构建、任务类型、预测集复用条件）。
 
 第四步之一：网页骨架。

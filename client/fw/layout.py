@@ -91,7 +91,8 @@ class Layout:
                 self._note('reflink')
                 return hash_file(dst)
             with self._lock:  # this file system cannot clone: everything else directly the next way
-                self.mode = 'copy' if self.mode == 'auto' else 'job-hardlink'
+                # another thread may have switched already: only from the mode asked for, never copy -> hardlink
+                self.mode = {'auto': 'copy', 'job': 'job-hardlink'}.get(self.mode, self.mode)
         if self.mode == 'job-hardlink':
             try:
                 os.link(src, dst)
