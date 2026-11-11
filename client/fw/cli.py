@@ -111,7 +111,7 @@ def cmd_get(args, api: Api) -> None:
     try:
         link = 'copy' if args.copy else 'hardlink' if args.hardlink else 'auto'
         ops.get(api, cache, args.ref, args.to, link=link, subpath=args.subpath, workers=args.workers,
-                fmt=args.format)
+                fmt=args.format, neg_ratio=args.neg_ratio, fix_dataset_length=args.fix_dataset_length)
     finally:
         cache.close()
 
@@ -150,7 +150,7 @@ def cmd_trainset_create(args, api: Api) -> int:
     result = ops.create_trainset(api, args.name, args.sources, classes, val=args.val, seed=args.seed,
                                  test_dirs=test_dirs, merge_test=args.merge_test, new_to=args.new_to, split=split,
                                  fresh=args.fresh, note=args.note, require_labels=args.require_labels,
-                                 dry_run=args.dry_run, label_source=args.label_source,
+                                 dry_run=args.dry_run, test=args.test, label_source=args.label_source,
                                  label_classes=label_classes, class_map=class_map,
                                  confirm=None if args.yes else _ask)
     return 0 if result is not None or args.dry_run else 1
@@ -179,7 +179,8 @@ def cmd_trainset_show(args, api: Api) -> None:
     if rule['mode'] == 'split-file':
         how = f'按划分清单（{rule["split_count"]} 行）'
     else:
-        how = (f'接着 {ts["based_on"]}' if ts['based_on'] else '重新划分') + f'，val {rule["val"]}，种子 {rule["seed"]}'
+        how = (f'接着 {ts["based_on"]}' if ts['based_on'] else '重新划分') + f'，val {rule["val"]}' + \
+            (f'，test {rule["test"]}' if rule.get('test') else '') + f'，种子 {rule["seed"]}'
         if rule.get('test_dirs'):
             how += f'，test 目录 {"、".join(rule["test_dirs"])}'
         if rule.get('merge_test'):
@@ -648,7 +649,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--from', dest='sources', action='append', required=True, metavar='版本',
                    help='来源数据池版本，例如 SES-TX@4；可写多次')
     s.add_argument('--classes', required=True, help='类别表 classes.txt：一行一个类别名，行号（从 0 起）是类别编号')
-    s.add_argument('--val', type=float, default=0.2, help='train/val 里 val 的比例（默认 0.2）')
+    s.add_argument('--val', type=float, default=0.2, help='按比例划分时 val 的比例（默认 0.2）')
+    s.add_argument('--test', type=float, default=0.0,
+                   help='按比例划分时 test 的比例（默认 0，不分）；7:2:1 就是 --val 0.2 --test 0.1。有框的图和没有框的图分别按比例分')
     s.add_argument('--seed', type=int, default=0, help='划分用的种子（默认 0）；同样的样本和种子总是同样的划分')
     s.add_argument('--test-dirs', action='append', default=[], metavar='目录',
                    help='这些目录下的新样本进 test，例如 2026-10 或 SES/TX/2026-10；逗号分隔或写多次')
@@ -867,8 +870,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument('--hardlink', action='store_true',
                    help='硬链接（只限 Linux）：不多占盘，但文件只读、和缓存共用同一份数据，取出后不能改')
     s.add_argument('--subpath', help='只取这个子目录')
-    s.add_argument('--format', choices=['yolo', 'coco', 'json', 'all'],
-                   help='训练集快照按哪种格式摆：yolo（默认，另生成 data.yaml）、coco、json（LiteAnno 能直接打开）、all（原样）')
+    s.add_argument('--format', choices=['yolo', 'yolo-tree', 'coco', 'json', 'all'],
+                   help='训练集快照按哪种格式摆：yolo（默认，平铺：train/images + train/labels、neg_train、val、test，'
+                        '另生成 data.yaml）、yolo-tree（images/<划分>/… 保留原目录）、coco、json（LiteAnno 能直接打开）、all（原样）')
+    s.add_argument('--neg-ratio', type=float, metavar='数',
+                   help='写进 data.yaml 的 negative_setting.neg_ratio（默认 0），平台原样写、不解释')
+    s.add_argument('--fix-dataset-length', type=int, metavar='张数',
+                   help='写进 data.yaml 的 negative_setting.fix_dataset_length（默认 0），平台原样写、不解释')
     s.add_argument('--workers', type=int, default=8)
     s.set_defaults(func=cmd_get)
 

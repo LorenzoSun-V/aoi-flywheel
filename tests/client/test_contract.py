@@ -144,8 +144,8 @@ def test_trainset_layouts():
               ('json/train/SES/TX/a/1.json', 'j1', 1), ('images/val/SES/TX/2.png', 'i2', 1),
               ('coco/train.json', 'ct', 1), ('coco/val.json', 'cv', 1)]
     paths = lambda fmt: {p: d for p, d, _ in trainset_layout(stored, fmt)}  # noqa: E731
-    assert paths('yolo') == {'classes.txt': 'c', 'trainset.json': 't', 'images/train/SES/TX/a/1.png': 'i1',
-                             'labels/train/SES/TX/a/1.txt': 'l1', 'images/val/SES/TX/2.png': 'i2'}
+    assert paths('yolo-tree') == {'classes.txt': 'c', 'trainset.json': 't', 'images/train/SES/TX/a/1.png': 'i1',
+                                  'labels/train/SES/TX/a/1.txt': 'l1', 'images/val/SES/TX/2.png': 'i2'}
     assert paths('coco') == {'classes.txt': 'c', 'trainset.json': 't', 'train/SES/TX/a/1.png': 'i1',
                              'valid/SES/TX/2.png': 'i2', 'train/_annotations.coco.json': 'ct',
                              'valid/_annotations.coco.json': 'cv'}
@@ -155,7 +155,7 @@ def test_trainset_layouts():
     with pytest.raises(ContractError):
         trainset_layout(stored, 'voc')
     with pytest.raises(ContractError, match='不认识的路径'):
-        trainset_layout([('other/x.png', 'x', 1)], 'yolo')
+        trainset_layout([('other/x.png', 'x', 1)], 'yolo-tree')
 
 
 def test_yolo_layout_renames_images_folders():
@@ -164,8 +164,8 @@ def test_yolo_layout_renames_images_folders():
     assert yolo_safe('SES/images/images/images_/Images/images') == 'SES/images_/images_/images__/Images/images'
     stored = [('images/val/SES/TX/b/images/1.png', 'i', 1), ('labels/val/SES/TX/b/images/1.txt', 'l', 1),
               ('json/val/SES/TX/b/images/1.json', 'j', 1)]
-    assert [p for p, _, _ in trainset_layout(stored, 'yolo')] == ['images/val/SES/TX/b/images_/1.png',
-                                                                 'labels/val/SES/TX/b/images_/1.txt']
+    assert [p for p, _, _ in trainset_layout(stored, 'yolo-tree')] == ['images/val/SES/TX/b/images_/1.png',
+                                                                       'labels/val/SES/TX/b/images_/1.txt']
     assert [p for p, _, _ in trainset_layout(stored, 'json')] == ['val/SES/TX/b/images/1.png',
                                                                  'val/SES/TX/b/images/1.json']
 
@@ -179,11 +179,11 @@ def test_short_paths_for_fw_get():
     stored = [('images/train/SES/TX/images/1.bmp', 'i', 1), ('labels/train/SES/TX/images/1.txt', 'l', 1),
               ('json/train/SES/TX/images/1.json', 'j', 1), ('coco/train.json', 'c', 1)]
     lay = lambda fmt, short=True: [p for p, _, _ in trainset_layout(stored, fmt, short)]  # noqa: E731
-    assert lay('yolo') == ['images/train/1.bmp', 'labels/train/1.txt']
+    assert lay('yolo-tree') == ['images/train/1.bmp', 'labels/train/1.txt']
     assert lay('json') == ['train/1.bmp', 'train/1.json']
     assert lay('coco') == ['train/1.bmp', 'train/_annotations.coco.json']
     assert lay('all') == [p for p, _, _ in stored]
-    assert lay('yolo', False) == ['images/train/SES/TX/images_/1.bmp', 'labels/train/SES/TX/images_/1.txt']
+    assert lay('yolo-tree', False) == ['images/train/SES/TX/images_/1.bmp', 'labels/train/SES/TX/images_/1.txt']
 
 
 def test_eval_selection_with_two_json_labels_differing_in_case():
@@ -191,3 +191,54 @@ def test_eval_selection_with_two_json_labels_differing_in_case():
     d = 'a' * 64
     files, images, problems = eval_selection([('x/1.png', d, 1), ('x/1.json', d, 1), ('x/1.JSON', d, 1)], False)
     assert problems and 'JSON' in problems[0]
+
+
+def test_the_flat_layout_keeps_train_negatives_apart():
+    from fw.contract import EMPTY_SHA256, trainset_flat, trainset_layout
+    stored = [('classes.txt', 'c', 9), ('trainset.json', 't', 9), ('coco/train.json', 'ct', 9),
+              ('images/train/SES/TX/train/images/1.bmp', 'i1', 100),
+              ('labels/train/SES/TX/train/images/1.txt', 'l1', 40),
+              ('json/train/SES/TX/train/images/1.json', 'j1', 90),
+              ('images/train/SES/TX/neg_train/images/2.bmp', 'i2', 100),  # no label at all
+              ('images/train/SES/TX/a/b/3.bmp', 'i3', 100), ('labels/train/SES/TX/a/b/3.txt', EMPTY_SHA256, 0),
+              ('images/train/SES/TX/4.bmp', 'i4', 100), ('labels/train/SES/TX/4.txt', 'l4', 8),  # too short for a box
+              ('images/val/SES/TX/val/images/5.bmp', 'i5', 100), ('labels/val/SES/TX/val/images/5.txt', 'l5', 40),
+              ('images/val/SES/TX/neg_val/images/6.bmp', 'i6', 100),
+              ('images/test/SES/TX/field/7.bmp', 'i7', 100), ('labels/test/SES/TX/field/7.txt', 'l7', 1)]
+    rows, problems = trainset_flat(stored)
+    assert problems == []
+    assert {r[0]: (r[1], r[3]) for r in rows} == {
+        'classes.txt': ('c', 'classes.txt'), 'trainset.json': ('t', 'trainset.json'),
+        'train/images/1.bmp': ('i1', 'images/train/SES/TX/train/images/1.bmp'),
+        'train/labels/1.txt': ('l1', 'labels/train/SES/TX/train/images/1.txt'),
+        'neg_train/2.bmp': ('i2', 'images/train/SES/TX/neg_train/images/2.bmp'),
+        'neg_train/3.bmp': ('i3', 'images/train/SES/TX/a/b/3.bmp'),
+        'neg_train/4.bmp': ('i4', 'images/train/SES/TX/4.bmp'),
+        'val/images/5.bmp': ('i5', 'images/val/SES/TX/val/images/5.bmp'),
+        'val/labels/5.txt': ('l5', 'labels/val/SES/TX/val/images/5.txt'),
+        'val/images/6.bmp': ('i6', 'images/val/SES/TX/neg_val/images/6.bmp'),
+        'val/labels/6.txt': (EMPTY_SHA256, None),  # made: a val image without a label gets an empty one
+        'test/images/7.bmp': ('i7', 'images/test/SES/TX/field/7.bmp'),
+        'test/labels/7.txt': ('l7', 'labels/test/SES/TX/field/7.txt')}  # a stored label stays, whatever it holds
+    assert trainset_layout(stored, 'yolo') == [r[:3] for r in rows]
+    assert trainset_layout(stored, 'yolo', short=True) == [r[:3] for r in rows]  # the same for every snapshot
+    with pytest.raises(ContractError, match='不认识的路径'):
+        trainset_flat([('images/other/x.png', 'x', 1)])
+
+
+def test_names_that_collide_when_flat_are_listed():
+    from fw.contract import trainset_flat, trainset_layout
+    stored = [('images/val/SES/TX/a/1.bmp', 'i1', 1), ('images/val/SES/TX/b/1.bmp', 'i2', 1),  # one file name
+              ('images/test/SES/TX/2.png', 'i3', 1), ('images/test/SES/TX/x/2.bmp', 'i4', 1),  # one label for both
+              ('images/train/SES/TX/n/Ab.png', 'i5', 1), ('images/train/SES/TX/m/aB.png', 'i6', 1),  # one on Windows
+              ('images/train/SES/TX/n/1.bmp', 'i7', 1),  # neg_train/1.bmp: another folder than val/images/1.bmp
+              ('images/train/SES/TX/p/3.png', 'i8', 1), ('images/train/SES/TX/q/3.bmp', 'i9', 1)]  # no labels there
+    rows, problems = trainset_flat(stored)
+    assert problems == [
+        'images/test/SES/TX/2.png、images/test/SES/TX/x/2.bmp 平铺后同名不同扩展名，会共用一份标注',
+        'images/train/SES/TX/m/aB.png、images/train/SES/TX/n/Ab.png 平铺后是同一个文件',
+        'images/val/SES/TX/a/1.bmp、images/val/SES/TX/b/1.bmp 平铺后是同一个文件']
+    with pytest.raises(ContractError, match='yolo-tree') as e:
+        trainset_layout(stored, 'yolo')
+    assert 'images/val/SES/TX/a/1.bmp、images/val/SES/TX/b/1.bmp' in str(e.value)
+    assert len(trainset_layout(stored, 'yolo-tree')) == len(stored)  # the folders are kept there

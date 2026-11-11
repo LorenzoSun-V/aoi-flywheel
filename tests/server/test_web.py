@@ -86,6 +86,36 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert seen['errors'] == []
 
 
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_snapshot_is_shown_in_the_folders_fw_get_makes(service, tokens, api, tmp_path):
+    from test_trainsets import CLASSES, make
+    seed = int.from_bytes(os.urandom(2), 'big')
+    files = {}
+    for i, (folder, labelled) in enumerate([('train', True), ('train', True), ('neg_train', False), ('val', True),
+                                            ('neg_val', False), ('field_1108', True)]):
+        files[f'{folder}/images/{folder}{i}.png'] = real_png(200, 100, seed + i)
+        if labelled:
+            files[f'{folder}/images/{folder}{i}.json'] = label('scratch')
+    src = pool(api, tmp_path, files)
+    split = {f'SES/TX/{p}': 'train' if 'train' in p else 'val' if 'val' in p else 'test'
+             for p in files if p.endswith('.png')}
+    name = f'T-{os.urandom(4).hex()}'
+    make(api, name, [f'{src}@1'], CLASSES, split=split)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'snapshot.cjs'), service.url + '/', tokens['algo'], name, str(shots)],
+                       capture_output=True, text=True, timeout=120, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['top'] == ['📁 neg_train 1', '📁 test 1', '📁 train 2', '📁 val 2']  # not images/<划分>/<现场>/…
+    assert 'fw get 默认取回的一样' in seen['note']
+    assert seen['train'] == ['📁 images 2']
+    assert seen['trainTiles'] == ['train0.png', 'train1.png'] and seen['trainLabeled'] == 2
+    assert seen['crumbs'].endswith('/ train / images') and 'scratch × 1' in seen['image'] and seen['count'] == '1 / 2'
+    assert seen['negTiles'] == ['neg_train2.png'] and seen['valTiles'] == ['neg_val4.png', 'val3.png']
+    assert seen['errors'] == []
+
+
 @pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
 def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, model, snapshot, tmp_path):  # noqa: F811
     from test_evals import add_runner, trained

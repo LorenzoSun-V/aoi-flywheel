@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText,
+  diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
 const files = parseManifest('fw-manifest 1\nA/a.png\taa\t10\nA/a.JSON\tbb\t5\nA/x/b.jpg\tcc\t7\nA/x/y/c.png\tdd\t1\nr.bmp\tee\t2\nnote.txt\tff\t1\n');
@@ -21,6 +21,27 @@ test('folders and images of a folder', () => {
   assert.deepEqual(a.folders, [['x', 2]]);
   assert.deepEqual(a.images.map((f) => f.path), ['A/a.png']);
   assert.deepEqual(listDir(files, 'A/x').folders, [['y', 1]]);
+});
+
+test('a snapshot is listed in the folders fw get makes', () => {
+  const stored = parseManifest('fw-manifest 1\nclasses.txt\tc\t1\nimages/train/SES/TX/train/images/1.bmp\ti1\t9\n'
+    + 'images/train/SES/TX/neg_train/images/2.bmp\ti2\t9\nimages/val/SES/TX/a/b/3.bmp\ti3\t9\n'
+    + 'json/train/SES/TX/train/images/1.json\tj1\t5\nlabels/train/SES/TX/train/images/1.txt\tl1\t40\n');
+  const rows = [['classes.txt', 'c', 1, 'classes.txt'], ['train/images/1.bmp', 'i1', 9, 'images/train/SES/TX/train/images/1.bmp'],
+    ['train/labels/1.txt', 'l1', 40, 'labels/train/SES/TX/train/images/1.txt'], ['neg_train/2.bmp', 'i2', 9, 'images/train/SES/TX/neg_train/images/2.bmp'],
+    ['val/images/3.bmp', 'i3', 9, 'images/val/SES/TX/a/b/3.bmp'], ['val/labels/3.txt', 'e3', 0, null]];
+  const shown = withLayout(stored, rows);
+  assert.deepEqual(listDir(shown, '').folders, [['neg_train', 1], ['train', 1], ['val', 1]]);
+  assert.deepEqual(listDir(shown, 'train').folders, [['images', 1]]);
+  const [neg] = listDir(shown, 'neg_train').images;
+  assert.equal(neg.path, 'images/train/SES/TX/neg_train/images/2.bmp');  // links keep the stored path
+  assert.equal(neg.show, 'neg_train/2.bmp');
+  const [one] = listDir(shown, 'train/images').images;
+  assert.equal(labelIndex(shown, true)(one).path, 'json/train/SES/TX/train/images/1.json');
+  assert.equal(labelIndex(shown, true)(neg), undefined);
+  assert.equal(labelIndex(shown)(one), undefined);  // a pool pairs by the same folder only
+  assert.equal(withLayout(stored, []), stored);  // names collide when flat: the stored folders are shown
+  assert.deepEqual(listDir(stored, '').folders, [['images', 3]]);
 });
 
 test('labels pair with images in any extension case', () => {

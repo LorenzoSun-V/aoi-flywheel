@@ -21,8 +21,9 @@ from . import config
 from .api import Api
 from .cache import Cache, remove_file
 from .checks import IMAGE_EXTS, scan_folder
-from .contract import (BATCH_OBJECT_MAX, TRAINSET_FORMATS, Entry, batches, collisions, diff_entries, manifest_bytes,
-                       manifest_hash, parse_manifest, path_problem, sha256_file, trainset_layout)
+from .contract import (BATCH_OBJECT_MAX, EMPTY_SHA256, NEG_TRAIN, TRAINSET_FORMATS, ContractError, Entry, batches,
+                       collisions, diff_entries, manifest_bytes, manifest_hash, parse_manifest, path_problem,
+                       sha256_file, trainset_layout)
 from .layout import Layout
 from .pool import run_all
 
@@ -334,14 +335,26 @@ def _lay_out(api: Api, cache: Cache, label: str, entries: List[Entry], dest: Pat
         echo(f'  本机缓存里有 {len(refetched)} 个文件和哈希对不上，已重新下载')
 
 
+def _neg_number(value, what: str, whole: bool):
+    """neg_ratio / fix_dataset_length as given: a number that is not negative (the trainer reads its meaning)."""
+    if value is None:
+        return 0
+    ok = isinstance(value, int) if whole else isinstance(value, (int, float))
+    if isinstance(value, bool) or not ok or value != value or value < 0 or value == float('inf'):
+        raise FwError(f'{what} 要是不小于 0 的{"整数" if whole else "数"}，不是 {value!r}')
+    return int(value) if float(value).is_integer() else value  # 100.0 is written as 100: a count stays a count
+
+
 def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Optional[str] = None,
-        workers: int = 8, echo: Echo = print, fmt: Optional[str] = None) -> dict:
+        workers: int = 8, echo: Echo = print, fmt: Optional[str] = None, neg_ratio=None,
+        fix_dataset_length=None) -> dict:
     """Lay out one version in an empty folder, downloading only what the local cache lacks.
 
     link: 'auto' (reflink where the file system can, else copy), 'copy', or 'hardlink' (read-only files
     shared with the cache; only when asked for). Every placed file is hashed and must match the manifest;
     on a mismatch the cache object is downloaded again, and a second mismatch is an error.
-    fmt: for a training-set snapshot, the layout (yolo by default, coco, json or all; see trainset_layout).
+    fmt: for a training-set snapshot, the layout (yolo by default, yolo-tree, coco, json or all; see
+    trainset_layout). neg_ratio, fix_dataset_length: written into the data.yaml of the yolo layout as they are.
     """
     _check_link(link)
     if fmt is not None and fmt not in TRAINSET_FORMATS:
@@ -349,17 +362,26 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
     name, number = parse_ref(ref)
     version = api.version(name, number)
     entries = parse_manifest(api.read_object(version['manifest_sha256']))
-    if version.get('kind') == 'trainset':
+    snapshot = version.get('kind') == 'trainset'
+    if snapshot:
         fmt = fmt or 'yolo'
+    if (neg_ratio is not None or fix_dataset_length is not None) and not (snapshot and fmt == 'yolo' and not subpath):
+        raise FwError('--neg-ratio 和 --fix-dataset-length 写进 data.yaml，只用于整个取回训练集快照的默认格式（yolo）')
+    neg_ratio = _neg_number(neg_ratio, '--neg-ratio', whole=False)
+    fix_dataset_length = _neg_number(fix_dataset_length, '--fix-dataset-length', whole=True)
+    if snapshot:
         short = False
         if fmt != 'all':
             ts = api.trainset(name, version['number'])['trainset']
             held = ts['formats']
-            if fmt not in held:
+            if fmt.split('-')[0] not in held:
                 raise FwError(f'{version["ref"]} 里没有 {fmt} 格式（有 {"、".join(held)}）；'
                               f'为什么没有，见建快照时的提示或 trainset.json 的 missing_formats')
             short = (ts.get('rule') or {}).get('paths') == 'short'
-        entries = trainset_layout(entries, fmt, short)
+        try:
+            entries = trainset_layout(entries, fmt, short)
+        except ContractError as e:
+            raise FwError(f'{version["ref"]}：{e}') from None
     elif fmt not in (None, 'all'):
         raise FwError(f'{version["ref"]} 不是训练集快照，--format 只用于训练集快照')
     if subpath:
@@ -368,33 +390,61 @@ def get(api: Api, cache: Cache, ref: str, dest, link: str = 'auto', subpath: Opt
         if not entries:
             raise FwError(f'{version["ref"]} 里没有 {sp}')
     dest = Path(dest)
-    _lay_out(api, cache, version['ref'], entries, dest, link, workers, echo)
+    # the empty labels the yolo layout gives images without one are not files of the snapshot: made here
+    made = [e for e in entries if e[1] == EMPTY_SHA256] if snapshot and fmt == 'yolo' else []
+    _lay_out(api, cache, version['ref'], [e for e in entries if e[1] != EMPTY_SHA256] if made else entries, dest,
+             link, workers, echo)
+    for rel, _, _ in made:
+        target = _local(dest, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'')
+    if made:
+        echo(f'  另有 {len(made)} 个空标注（没有框的图）')
     out = dict(version, path=str(dest), files=len(entries))
-    if version.get('kind') == 'trainset':
+    if snapshot:
         out['format'] = fmt
-    if fmt == 'yolo' and not subpath:
+    if fmt in ('yolo', 'yolo-tree') and not subpath:
         rels = [rel for rel, _, _ in entries]
-        out['data_yaml'] = str(_write_data_yaml(dest, rels))
-        empty = [s for s in ('train', 'val') if not any(p.startswith(f'images/{s}/') for p in rels)]
+        flat = fmt == 'yolo'
+        negatives = sum(1 for p in rels if p.startswith(NEG_TRAIN + '/'))
+        out['data_yaml'] = str(_write_data_yaml(dest, rels, flat, negatives, neg_ratio, fix_dataset_length))
+        has = (lambda s: f'{s}/images/') if flat else (lambda s: f'images/{s}/')
+        empty = [s for s in ('train', 'val') if not any(p.startswith(has(s)) for p in rels)]
+        if flat:
+            out['neg_train'] = negatives
+            if negatives:
+                echo(f'  train 里没有框的 {negatives} 张图在 {NEG_TRAIN}/，data.yaml 的 negative_setting 已写好'
+                     f'（neg_ratio {neg_ratio}，fix_dataset_length {fix_dataset_length}）')
         if empty:
             out['missing_splits'] = empty
-            echo(f'  已生成 {out["data_yaml"]}（不在快照里）；这个快照没有 {"、".join(empty)} 样本，'
-                 f'不能直接 yolo train（ultralytics 要 train 和 val），只能当测试集用')
+            what = '有框的 train、val' if flat else 'train、val'
+            echo(f'  已生成 {out["data_yaml"]}（不在快照里）；这个快照没有 {"、".join(empty)} 样本'
+                 f'{"（train 只算有框的图）" if flat and "train" in empty else ""}，'
+                 f'不能直接训练（训练要{what}都有），只能当测试集用')
         else:
-            echo(f'  已生成 {out["data_yaml"]}（不在快照里）：yolo train data={out["data_yaml"]}')
+            echo(f'  已生成 {out["data_yaml"]}（不在快照里），训练时把它交给训练代码')
     return out
 
 
-def _write_data_yaml(dest: Path, paths: List[str]) -> Path:
-    """data.yaml for ultralytics, made from classes.txt: the folder's absolute path, the splits it has and
-    the class names. It is written after the snapshot is laid out and is not part of it."""
+def _write_data_yaml(dest: Path, paths: List[str], flat: bool = False, negatives: int = 0, neg_ratio=0,
+                     fix_dataset_length=0) -> Path:
+    """data.yaml made from classes.txt: the folder's absolute path, the splits it has and the class names; for
+    the flat layout also nc and, when train has images without boxes, the negative_setting our trainer reads
+    (neg_train and how many it holds; neg_ratio and fix_dataset_length as given). It is written after the
+    snapshot is laid out and is not part of it."""
     classes = (dest / 'classes.txt').read_text(encoding='utf-8').splitlines()
-    splits = [s for s in ('train', 'val', 'test') if any(p.startswith(f'images/{s}/') for p in paths)]
+    where = (lambda s: f'{s}/images') if flat else (lambda s: f'images/{s}')
+    splits = [s for s in ('train', 'val', 'test') if any(p.startswith(where(s) + '/') for p in paths)]
     q = lambda v: json.dumps(v, ensure_ascii=False)  # noqa: E731  a JSON string is a valid YAML scalar
-    lines = ['# fw get 生成的，不在快照里；ultralytics：yolo train data=<这个文件>',
+    lines = ['# fw get 生成的，不在快照里；训练时把这个文件交给训练代码（ultralytics：yolo train data=<这个文件>）',
              f'path: {q(dest.resolve().as_posix())}']
-    lines += [f'{s}: images/{s}' for s in splits]
+    lines += [f'{s}: {where(s)}' for s in splits]
+    if flat:
+        lines.append(f'nc: {len(classes)}')
     lines += ['names:'] + [f'  {i}: {q(n)}' for i, n in enumerate(classes)]
+    if flat and negatives:
+        lines += ['negative_setting:', f'  neg_ratio: {neg_ratio}', '  use_extra_neg: true', '  extra_neg_sources:',
+                  f'    {NEG_TRAIN}: {negatives}', f'  fix_dataset_length: {fix_dataset_length}']
     path = dest / 'data.yaml'
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return path
@@ -568,8 +618,12 @@ def show_trainset_plan(echo: Echo, preview: dict, classes: List[str]) -> None:
     parts = []
     for split in SPLITS:
         c = counts[split]
-        parts.append(f'{split} {c["samples"]} 张' + (f'（无标注 {c["negatives"]}）' if c['negatives'] else ''))
+        bare = c.get('no_boxes', c['negatives'])  # snapshots from before --test count only images without a label
+        parts.append(f'{split} {c["samples"]} 张' + (f'（没有框的 {bare}）' if bare else ''))
     echo('划分：' + '，'.join(parts))
+    bare = counts['train'].get('no_boxes', counts['train']['negatives'])
+    if bare:
+        echo(f'  fw get 取回时：train 里没有框的 {bare} 张放在 neg_train/，val 和 test 里没有框的和别的图放在一起')
     rows = [(name, [counts[s]['boxes'].get(name, 0) for s in SPLITS]) for name in classes]
     width = max(_width(n) for n in classes + ['类别'])
 
@@ -594,13 +648,15 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
                     require_labels: bool = False, dry_run: bool = False, confirm: Optional[Confirm] = None,
                     echo: Echo = print, label_source: Optional[str] = None,
                     label_classes: Optional[List[str]] = None,
-                    class_map: Optional[Dict[str, str]] = None) -> Optional[dict]:
+                    class_map: Optional[Dict[str, str]] = None, test: float = 0.0) -> Optional[dict]:
     """Preview a training-set snapshot, ask, then freeze it. The server builds both from the same inputs (the
     source versions the preview resolved, e.g. SES-TX@4 for SES-TX), so what is frozen is what was shown; if
     someone made another snapshot of this name meanwhile, it refuses."""
     body = {'sources': list(sources), 'classes': list(classes), 'val': val, 'seed': seed,
             'test_dirs': list(test_dirs), 'merge_test': merge_test, 'new_to': new_to, 'split': split,
             'fresh': fresh, 'note': note, 'require_labels': require_labels}
+    if test:
+        body['test'] = test
     # only when given: a server from before these options still takes the request
     if label_source is not None:
         body['label_source'] = label_source
@@ -611,7 +667,7 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
     preview = api.preview_trainset(name, body)
     rule = preview.get('rule') or {}
     for key, option in (('label_source', '--label-source'), ('label_classes', '--label-classes'),
-                        ('class_map', '--map')):
+                        ('class_map', '--map'), ('test', '--test')):
         if key in body and key not in rule:  # a server from before the option takes the request and ignores it
             raise FwError(f'服务器版本太旧，不认 {option}（会当作没写），先升级服务器')
     if preview['based_on']:
@@ -646,17 +702,20 @@ def create_trainset(api: Api, name: str, sources: List[str], classes: List[str],
     return version
 
 
-def get_trainset(ref: str, dest, fmt: str = 'yolo', link: str = 'auto') -> dict:
+def get_trainset(ref: str, dest, fmt: str = 'yolo', link: str = 'auto', neg_ratio=None,
+                 fix_dataset_length=None) -> dict:
     """For training scripts: lay out a training-set snapshot in `dest` (empty or missing) in one format (yolo,
-    coco, json or all; see docs/trainset-format.md) and return its record: 'id' (pass it when registering the
-    model), 'ref', 'path', 'format', 'classes' (the index is the class id), 'counts', 'sources', and for yolo
-    'data_yaml'. Progress goes to stderr."""
+    yolo-tree, coco, json or all; see docs/trainset-format.md) and return its record: 'id' (pass it when
+    registering the model), 'ref', 'path', 'format', 'classes' (the index is the class id), 'counts', 'sources',
+    for yolo and yolo-tree 'data_yaml', for yolo 'neg_train' (how many images are in neg_train/). neg_ratio and
+    fix_dataset_length go into the data.yaml of the yolo layout as given. Progress goes to stderr."""
     name, number = parse_ref(ref)
     api = connect()
     cache = Cache()
     try:
         info = api.trainset(name, number)
-        version = get(api, cache, info['ref'], dest, link=link, echo=lambda s: print(s, file=sys.stderr), fmt=fmt)
+        version = get(api, cache, info['ref'], dest, link=link, echo=lambda s: print(s, file=sys.stderr), fmt=fmt,
+                      neg_ratio=neg_ratio, fix_dataset_length=fix_dataset_length)
     finally:
         cache.close()
         api.close()

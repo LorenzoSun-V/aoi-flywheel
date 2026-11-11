@@ -169,7 +169,9 @@ fw get SES-TX@3 --to D:\fw\v3
 |---|---|
 | `--to` | 必填，目标目录：要不存在或是空的 |
 | `--subpath` | 只取版本里的一个子目录，例如 `--subpath pos/train`；训练集快照按 `--format` 摆好以后的路径算 |
-| `--format` | 只用于训练集快照：`yolo`（默认）、`coco`、`json`、`all`，见下文 |
+| `--format` | 只用于训练集快照：`yolo`（默认，平铺）、`yolo-tree`、`coco`、`json`、`all`，见下文 |
+| `--neg-ratio` | 只用于整个取回快照的默认格式：写进 `data.yaml` 的 `negative_setting.neg_ratio`，默认 0。平台原样写，不解释它的含义 |
+| `--fix-dataset-length` | 同上，写进 `negative_setting.fix_dataset_length`，默认 0 |
 | `--copy` | 总是复制 |
 | `--hardlink` | 硬链接，只限 Linux：不多占盘，但取出的文件只读，和缓存共用一份数据，不能改 |
 | `--workers` | 并行数，默认 8 |
@@ -187,10 +189,22 @@ fw get SES-TX@3 --to D:\fw\v3
 
 方式默认先试 reflink（btrfs、XFS 上不多占盘，改文件也不影响缓存），不支持就复制（NTFS、ext4）。改取出来的文件不会影响缓存，也不会影响任何版本。
 
-**取训练集快照**：默认摆成 YOLO 的目录，另生成 `data.yaml`，可以直接 `yolo train data=<目录>/data.yaml`。
+**取训练集快照**：默认摆成平铺的 YOLO 目录，另生成 `data.yaml`，交给训练代码（rf-detr-pro、ultralytics 都能读）：
 
 ```
-fw get SES-TX-det@2 --to D:\train\det2                   # YOLO：images/train/1.bmp、labels/train/1.txt、data.yaml
+train/images/  train/labels/     train 里有框的图和它们的标注
+neg_train/                       train 里没有框的图（负样本），不带标注
+val/images/    val/labels/       val 的全部图，有框没框放在一起；没有框的图是空的 txt
+test/images/   test/labels/      test 同上
+classes.txt  trainset.json  data.yaml
+```
+
+每个目录都只有一层，文件名就是图片原来的文件名，数据池里的目录不保留。没有 `neg_val`、`neg_test`。`data.yaml` 里有 `negative_setting`（`extra_neg_sources` 的 `neg_train` 写实际张数，`neg_ratio` 和 `fix_dataset_length` 默认 0，可以用 `--neg-ratio`、`--fix-dataset-length` 给）。两张图文件名相同（来自不同目录或不同来源）时平铺不了，`fw get` 会列出这些文件，改用 `--format yolo-tree`，或者给文件改名后重建快照。
+
+```
+fw get SES-TX-det@2 --to D:\train\det2                   # 平铺：train/images、train/labels、neg_train、val、test、data.yaml
+fw get SES-TX-det@2 --to D:\train\det2 --neg-ratio 0.2 --fix-dataset-length 5000
+fw get SES-TX-det@2 --to D:\train\det2-tree --format yolo-tree  # 0.3.0 以前的默认：images/train/…、labels/train/…，保留数据池的目录
 fw get SES-TX-det@2 --to D:\train\det2-coco --format coco  # COCO：train/ valid/ test/ 各有 _annotations.coco.json
 fw get SES-TX-det@2 --to D:\look\det2 --format json       # 图片和 LiteAnno JSON 放在一起，用 LiteAnno 打开看
 ```
@@ -226,13 +240,14 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes4.txt --label-sou
 
 从一个或几个数据池版本建训练集快照：每张图分到 train、val 或 test，连同类别表一起冻结。训练时取这个快照，模型登记时带上它，以后就能从模型查回训练用的每个文件。目录和文件的格式见[训练集快照的格式](trainset-format.md)。
 
-先预览：每个划分多少张（其中多少张没有标注）、每个类别在每个划分里多少个框，接着上一版时还有新增、移除、换了划分、标注改了的个数，还有生成了哪几种标注格式。确认后才建。建的时候服务器把标注转成 YOLO 和 COCO 检测框，和图片、原始 JSON 一起冻结（转换规则见[训练集快照的格式](trainset-format.md#标注怎么转)）。同一个名称再运行一次，就是这个快照的下一版，默认**接着上一版的划分**：原来的样本不换划分，新样本进 test。
+先预览：每个划分多少张（其中多少张没有框，train 里没有框的取回时放在 `neg_train/`）、每个类别在每个划分里多少个框，接着上一版时还有新增、移除、换了划分、标注改了的个数，还有生成了哪几种标注格式。确认后才建。建的时候服务器把标注转成 YOLO 和 COCO 检测框，和图片、原始 JSON 一起冻结（转换规则见[训练集快照的格式](trainset-format.md#标注怎么转)）。同一个名称再运行一次，就是这个快照的下一版，默认**接着上一版的划分**：原来的样本不换划分，新样本进 test。
 
 | 选项 | 说明 |
 |---|---|
 | `--from` | 必填，来源数据池版本，例如 `SES-TX@4`；几条产线合成一个快照就写几次。来源数据集要填了现场和产线 |
 | `--classes` | 必填，类别表文件：一行一个类别名，行号（从 0 起）是类别编号，YOLO 和 COCO 都用它。标注里有表以外的类别，或者 YOLO 编号超出范围，就不建 |
-| `--val` | train/val 里 val 的比例，默认 0.2 |
+| `--val` | 按比例划分时 val 的比例，默认 0.2 |
+| `--test` | 按比例划分时 test 的比例，默认 0（不分 test）。7:2:1 就是 `--val 0.2 --test 0.1`。有框的图和没有框的图分别按比例分，所以 val、test 里也有相应比例的负样本。不能和 `--merge-test`、`--split-file` 一起用 |
 | `--seed` | 种子，默认 0。同样的样本、比例和种子，分法总是一样 |
 | `--test-dirs` | 这些目录下的新样本进 test，例如 `2026-10`，或带上现场和产线 `SES/TX/2026-10`；逗号分隔或写多次 |
 | `--merge-test` | 上一版 test 里的样本重新分到 train/val（比如上一版的 test 已经测完了，要并进来训练） |
@@ -259,6 +274,7 @@ fw trainset create SES-TX-det --from SES-TX@4 --classes classes4.txt --label-sou
 - 预览之后有人建了同名快照的新版本（或者同时有人建同名的第一版），就不建，重新运行一次即可。第一版没建成时名称也不会被占住。
 - 同一现场和产线的两个来源里有同名不同扩展名的图片（例如 `same/a.png` 和 `same/a.jpg`）时不建：它们的 YOLO 标注会是同一个文件。
 - 没有 train 或 val 样本时预览会提醒：这样的快照只能当测试集，不能直接训练。
+- 有文件名在平铺后会重名时预览会提醒（照样能建）：这个快照取回时只能用 `--format yolo-tree`。
 - 服务器要读每个标注文件核对类别，几十万张图时预览和建快照各要一些时间。
 
 ### fw trainset list 和 fw trainset show
@@ -396,7 +412,7 @@ fw eval show 12
 - 同样的模型版本、测试集和文件再登记一次，返回已有的那份报告。
 - 模型版本只写名称时，先定下是哪个版本（例如 `SES-TX-detr@3`）再登记；网络断了重试，也还是登记在这个版本上。
 - 用 `--deteval` 时，先把整个输出目录复制一份，指标从这份复制里读，归档的也是这份：登记途中评估程序再改、删、加文件都不影响这次登记。
-- 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --format yolo --to <目录>` 取出来再评，评的就是它。aoi-deteval 现在只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值，快照的图片按原路径可能分了几层（0.2.3 起取回时已去掉现场、产线两层），要等 aoi-deteval 改成递归读取、按相对划分目录的路径对应，或者先把图片摆成一层（文件名不重复）再评。
+- 用 `--deteval` 时，选中的集合评的图片数要和测试集一样（快照数 `images/<划分>/` 下的图，数据集版本数全部图片），不一样就不登记：val 的报告不会被登记成 test 的成绩。只核对张数，不核对是哪几张：用 `fw get SES-TX-det@2 --to <目录>` 取出来再评，评的就是它。aoi-deteval 只读一层目录（`list_images` 不递归），而且按文件名（不带目录）对应预测和真值；默认的平铺格式里 `test/images/` 正好是一层、文件名不重复。
 
 ### fw predict run、list、show、get
 
@@ -577,7 +593,7 @@ m = fw.get_model('SES-TX-detr@3', '/opt/deploy/models/SES-TX-detr@3')
 print(m['path'], m['onnx_sha256'], m['classes'])
 ```
 
-`fw.get_trainset(ref, dest, fmt='yolo')`：`fmt` 和 `fw get --format` 一样。返回的记录里另有 `format`、`data_yaml`（YOLO 时，给 ultralytics 的 `data=`）、`classes`（类别名列表）、`counts`（每个划分的张数和每类框数）、`formats`（快照里有的格式）、`sources`（来源版本）、`based_on`（接着哪个快照）和 `rule`（划分规则）；不是快照的名称会报错（`fw.ApiError`，`.status` 是 400）。
+`fw.get_trainset(ref, dest, fmt='yolo', neg_ratio=None, fix_dataset_length=None)`：`fmt` 和 `fw get --format` 一样，后两个和 `--neg-ratio`、`--fix-dataset-length` 一样。返回的记录里另有 `format`、`data_yaml`（`yolo` 和 `yolo-tree` 时，交给训练代码）、`neg_train`（`yolo` 时，`neg_train/` 里的张数）、`classes`（类别名列表）、`counts`（每个划分的张数和每类框数）、`formats`（快照里有的格式）、`sources`（来源版本）、`based_on`（接着哪个快照）和 `rule`（划分规则）；不是快照的名称会报错（`fw.ApiError`，`.status` 是 400）。
 
 ```python
 from ultralytics import YOLO

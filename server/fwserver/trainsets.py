@@ -24,7 +24,8 @@ Making one (plan, then create):
    ids out of range, shapes that cannot be a detection box and boxes outside the image;
 4. assign splits: from a split file; or continuing the previous snapshot (old samples keep their split, new
    ones go to test unless told otherwise, optionally old test merged into train/val); or fresh (chosen test
-   folders to test, the rest to train/val). train/val is cut by ratio in an order fixed by the seed;
+   folders to test, the rest to train/val/test). The ratio cut is made in an order fixed by the seed, among the
+   images with boxes and among those without separately;
 5. build the tree with the converted labels, store them, classes.txt, trainset.json and the manifest, then
    datasets.create_version with trainset=True, which writes the trainset rows in the same transaction before
    the version is frozen.
@@ -40,7 +41,7 @@ from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
 from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, fold, manifest_bytes,
-                         path_problem, short_paths, trainset_layout, yolo_label_stem)
+                         path_problem, short_paths, trainset_flat, trainset_layout, yolo_label_stem)
 
 from . import datasets, formats
 from .datasets import DatasetError
@@ -50,6 +51,7 @@ from .store import Store
 FORMAT = 'fw-trainset 1'
 PATHS = 'short'  # how fw get lays out new snapshots (rule 'paths'); None was the layout before 0.2.3
 SPLITS = ('train', 'val', 'test')
+STRATIFY = 'boxes'  # rule 'stratify': the ratio cut is made among images with boxes and among those without
 NEW_TO = ('test', 'trainval')
 MAX_CLASSES = 1000
 EXAMPLES = 5
@@ -90,6 +92,7 @@ class Options:
     label_source: Optional[str] = None  # 'json' or 'txt': which label to use for an image that has both
     label_classes: Optional[List[str]] = None  # the class table the .txt labels are numbered by (None: classes)
     class_map: Optional[Dict[str, str]] = None  # class in the labels -> class in classes, or '' (drop the box)
+    test: float = 0.0  # the share of the samples cut by ratio that goes to test (0: train/val only)
 
 
 def _examples(items, n: int = EXAMPLES) -> str:
@@ -145,6 +148,14 @@ def check_options(o: Options) -> None:
                 raise DatasetError(400, f'映射 {old}={new} 的目标 {new!r} 不在类别表里（要去掉这类框就写 {old}=）')
     if not 0 <= o.val < 1 or math.isnan(o.val):
         raise DatasetError(400, 'val 比例应在 0 到 1 之间（不含 1）')
+    if not 0 <= o.test < 1 or math.isnan(o.test):
+        raise DatasetError(400, 'test 比例应在 0 到 1 之间（不含 1）')
+    if o.val + o.test >= 1:
+        raise DatasetError(400, 'val 和 test 的比例加起来要小于 1，不然 train 是空的')
+    if o.test and o.merge_test:
+        raise DatasetError(400, '--merge-test 是把上一版的 test 分回 train/val，不能和 --test 比例一起用')
+    if o.test and o.split is not None:
+        raise DatasetError(400, '用了划分清单，就不能再用 --test 比例')
     if o.new_to not in NEW_TO:
         raise DatasetError(400, f'新样本的去向只能是 {"、".join(NEW_TO)}')
     if o.label_source is not None and o.label_source not in LABEL_SOURCES:
@@ -293,6 +304,8 @@ def _parse(store: Store, label: File, o: Options):
         parsed.data = data[len(BOM):]  # YOLO readers take the BOM for part of the first class id
     if formats.remap_txt(parsed, class_map, o.classes):
         parsed.data = formats.yolo_bytes(parsed, o.classes, None)
+    if not parsed.names and (data if parsed.data is None else parsed.data):
+        parsed.data = b''  # only blank lines: frozen empty, so a label's size tells whether it has a box
     return parsed
 
 
@@ -431,11 +444,13 @@ def _order(seed: int, key: str) -> bytes:
     return hashlib.sha256(f'{seed}\n{key}'.encode('utf-8')).digest()
 
 
-def _cut(keys: List[str], val: float, seed: int) -> Dict[str, str]:
-    """train/val for these keys: the same keys, ratio and seed always give the same cut."""
+def _cut(keys: List[str], val: float, seed: int, test: float = 0.0) -> Dict[str, str]:
+    """train/val/test for these keys: the same keys, ratios and seed always give the same cut. In the order the
+    seed fixes, the first round(n * test) go to test, the next round(n * val) to val, the rest to train."""
     ordered = sorted(keys, key=lambda k: _order(seed, k))
-    n_val = round(len(ordered) * val)
-    return {k: ('val' if i < n_val else 'train') for i, k in enumerate(ordered)}
+    n_test = round(len(ordered) * test)
+    n_val = min(round(len(ordered) * val), len(ordered) - n_test)
+    return {k: ('test' if i < n_test else 'val' if i < n_test + n_val else 'train') for i, k in enumerate(ordered)}
 
 
 def _in_dirs(s: Sample, dirs: List[str]) -> Optional[str]:
@@ -475,13 +490,15 @@ def _assign(samples: Dict[str, Sample], o: Options, previous: Optional[Dict[str,
             s.split = 'test'
         else:
             pool.append(k)
-    for k, split in _cut(pool, o.val, o.seed).items():
-        samples[k].split = split
+    # images with boxes and images without are cut separately, so every split gets its share of both
+    for group in ([k for k in pool if samples[k].names], [k for k in pool if not samples[k].names]):
+        for k, split in _cut(group, o.val, o.seed, o.test).items():
+            samples[k].split = split
     unused = [d for d, n in used.items() if n == 0]
     if unused:
         problems.append(f'--test-dirs 里的 {_examples(unused)} 没有任何样本（写错了？）')
-    rule = {'mode': 'continue' if previous is not None else 'fresh', 'val': o.val, 'seed': o.seed,
-            'test_dirs': dirs, 'merge_test': o.merge_test}
+    rule = {'mode': 'continue' if previous is not None else 'fresh', 'val': o.val, 'test': o.test, 'seed': o.seed,
+            'stratify': STRATIFY, 'test_dirs': dirs, 'merge_test': o.merge_test}
     if previous is not None:
         rule['new_to'] = o.new_to
     return rule, problems
@@ -494,6 +511,7 @@ def _counts(samples: Dict[str, Sample], classes: List[str]) -> dict:
         members = [s for s in samples.values() if s.split == split]
         boxes = Counter(n for s in members for n in s.names)
         counts[split] = {'samples': len(members), 'negatives': sum(1 for s in members if s.label is None),
+                         'no_boxes': sum(1 for s in members if not s.names),  # negatives and labels without a box
                          'boxes': {c: boxes.get(c, 0) for c in classes}}
     return counts
 
@@ -579,6 +597,8 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
             entries.append(made(f'coco/{split}.json', formats.coco_bytes(coco[split], classes)))
     problems = [f'{p}：{why}' for p, why in ((e[0], path_problem(e[0])) for e in entries) if why]
     for fmt in TRAINSET_FORMATS:  # every layout fw get can make must work on Windows too
+        if fmt == 'yolo':  # the flat layout: its collisions do not stop the snapshot (plan tells), fw get refuses
+            continue
         problems += collisions(e[0] for e in trainset_layout(entries, fmt))
         short_layout = [e[0] for e in trainset_layout(entries, fmt, short=True)]
         twins = sorted(p for p, n in Counter(short_layout).items() if n > 1)
@@ -594,7 +614,7 @@ def _shared_labels(entries: List[File]) -> List[str]:
     share one label even when one of them has none. One pass, grouped by the folded stem."""
     problems = []
     images = [e for e in entries if e[0].startswith('images/')]
-    for fmt in ('yolo', 'json'):
+    for fmt in ('yolo-tree', 'json'):
         by_label = defaultdict(list)
         for path, _, _ in trainset_layout(images, fmt, short=True):
             by_label[fold(_stem(path))].append(path)
@@ -680,6 +700,10 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
             'formats': summary['formats'], 'missing_formats': summary['missing_formats']}
     classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
     p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
+    flat = trainset_flat(p.entries)[1]
+    if flat:
+        p.notices.append(f'有 {len(flat)} 处文件名在平铺后会重名，这个快照取回时不能用默认的平铺目录（--format yolo），'
+                         f'只能用 --format yolo-tree 保留原目录；要平铺就先给文件改名：{_examples(flat, 3)}')
     if latest is not None and not p.problems and _same_content(conn, latest, p.entries) and \
             (_previous_rule(conn, latest) or {}).get('paths') == rule.get('paths'):  # a new layout is a change
         p.problems.append(f'和 {latest["ref"]} 完全一样（样本、划分、标注和类别表都没变），不用建新快照')
@@ -765,6 +789,16 @@ def get(conn, name: str, number: str) -> dict:
         raise DatasetError(400, f'{version["ref"]} 不是训练集快照')
     version.update(info(conn, version['id']))
     return version
+
+
+def layout(conn, name: str, number: str) -> dict:
+    """Where the default fw get (the flat yolo layout) puts every file of a snapshot, for the web page: rows of
+    [path there, sha256, size, stored path or None for an empty label made on the way]; or why it cannot be
+    laid out flat."""
+    version = get(conn, name, number)
+    rows, problems = trainset_flat(_files(conn, version['id']))
+    return {'ref': version['ref'], 'format': 'yolo', 'files': [] if problems else [list(r) for r in rows],
+            'problems': problems[:EXAMPLES], 'problem_count': len(problems)}
 
 
 def list_trainsets(conn) -> List[dict]:
