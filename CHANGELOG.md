@@ -27,6 +27,15 @@
 - fw-server 在 `/` 提供网页（原生 JS，不用构建，和 API 同一个端口）：凭据登录、数据集和版本列表、按目录浏览版本里的图片、看大图和标注框（预标注显示分数）、比较两个版本。
 - 页面只加载自己的脚本和样式（Content-Security-Policy），平台里的文字只当文字显示。
 
+训练集快照按和训练代码约定的目录取回（2026-11-11）：
+
+- **`fw get` 取快照的默认目录变了**：现在是平铺的 `train/images` + `train/labels`（train 里有框的图）、`neg_train/`（train 里没有框的图，不带标注）、`val/images` + `val/labels`、`test/images` + `test/labels`（有框没框放在一起，没有标注的图补一个空 txt）。没有 `neg_val`、`neg_test`，每个目录只有一层（rf-detr-pro 读目录不递归），文件名就是图片原来的文件名。已有的快照不用重建，直接取就是新目录。原来的 `images/<划分>/…` 目录改叫 `--format yolo-tree`。
+- 平铺后文件名相同的图（来自不同目录或来源）摆不了：`fw get` 列出它们并提示用 `--format yolo-tree`，建快照的预览也会提醒。
+- `data.yaml` 按 rf-detr-pro 的写法：`path`、`train: train/images`、`val: val/images`、`test: test/images`（有才写）、`nc`、`names`，train 有没有框的图时加 `negative_setting`（`use_extra_neg: true`、`extra_neg_sources: {neg_train: 实际张数}`）。`fw get --neg-ratio`、`--fix-dataset-length` 写进去（默认都是 0），平台不解释。
+- `fw trainset create --test <比例>`：按比例三分，例如 7:2:1 是 `--val 0.2 --test 0.1`。**按比例分时有框的图和没有框的图现在分别分**，val、test 都有相应比例的负样本；所以同样的参数重新划分（第一版或 `--fresh`）得到的划分和以前不一样，已有快照和接着上一版的样本不受影响。规则里多了 `test` 和 `stratify`，统计里多了 `no_boxes`（没有框的图，含空标注的）。
+- 只有空行的 txt 标注冻结成空文件。
+- 网页看快照时目录和 `fw get` 默认取回的一样（原来显示的是存储用的 `images/<划分>/<现场>/<产线>/<原路径>`），快照里的图也能看到标注框了。新接口 `GET /api/v1/trainsets/<名称>/versions/<序号>/layout`。
+
 第四步之二：网页上的模型、评估、任务和预测集。
 
 - 模型和版本页：训练集快照、来源数据池、文件下载、评估报告、预测集；勾两份评估报告逐项比较指标。

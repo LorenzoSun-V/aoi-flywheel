@@ -56,7 +56,7 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
-tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、models.cjs、upload.cjs（Playwright 走页面，由 test_web.py 调）
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
@@ -97,7 +97,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 6. `_formats`、`_tree`：看能生成哪些格式（COCO 要每张图的尺寸），摆出 `images/`、`labels/`、`json/`、`coco/`，加上 `classes.txt`、`trainset.json`；核对路径规则，并用 `contract.trainset_layout` 核对每种取回格式摆出来都不冲突。转出来的 YOLO 和 COCO 文件放在 `Plan.blobs` 里，建快照时写进文件库。
 7. `create`：先看最新版还是不是预览时那个（不是就 409），把 `classes.txt`、`trainset.json`、清单写进文件库，再调 `datasets.create_version(trainset=True, record=…, new_dataset=…)`：第一版时在同一个事务里先插入数据集那一行（`ON CONFLICT DO NOTHING`，别人同时建了就 409），再在冻结之前写 `trainset_versions` 和 `trainset_sources` 两张表。所以第一版失败不留下空名称。
 
-快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径（YOLO 时再写 `data.yaml`，并用 `yolo_safe` 把原路径里叫 `images` 的目录改名，因为 ultralytics 和 aoi-deteval 把最后一个 `images/` 换成 `labels/` 找标注）。
+快照就是一个普通版本，导出、核对、对比都不需要专门的代码；取回时 `ops.get` 按 `contract.trainset_layout` 只改路径。默认的 `yolo` 是平铺的（`contract.trainset_flat`）：只留文件名，train 里没有框的图（没有标注，或标注小于 `MIN_BOX_BYTES`）去 `neg_train/`，val、test 里没有标注的图补一个空标注（`EMPTY_SHA256`，`ops.get` 直接写出来，不从服务器取），重名就拒绝；`data.yaml` 由 `ops._write_data_yaml` 写，带 `negative_setting`。`yolo-tree` 保留数据池的目录，并用 `yolo_safe` 把原路径里叫 `images` 的目录改名（ultralytics 和 aoi-deteval 把最后一个 `images/` 换成 `labels/` 找标注）；评估任务（`contract.eval_selection`）用的是 `yolo-tree`。网页用 `GET /api/v1/trainsets/<名称>/versions/<序号>/layout`（`trainsets.layout`，同一个 `trainset_flat`）按平铺目录显示快照，页面里文件的 `path` 仍是存储路径。
 
 ## 一次登记模型版本在代码里怎么走
 
@@ -138,7 +138,8 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | YOLO 格式里每张图的标注就在 ultralytics 找的位置 | `contract.yolo_safe`、`trainsets._tree`（去掉 BOM） | `test_images_folders_inside_the_pool_path`、`test_yolo_label_with_a_bom`、`test_yolo_layout_renames_images_folders` |
 | `fw get` 取回的路径去掉现场/产线和池里的 `images/` 层；去掉后重名的快照不建；旧快照仍是长路径 | `contract.short_paths`、`trainset_layout(short=)`、`trainsets._tree`、`ops.get`（看 `rule.paths`） | `test_short_paths_for_fw_get`、`test_short_paths_that_collide_are_refused`、`test_short_paths_never_share_a_label`、`test_shared_label_check_is_one_pass`、`test_an_old_layout_snapshot_can_be_made_again_with_short_paths`、`test_a_yolo_pool_pairs_images_with_labels` |
 | 导入扫描按 `images/` ↔ `labels/` 配对，不误报「没有标注」「找不到图片」 | `checks.scan_folder` | `test_yolo_labels_pair_with_images` |
-| 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split` |
+| 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样；按比例分时有框和没有框的图分别分，val、test 都有相应比例的负样本 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split`、`test_a_three_way_split_gives_every_split_its_share_of_negatives` |
+| `fw get` 默认的平铺目录：train 里没有框的图在 `neg_train/`（不带标注），val、test 有框没框放在一起（没有标注的补空 txt），没有 `neg_val`、`neg_test`，每个目录只有一层；平铺后重名就不摆、列出来；`data.yaml` 带 `negative_setting`，`neg_train` 的张数是实际的；网页按同样的目录显示 | `contract.trainset_flat`、`ops.get`、`ops._write_data_yaml`、`trainsets.layout`、`web/app.js` 的 `viewFiles` | `test_the_flat_layout_keeps_train_negatives_apart`、`test_names_that_collide_when_flat_are_listed`、`test_fw_get_lays_a_snapshot_out_flat_with_train_negatives_apart`、`test_no_negative_setting_without_train_negatives`、`test_names_that_collide_flat_are_told_in_the_preview_and_refused_by_fw_get`、`test_a_snapshot_is_shown_in_the_folders_fw_get_makes` |
 | 转好的 YOLO / COCO 标注随快照冻结，取回只改路径不改内容；转不了的形状、图外的框不悄悄丢掉，直接不建 | `formats.py`、`trainsets._tree`、`contract.trainset_layout` | `test_formats.py`、`test_first_snapshot_layout_and_formats`、`test_labels_that_cannot_be_detection_boxes` |
 | 模型、模型版本、评估报告、发布、标签记录登记后不能改、不能删；文件集冻结后不能改；每个文件集只属于一个模型版本或评估报告（新建文件集时和插入模型版本、评估报告时都查）；模型版本只能引用训练集快照，ONNX 哈希就是文件集里的 `model.onnx`；现场和产线只能用汉字、英文字母、数字、`_`、`.`，和 `models.SITE_LINE` 是同一条按码位的规则 | 数据库触发器和 CHECK（`0003_models.sql`） | `test_records_cannot_change`、`test_what_the_database_refuses`、`test_a_file_set_has_one_owner`、`test_two_lines_never_share_a_release_ref`、`test_the_database_takes_the_names_the_server_takes` |
 | 评估和发布登记在具体的模型版本上，重试不会换版本；`--deteval` 的集合就是声明的测试集（集合名、图片数） | `ops._pin`、`models._pinned`、`ops._deteval_metrics` | `test_a_retry_stays_on_the_version_it_meant`、`test_a_deteval_report_must_be_the_test_set` |

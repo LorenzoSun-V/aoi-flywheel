@@ -83,7 +83,8 @@ def splits_of(tree: dict) -> dict:
 
 
 def fetch(api, cache, ref, dest, fmt='all') -> dict:
-    """The snapshot as stored (paths keep <site>/<line>/<path in pool>); fmt=None is fw get's default, yolo."""
+    """The snapshot as stored (paths keep <site>/<line>/<path in pool>); fmt=None is fw get's default, the flat
+    yolo layout."""
     ops.get(api, cache, ref, dest, echo=quiet, fmt=fmt)
     return read_tree(dest)
 
@@ -157,14 +158,14 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     assert counts['train']['negatives'] + counts['val']['negatives'] == 3
     assert sum(counts[s]['boxes']['dent'] for s in ('train', 'val')) == 21
 
-    tree = fetch(api, cache, v['ref'], tmp_path / 'yolo', fmt=None)  # yolo is the default
+    tree = fetch(api, cache, v['ref'], tmp_path / 'yolo', fmt='yolo-tree')
     assert tree['classes.txt'] == b'scratch\ndent\n'
     info = json.loads(tree['trainset.json'])
     assert info['format'] == trainsets.FORMAT and info['counts'] == counts and info['classes'] == CLASSES
     assert info['task'] == 'det' and info['formats'] == ['yolo', 'coco', 'json'] and info['missing_formats'] == {}
     assert info['sources'][0]['ref'] == f'{src}@1'
-    assert info['rule'] == {'mode': 'fresh', 'val': 0.25, 'seed': 0, 'test_dirs': ['2026-10'], 'merge_test': False,
-                            'paths': 'short'}
+    assert info['rule'] == {'mode': 'fresh', 'val': 0.25, 'test': 0.0, 'seed': 0, 'stratify': 'boxes',
+                            'test_dirs': ['2026-10'], 'merge_test': False, 'paths': 'short'}
     splits = splits_of(tree)
     assert len(splits) == 29 and all(s == 'test' for k, s in splits.items() if k.startswith('2026-10/'))
     for path, data in files.items():
@@ -522,7 +523,7 @@ def test_images_folders_inside_the_pool_path(api, cache, tmp_path):
     src = pool(api, tmp_path, files, line='images')
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
     dest = tmp_path / 'g'
-    tree = fetch(api, cache, v['ref'], dest, fmt=None)
+    tree = fetch(api, cache, v['ref'], dest, fmt='yolo-tree')
     images = sorted(p for p in tree if p.startswith('images/'))
     assert images == ['images/train/batch/one.png', 'images/train/images__/two.png']  # the last images/ goes
     for image in images:  # where ultralytics (and aoi-deteval) look for the label is where it is
@@ -542,7 +543,7 @@ def test_a_yolo_pool_pairs_images_with_labels(api, cache, tmp_path):
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], val=0)
     train = v['trainset']['counts']['train']
     assert (train['samples'], train['negatives']) == (4, 1)
-    tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt=None)
+    tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt='yolo-tree')
     assert tree['labels/train/b1/a.txt'] == yolo_line(1).encode()  # tx_v8/images/1.bmp -> images/train/1.bmp
     assert tree['labels/train/b1/sub/c.txt'] == yolo_line(0).encode()
     assert tree['labels/train/top.txt'] == yolo_line(0).encode() and tree['images/train/top.png']
@@ -847,8 +848,8 @@ def test_a_snapshot_without_val_says_it_cannot_train(api, cache, tmp_path):
     assert any('没有 val 样本' in line for line in lines)
     lines.clear()
     out = ops.get(api, cache, v['ref'], tmp_path / 'g', echo=lines.append)
-    assert out['missing_splits'] == ['val'] and any('不能直接 yolo train' in line for line in lines)
-    assert not any('yolo train data=' in line for line in lines)
+    assert out['missing_splits'] == ['val'] and any('不能直接训练' in line for line in lines)
+    assert not any('交给训练代码' in line for line in lines)
 
 
 def test_yolo_label_with_a_bom(api, cache, tmp_path):
@@ -1005,3 +1006,177 @@ def test_command_line_and_get_trainset(service, tokens, api, tmp_path, monkeypat
     assert ts['formats'] == ['yolo', 'coco', 'json']
     js = fw.get_trainset(name, tmp_path / 'json', fmt='json')
     assert 'data_yaml' not in js and (tmp_path / 'json' / 'test' / '2026-10' / 'img000.json').is_file()
+
+
+# --- the flat layout of fw get, the three-way split ----------------------------------------------------
+def flat_pool(api, tmp_path) -> str:
+    """A pool laid out like the field's: train, neg_train, val, neg_val and a field folder, each with images/
+    and labels/ (YOLO txt; the negatives have an empty label, a blank one, or none)."""
+    files = {}
+    for i in range(3):
+        files[f'train/images/t{i}.bmp'] = png(uuid.uuid4().hex)
+        files[f'train/labels/t{i}.txt'] = yolo_line(i % 2).encode()
+    files.update({'neg_train/images/n0.bmp': png(uuid.uuid4().hex), 'neg_train/labels/n0.txt': b'',
+                  'neg_train/images/n1.bmp': png(uuid.uuid4().hex), 'neg_train/labels/n1.txt': b'\n \n\n\n\n\n\n\n\n\n',
+                  'neg_train/images/n2.bmp': png(uuid.uuid4().hex),
+                  'val/images/v0.bmp': png(uuid.uuid4().hex), 'val/labels/v0.txt': yolo_line(1).encode(),
+                  'neg_val/images/w0.bmp': png(uuid.uuid4().hex),
+                  'neg_val/images/w1.bmp': png(uuid.uuid4().hex), 'neg_val/labels/w1.txt': b'',
+                  'field_1108/images/f0.bmp': png(uuid.uuid4().hex), 'field_1108/labels/f0.txt': yolo_line(0).encode(),
+                  'field_1108/images/f1.bmp': png(uuid.uuid4().hex)})
+    return pool(api, tmp_path, files), files
+
+
+def cli_login(service, tokens, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv('FW_CONFIG', str(tmp_path / 'config.json'))
+    monkeypatch.setenv('FW_CACHE', str(tmp_path / 'cache'))
+    monkeypatch.setenv('FW_SERVER', service.url)
+    monkeypatch.setenv('FW_TOKEN', tokens['algo'])
+
+
+def flat_split(files: dict) -> dict:
+    split = {}
+    for path in files:
+        if '/images/' in path:
+            top = path.split('/')[0]
+            split[f'SES/TX/{path}'] = 'train' if 'train' in top else 'val' if 'val' in top else 'test'
+    return split
+
+
+def test_fw_get_lays_a_snapshot_out_flat_with_train_negatives_apart(service, tokens, api, cache, tmp_path,
+                                                                    monkeypatch):
+    cli_login(service, tokens, tmp_path, monkeypatch)
+    src, files = flat_pool(api, tmp_path)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    lines = []
+    v = ops.create_trainset(api, name, [f'{src}@1'], CLASSES, split=flat_split(files), echo=lines.append)
+    counts = v['trainset']['counts']
+    assert (counts['train']['samples'], counts['train']['negatives'], counts['train']['no_boxes']) == (6, 1, 3)
+    assert (counts['val']['no_boxes'], counts['test']['no_boxes']) == (2, 1)
+    assert any('train 里没有框的 3 张放在 neg_train/' in line for line in lines)
+    assert not any('平铺后会重名' in line for line in lines)
+
+    lines.clear()
+    out = ops.get(api, cache, name, tmp_path / 'g', echo=lines.append)  # the default
+    tree = read_tree(tmp_path / 'g')
+    assert sorted(tree) == sorted(
+        ['classes.txt', 'trainset.json', 'data.yaml'] +
+        [f'train/images/t{i}.bmp' for i in range(3)] + [f'train/labels/t{i}.txt' for i in range(3)] +
+        ['neg_train/n0.bmp', 'neg_train/n1.bmp', 'neg_train/n2.bmp'] +
+        ['val/images/v0.bmp', 'val/images/w0.bmp', 'val/images/w1.bmp',
+         'val/labels/v0.txt', 'val/labels/w0.txt', 'val/labels/w1.txt'] +
+        ['test/images/f0.bmp', 'test/images/f1.bmp', 'test/labels/f0.txt', 'test/labels/f1.txt'])
+    assert tree['train/images/t1.bmp'] == files['train/images/t1.bmp']
+    assert tree['train/labels/t1.txt'] == yolo_line(1).encode()
+    assert tree['neg_train/n1.bmp'] == files['neg_train/images/n1.bmp']
+    assert tree['val/labels/w0.txt'] == b'' and tree['val/labels/w1.txt'] == b'' and tree['test/labels/f1.txt'] == b''
+    assert tree['data.yaml'].decode().split('\n', 1)[1] == (
+        f'path: "{(tmp_path / "g").resolve().as_posix()}"\n'
+        'train: train/images\nval: val/images\ntest: test/images\nnc: 2\n'
+        'names:\n  0: "scratch"\n  1: "dent"\n'
+        'negative_setting:\n  neg_ratio: 0\n  use_extra_neg: true\n  extra_neg_sources:\n    neg_train: 3\n'
+        '  fix_dataset_length: 0\n')
+    assert out['format'] == 'yolo' and out['neg_train'] == 3 and out['files'] == len(tree) - 1
+    assert 'missing_splits' not in out and any('neg_train/' in line for line in lines)
+
+    # a label of blank lines only is frozen empty, so the size of a label tells whether it has a box
+    stored = fetch(api, cache, name, tmp_path / 'all')
+    assert stored['labels/train/SES/TX/neg_train/images/n1.txt'] == b''
+
+    assert fw_cli.main(['get', name, '--to', str(tmp_path / 'c'), '--neg-ratio', '0.2', '--fix-dataset-length',
+                        '5000']) == 0
+    yaml = (tmp_path / 'c' / 'data.yaml').read_text(encoding='utf-8')
+    assert '  neg_ratio: 0.2\n' in yaml and '  fix_dataset_length: 5000\n' in yaml and '    neg_train: 3\n' in yaml
+    ops.get(api, cache, name, tmp_path / 'n', echo=quiet, neg_ratio=100.0)
+    assert '  neg_ratio: 100\n' in (tmp_path / 'n' / 'data.yaml').read_text(encoding='utf-8')  # a count
+    for kw in ({'fmt': 'coco', 'neg_ratio': 0.2}, {'fmt': 'yolo-tree', 'fix_dataset_length': 10},
+               {'subpath': 'val', 'neg_ratio': 0.2}):
+        with pytest.raises(ops.FwError, match='只用于'):
+            ops.get(api, cache, name, tmp_path / 'x', echo=quiet, **kw)
+    for kw in ({'neg_ratio': -1}, {'neg_ratio': float('nan')}, {'fix_dataset_length': 1.5}, {'fix_dataset_length': -3}):
+        with pytest.raises(ops.FwError, match='不小于 0'):
+            ops.get(api, cache, name, tmp_path / 'x', echo=quiet, **kw)
+    assert not (tmp_path / 'x').exists()
+
+    part = fetch(api, cache, name, tmp_path / 'part', fmt=None)  # nothing to download: only made labels
+    assert 'val/labels/w0.txt' in part
+    ops.get(api, cache, name, tmp_path / 'sub', echo=quiet, subpath='val/labels')
+    assert sorted(read_tree(tmp_path / 'sub')) == ['val/labels/v0.txt', 'val/labels/w0.txt', 'val/labels/w1.txt']
+
+    tree = fetch(api, cache, name, tmp_path / 't', fmt='yolo-tree')  # the layout before, with the pool's folders
+    assert 'images/train/neg_train/n0.bmp' in tree and 'labels/train/train/t0.txt' in tree
+    yaml = tree['data.yaml'].decode()
+    assert 'train: images/train\n' in yaml and '\nnegative_setting' not in yaml
+
+    import fw
+    ts = fw.get_trainset(name, tmp_path / 'script', neg_ratio=0.5)
+    assert ts['neg_train'] == 3 and '  neg_ratio: 0.5\n' in (tmp_path / 'script' / 'data.yaml').read_text('utf-8')
+
+    rows = api.get(f'/trainsets/{name}/versions/1/layout')
+    assert rows['format'] == 'yolo' and rows['problems'] == []
+    assert {r[0] for r in rows['files']} == set(part) - {'data.yaml'}
+    assert ['neg_train/n2.bmp', 'images/train/SES/TX/neg_train/images/n2.bmp'] in [[r[0], r[3]] for r in rows['files']]
+    assert [r[3] for r in rows['files'] if r[0] == 'val/labels/w0.txt'] == [None]
+
+
+def test_no_negative_setting_without_train_negatives(api, cache, tmp_path):
+    src = pool(api, tmp_path, {'a/1.png': png(uuid.uuid4().hex), 'a/1.json': label('scratch'),
+                               'b/2.png': png(uuid.uuid4().hex)})
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    make(api, name, [f'{src}@1'], split={'SES/TX/a/1.png': 'train', 'SES/TX/b/2.png': 'val'})
+    lines = []
+    out = ops.get(api, cache, name, tmp_path / 'g', echo=lines.append, neg_ratio=0.3)
+    yaml = (tmp_path / 'g' / 'data.yaml').read_text(encoding='utf-8')
+    assert '\nnegative_setting' not in yaml and 'nc: 2\n' in yaml and out['neg_train'] == 0
+    assert 'train: train/images\nval: val/images\nnc: 2\n' in yaml  # no test split, no test line
+    make(api, name, [f'{src}@1'], split={'SES/TX/a/1.png': 'val', 'SES/TX/b/2.png': 'train'})
+    out = ops.get(api, cache, name, tmp_path / 'h', echo=lines.append)
+    assert out['missing_splits'] == ['train'] and out['neg_train'] == 1  # train holds no image with a box
+    assert any('train 只算有框的图' in line for line in lines)
+
+
+def test_names_that_collide_flat_are_told_in_the_preview_and_refused_by_fw_get(api, cache, tmp_path):
+    src = pool(api, tmp_path, {'a/1.png': png(uuid.uuid4().hex), 'a/1.json': label('scratch'),
+                               'b/1.png': png(uuid.uuid4().hex), 'b/1.json': label('dent'),
+                               'c/2.png': png(uuid.uuid4().hex), 'c/2.json': label('dent')})
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    lines = []
+    v = ops.create_trainset(api, name, [f'{src}@1'], CLASSES, val=0, echo=lines.append)  # made all the same
+    told = [line for line in lines if '平铺后会重名' in line]
+    assert len(told) == 1 and 'images/train/SES/TX/a/1.png、images/train/SES/TX/b/1.png' in told[0]
+    with pytest.raises(ops.FwError, match='yolo-tree') as e:
+        ops.get(api, cache, v['ref'], tmp_path / 'g', echo=quiet)
+    assert 'images/train/SES/TX/a/1.png、images/train/SES/TX/b/1.png 平铺后是同一个文件' in str(e.value)
+    assert not (tmp_path / 'g').exists()
+    tree = fetch(api, cache, v['ref'], tmp_path / 't', fmt='yolo-tree')
+    assert 'images/train/a/1.png' in tree and 'images/train/b/1.png' in tree
+    rows = api.get(f'/trainsets/{name}/versions/1/layout')
+    assert rows['files'] == [] and rows['problem_count'] == 1 and '平铺后是同一个文件' in rows['problems'][0]
+
+
+def test_a_three_way_split_gives_every_split_its_share_of_negatives(service, tokens, api, tmp_path, monkeypatch):
+    cli_login(service, tokens, tmp_path, monkeypatch)
+    files = sample_files('p', 40)
+    files.update({f'n/neg{i:03}.png': png(uuid.uuid4().hex) for i in range(15)})
+    files.update({f'n/empty{i:03}.png': png(uuid.uuid4().hex) for i in range(5)})
+    files.update({f'n/empty{i:03}.json': label() for i in range(5)})  # a label without a box: a negative too
+    src = pool(api, tmp_path, files)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    body = {'sources': [f'{src}@1'], 'classes': CLASSES, 'val': 0.2, 'test': 0.1, 'seed': 3}
+    p = api.preview_trainset(name, body)
+    c = p['counts']
+    assert [(c[s]['samples'], c[s]['no_boxes']) for s in ('train', 'val', 'test')] == [(42, 14), (12, 4), (6, 2)]
+    assert p['rule']['test'] == 0.1 and p['rule']['stratify'] == 'boxes' and p['rule']['val'] == 0.2
+    assert api.preview_trainset(name, body)['counts'] == c  # the same every time
+    v = make(api, name, [f'{src}@1'], val=0.2, test=0.1, seed=3)
+    assert v['trainset']['counts'] == c
+    assert fw_cli.main(['trainset', 'create', f'{name}-b', '--from', f'{src}@1', '--classes',
+                        str(write(tmp_path, 'classes.txt', b'scratch\ndent\n')), '--val', '0.2', '--test', '0.1',
+                        '--seed', '3', '--yes']) == 0
+    assert api.trainset(f'{name}-b')['trainset']['counts'] == c
+    for bad, why in (({'val': 0.5, 'test': 0.5}, '加起来要小于 1'), ({'test': 1.0}, '0 到 1 之间'),
+                     ({'test': -0.1}, '0 到 1 之间'), ({'test': 0.1, 'merge_test': True}, '--merge-test'),
+                     ({'test': 0.1, 'split': {}}, '划分清单')):
+        with pytest.raises(ApiError, match=why) as e:
+            api.preview_trainset(name, dict(body, **bad))
+        assert e.value.status == 400

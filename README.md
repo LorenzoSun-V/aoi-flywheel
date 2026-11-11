@@ -118,7 +118,7 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 | `fw get SES-TX@3 --to /data/train/SES-TX@3` | 取到一个空目录：只下载缓存里没有的，每个文件按清单核对 |
 | `fw export SES-TX@3 --to /mnt/usb/SES-TX@3` | 导出给连不上平台的机器，到那边 `fw verify /mnt/usb/SES-TX@3` 核对 |
 | `fw cache info` / `fw cache clear` | 本机缓存大小 / 清空（已经取出的目录不受影响） |
-| `fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt` | 建训练集快照：划分 train/val/test，转好 YOLO、COCO，冻结 |
+| `fw trainset create SES-TX-det --from SES-TX@4 --classes classes.txt --val 0.2 --test 0.1` | 建训练集快照：划分 train/val/test，转好 YOLO、COCO，冻结 |
 | `fw model register SES-TX-detr --onnx best.onnx --weights best.pt --trainset SES-TX-det@2` | 上传 ONNX 和权重，登记模型的下一个版本 |
 | `fw eval run SES-TX-detr@3 --data SES-TX@5 --dirs SES/TX/test_1015 --runner detr-pro` | 排一个评估任务：GPU 机从 ONNX 建 TensorRT 引擎推理，aoi-deteval 算指标，结果自动登记成评估报告 |
 | `fw eval register SES-TX-detr@3 --testset SES-TX-det@2:test --deteval results/` | 登记 aoi-deteval 的评估结果 |
@@ -138,7 +138,7 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 
 ```python
 import fw
-ts = fw.get_trainset('SES-TX-det@2', '/data/train/SES-TX-det@2')   # 取训练集快照，默认 YOLO 目录
+ts = fw.get_trainset('SES-TX-det@2', '/data/train/SES-TX-det@2')   # 取训练集快照，默认平铺的 YOLO 目录（train、neg_train、val、test）
 # ……训练，读 ts['data_yaml']……
 mv = fw.register_model('SES-TX-detr', onnx='best.onnx', weights='best.pt', trainset=ts)
 print(mv['ref'])                                                   # SES-TX-detr@3

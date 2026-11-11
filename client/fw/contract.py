@@ -29,7 +29,10 @@ MAX_PATH_BYTES = 1024
 Entry = Tuple[str, str, int]  # (path, sha256 hex, size in bytes)
 
 # Training-set snapshots (docs/trainset-format.md): the layouts fw get makes from a snapshot's files.
-TRAINSET_FORMATS = ('yolo', 'coco', 'json', 'all')
+TRAINSET_FORMATS = ('yolo', 'yolo-tree', 'coco', 'json', 'all')
+EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'  # of no bytes: a made empty label
+MIN_BOX_BYTES = 9  # a YOLO label line is five numbers: a file shorter than "0 0 0 0 0" holds no box
+NEG_TRAIN = 'neg_train'
 TRAINSET_SPLITS = ('train', 'val', 'test')
 COCO_DIRS = {'train': 'train', 'val': 'valid', 'test': 'test'}  # the Roboflow / RF-DETR folder names
 COCO_FILE = '_annotations.coco.json'
@@ -345,21 +348,93 @@ def short_paths(subs: Iterable[str]) -> Dict[str, str]:
     return out
 
 
+def trainset_flat(entries: Iterable[Entry]) -> Tuple[List[Tuple[str, str, int, Optional[str]]], List[str]]:
+    """The flat YOLO layout of a snapshot, the default of fw get: (rows, problems). A row is (path, sha256, size,
+    the stored path it comes from, or None for an empty label made here).
+
+        train/images/<name>, train/labels/<stem>.txt   train images with boxes
+        neg_train/<name>                               train images without boxes (no label, or one without a
+                                                       box), no label files: what a trainer adds as negatives
+        val/images/<name>, val/labels/<stem>.txt       every val image; one without a label gets an empty .txt
+        test/images/<name>, test/labels/<stem>.txt     the same for test
+
+    <name> is the image's file name alone: no folders of the pool are kept, so trainers that list a folder
+    without going into subfolders find every image. Two files that land on one path (the same file name from two
+    folders or sources; in one images/ folder also the same name with another extension, whose labels would be
+    one file; names that differ only in case count as one, see fold) are problems: such a snapshot cannot be
+    laid out flat (yolo-tree keeps the folders). Whether a label has a box is read from its size, see
+    MIN_BOX_BYTES."""
+    keep: List[Tuple[str, str, int, Optional[str]]] = []
+    images: List[Tuple[str, str, Entry]] = []
+    labels: Dict[Tuple[str, str], Entry] = {}
+    for entry in entries:
+        path = entry[0]
+        top, _, rest = path.partition('/')
+        split, _, sub = rest.partition('/')
+        if not rest:
+            keep.append((path, entry[1], entry[2], path))
+        elif top in ('images', 'labels', 'json') and split in TRAINSET_SPLITS and sub:
+            if top == 'images':
+                images.append((split, sub, entry))
+            elif top == 'labels':
+                labels[(split, sub)] = entry
+        elif not (top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS):
+            raise ContractError(f'训练集快照里有不认识的路径 {path}')
+    rows = list(keep)
+    for split, sub, (path, digest, size) in images:
+        name = sub.rsplit('/', 1)[-1]
+        suffix = PurePosixPath(name).suffix
+        stem = name[: len(name) - len(suffix)] if suffix else name
+        sub_suffix = PurePosixPath(sub).suffix
+        label = labels.get((split, (sub[: len(sub) - len(sub_suffix)] if sub_suffix else sub) + '.txt'))
+        if split == 'train' and (label is None or label[2] < MIN_BOX_BYTES):
+            rows.append((f'{NEG_TRAIN}/{name}', digest, size, path))
+            continue
+        rows.append((f'{split}/images/{name}', digest, size, path))
+        if label is None:
+            rows.append((f'{split}/labels/{stem}.txt', EMPTY_SHA256, 0, None))
+        else:
+            rows.append((f'{split}/labels/{stem}.txt', label[1], label[2], label[0]))
+    by_path: Dict[str, List[str]] = {}
+    for new, _, _, stored in rows:
+        if stored is not None and stored.startswith('images/'):  # labels are named after their image
+            by_path.setdefault(fold(new), []).append(stored)
+    by_label: Dict[str, List[str]] = {}
+    for new, _, _, stored in rows:
+        if '/images/' in new:
+            suffix = PurePosixPath(new).suffix
+            by_label.setdefault(fold(new[: len(new) - len(suffix)] if suffix else new), []).append(stored)
+    problems = [f'{"、".join(sorted(group))} 平铺后是同一个文件' for group in by_path.values() if len(group) > 1]
+    problems += [f'{"、".join(sorted(group))} 平铺后同名不同扩展名，会共用一份标注' for group in by_label.values()
+                 if len({fold(g.rsplit("/", 1)[-1]) for g in group}) > 1]
+    return rows, sorted(problems)
+
+
 def trainset_layout(entries: Iterable[Entry], fmt: str, short: bool = False) -> List[Entry]:
     """The files of a training-set snapshot as fw get lays them out in one format (docs/trainset-format.md):
 
-    yolo  images/<split>/..., labels/<split>/...txt (ultralytics finds a label by images/ -> labels/; folders
-          named images inside are renamed, see yolo_safe)
-    coco  train|valid|test/... images, with <folder>/_annotations.coco.json (Roboflow / RF-DETR layout)
-    json  train|val|test/... images with the LiteAnno JSON next to each (open the folder in LiteAnno)
-    all   the snapshot as it is stored
+    yolo       flat, see trainset_flat: train/images + train/labels, neg_train, val/…, test/… (refused with
+               ContractError when file names collide)
+    yolo-tree  images/<split>/..., labels/<split>/...txt with the pool's folders kept (ultralytics finds a label
+               by images/ -> labels/; folders named images inside are renamed, see yolo_safe)
+    coco       train|valid|test/... images, with <folder>/_annotations.coco.json (Roboflow / RF-DETR layout)
+    json       train|val|test/... images with the LiteAnno JSON next to each (open the folder in LiteAnno)
+    all        the snapshot as it is stored
 
     "..." is <site>/<line>/<path in pool>; with short (snapshots whose rule has 'paths': 'short') it is the
     shorter path from short_paths. classes.txt and trainset.json are in every layout. Only paths change;
-    contents are the frozen ones."""
+    contents are the frozen ones (yolo also makes empty labels, EMPTY_SHA256)."""
     if fmt not in TRAINSET_FORMATS:
         raise ContractError(f'格式只能是 {"、".join(TRAINSET_FORMATS)}，不是 {fmt!r}')
     entries = list(entries)
+    if fmt == 'yolo':
+        rows, problems = trainset_flat(entries)
+        if problems:
+            more = f'\n  …共 {len(problems)} 处' if len(problems) > 10 else ''
+            raise ContractError('这个快照不能按默认的平铺目录（--format yolo）摆，有文件会重名；'
+                                '用 --format yolo-tree 保留原来的目录：\n  ' + '\n  '.join(problems[:10]) + more)
+        return [row[:3] for row in rows]
+    tree = fmt == 'yolo-tree'
     names: Dict[str, str] = {}
     if short and fmt != 'all':
         subs = set()
@@ -377,10 +452,10 @@ def trainset_layout(entries: Iterable[Entry], fmt: str, short: bool = False) -> 
         if not rest or fmt == 'all':
             new = path
         elif top == 'images' and split in TRAINSET_SPLITS and sub:
-            new = {'yolo': f'images/{split}/{yolo_safe(sub)}', 'coco': f'{COCO_DIRS[split]}/{sub}',
+            new = {'yolo-tree': f'images/{split}/{yolo_safe(sub)}', 'coco': f'{COCO_DIRS[split]}/{sub}',
                    'json': f'{split}/{sub}'}[fmt]
         elif top == 'labels':
-            new = f'labels/{split}/{yolo_safe(sub)}' if fmt == 'yolo' and sub else (path if fmt == 'yolo' else None)
+            new = f'labels/{split}/{yolo_safe(sub)}' if tree and sub else (path if tree else None)
         elif top == 'json':
             new = f'{split}/{sub}' if fmt == 'json' else None
         elif top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS:
@@ -416,7 +491,7 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
                    ) -> Tuple[List[Entry], List[Entry], List[str]]:
     """What an evaluation of a version reads: (files to lay out, the images among them, problems).
 
-    A training-set snapshot: one split, in the yolo layout (images/<split>/..., labels/<split>/...txt): the labels
+    A training-set snapshot: one split, in the yolo-tree layout (images/<split>/..., labels/<split>/...txt): the labels
     are already in the snapshot's class table, which is the model's. Any other version: the images under the
     chosen folders (every folder below them too) with the LiteAnno / X-AnyLabeling JSON next to each, read by
     class name. An image with only a YOLO txt is a problem: its class numbers are the pool's own, which need
@@ -428,7 +503,7 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
     if snapshot:
         if split not in TRAINSET_SPLITS:
             raise ContractError(f'训练集快照要写划分（{"、".join(TRAINSET_SPLITS)}）')
-        laid = trainset_layout(entries, 'yolo')
+        laid = trainset_layout(entries, 'yolo-tree')
         images = [e for e in laid if e[0].startswith(f'images/{split}/')
                   and PurePosixPath(e[0]).suffix.lower() in IMAGE_EXTS]
         wanted = {yolo_label_stem(p) + '.txt' for p, _, _ in images}

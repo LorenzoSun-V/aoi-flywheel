@@ -135,12 +135,13 @@ class TrainsetBody(BaseModel):
     label_source: Optional[str] = None  # json or txt: the label of an image that has both
     label_classes: Optional[List[str]] = Field(default=None, max_length=trainsets.MAX_CLASSES)  # .txt numbering
     class_map: Optional[Dict[str, str]] = None  # class in the labels -> class in classes, '' drops the box
+    test: float = 0.0  # the share cut off as test, next to val
     expect_latest_id: Optional[int] = None  # create only: the newest snapshot seen in the preview
 
     def options(self) -> trainsets.Options:
         return trainsets.Options(self.sources, self.classes, self.val, self.seed, self.test_dirs, self.merge_test,
                                  self.new_to, self.split, self.fresh, self.note, self.require_labels,
-                                 self.label_source, self.label_classes, self.class_map)
+                                 self.label_source, self.label_classes, self.class_map, self.test)
 
 
 class ModelBody(BaseModel):
@@ -523,6 +524,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def get_trainset(name: str, number: str, user: dict = Depends(data_user)):
         with conn() as c:
             return trainsets.get(c, name, number)
+
+    @app.get('/api/v1/trainsets/{name}/versions/{number}/layout')
+    def trainset_layout(name: str, number: str, user: dict = Depends(data_user)):
+        """The folders fw get makes by default, so the web page shows a snapshot the way people get it."""
+        with conn() as c:
+            return trainsets.layout(c, name, number)
 
     # --- models, evaluations, releases -------------------------------------------------------------
     @app.get('/api/v1/models')

@@ -128,6 +128,7 @@ export const api = {
   folderCheck: (paths, allowOtherFiles, force) => call('/folder-check', { method: 'POST', body: { paths, allow_other_files: allowOtherFiles, force } }),
   missing: async (objects) => (await call('/objects/missing', { method: 'POST', body: { objects } })).missing,
   putObject: (digest, blob) => call(`/objects/${digest}`, { method: 'PUT', blob }),
+  trainsetLayout: (name, number) => call(`/trainsets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/layout`),
   createVersion: (name, body) => call(`/datasets/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
 };
 
@@ -158,11 +159,34 @@ async function filesOf(version) {
   return manifests.get(version.manifest_sha256);
 }
 
-// The JSON label of an image: the same path with .json (the extension in any case), as fw pairs them.
-export function labelIndex(files) {
+// The files of a version as the pages show them. A training-set snapshot is shown in the folders the default
+// fw get makes (train/images, neg_train, val/images, …; the server says where each file goes): every file gets
+// `show`, its path there, while `path` stays the stored one (links and prediction sets use it). `flat` is false
+// when the snapshot cannot be laid out that way (file names collide); then the stored folders are shown.
+async function viewFiles(version) {
+  const files = await filesOf(version);
+  if (version.kind !== 'trainset') return { files, snapshot: false, flat: false, problems: [] };
+  const layout = await api.trainsetLayout(version.dataset, version.number);
+  return { files: withLayout(files, layout.files), snapshot: true, flat: layout.files.length > 0, problems: layout.problems };
+}
+
+// rows: [path as laid out, sha256, size, stored path or null] from the server (fw.contract.trainset_flat).
+export function withLayout(files, rows) {
+  const shown = new Map();
+  for (const [show, , , stored] of rows) if (stored) shown.set(stored, show);
+  if (!rows.length) return files;
+  const key = (f) => f.show ?? f.path;  // in the order of the folders shown, not of the stored ones
+  return files.map((f) => ({ ...f, show: shown.get(f.path) })).sort((x, y) => (key(x) < key(y) ? -1 : key(x) > key(y) ? 1 : 0));
+}
+
+const shownPath = (f) => f.show ?? f.path;
+
+// The JSON label of an image: the same path with .json (the extension in any case), as fw pairs them. In a
+// training-set snapshot the label of images/<rest> is json/<rest>.
+export function labelIndex(files, snapshot = false) {
   const labels = new Map();
   for (const f of files) if (ext(f.path) === '.json') labels.set(stem(f.path), f);
-  return (image) => labels.get(stem(image.path));
+  return (image) => labels.get(stem(snapshot && image.path.startsWith('images/') ? `json/${image.path.slice(7)}` : image.path));
 }
 
 // Object URLs of fetched files, the most recently used last; the oldest are let go past BLOBS (images are
@@ -280,8 +304,9 @@ export function listDir(files, dir) {
   const folders = new Map();
   const images = [];
   for (const f of files) {
-    if (!f.path.startsWith(prefix) || !IMAGE_EXTS.has(ext(f.path))) continue;
-    const rest = f.path.slice(prefix.length);
+    const path = shownPath(f);
+    if (!path.startsWith(prefix) || !IMAGE_EXTS.has(ext(path))) continue;
+    const rest = path.slice(prefix.length);
     const slash = rest.indexOf('/');
     if (slash < 0) images.push(f);
     else {
@@ -307,11 +332,11 @@ function lazyThumb(img, file) {
 async function versionPage(name, number, query) {
   const show = live();
   const version = await api.version(name, number);
-  const files = await filesOf(version);
+  const { files, snapshot, flat, problems } = await viewFiles(version);
   const dir = (query.get('dir') || '').replace(/^\/+|\/+$/g, '');
   const page = Math.max(0, Number(query.get('page') || 0));
   const { folders, images } = listDir(files, dir);
-  const labelOf = labelIndex(files);
+  const labelOf = labelIndex(files, snapshot);
   const pages = Math.max(1, Math.ceil(images.length / PAGE));
   const shown = images.slice(page * PAGE, (page + 1) * PAGE);
   const vparts = ['v', version.dataset, String(version.number)];
@@ -328,6 +353,9 @@ async function versionPage(name, number, query) {
       el('dt', {}, '登记'), el('dd', {}, `${version.created_by}，${when(version.created_at)}`),
       el('dt', {}, '来源'), el('dd', {}, version.source || '-'),
       el('dt', {}, '清单哈希'), el('dd', { class: 'mono' }, version.manifest_sha256)),
+    !snapshot || dir ? null : el('p', { class: 'muted' }, flat
+      ? '目录和 fw get 默认取回的一样：train 里有框的图在 train/images，没有框的在 neg_train；val、test 的图不分有没有框，都在各自的 images 里。'
+      : `这个快照有文件平铺后会重名（例如 ${problems.join('；')}），fw get 默认的平铺目录摆不了，这里按存储的目录显示；取回用 fw get --format yolo-tree。`),
     folders.length ? el('div', { class: 'folders' }, folders.map(([f, n]) =>
       el('a', { href: hrefOf(vparts, { dir: dir ? `${dir}/${f}` : f }) }, `📁 ${f}`, el('span', { class: 'muted' }, `  ${n}`)))) : null,
     images.length ? el('p', { class: 'muted' }, `这一层 ${images.length} 张图，${labeled} 张有 JSON 标注`) : null,
@@ -415,11 +443,12 @@ export function predictedShapes(doc, path, threshold) {
 async function imagePage(name, number, path, query) {
   const show = live();
   const version = await api.version(name, number);
-  const files = await filesOf(version);
+  const { files, snapshot } = await viewFiles(version);
   const image = files.find((f) => f.path === path);
   if (!image) throw new Error(`${version.ref} 里没有 ${path}`);
-  const label = labelIndex(files)(image);
-  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const label = labelIndex(files, snapshot)(image);
+  const shown = shownPath(image);
+  const dir = shown.includes('/') ? shown.slice(0, shown.lastIndexOf('/')) : '';
   const predId = query.get('pred');
   const set = predId ? await api.predictionSet(predId) : null;
   const pdoc = set ? await predictionsOf(set) : null;
