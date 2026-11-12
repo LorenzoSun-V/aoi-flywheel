@@ -498,3 +498,20 @@ def test_ctrl_c_exits_before_any_cleanup_can_hold_the_command(monkeypatch, capsy
     cli.main(['whoami'])
     assert order[0] == ('exit', 130) and '已中断' in capsys.readouterr().err
     assert signal.getsignal(signal.SIGINT) is previous  # in-process callers get their handler back
+
+
+def test_add_folders_checks_names_before_reading_anything(tmp_path):
+    """fw dataset add: what the folders will be called in the pool is settled before any file is read."""
+    a, b = tmp_path / 'x' / 'day', tmp_path / 'y' / 'DAY'
+    for folder in (a, b):
+        folder.mkdir(parents=True)
+    with pytest.raises(ops.FwError, match='--to 只能'):
+        ops.add_folders(None, 'DS', [a, b], to='z', echo=lambda _: None)
+    with pytest.raises(ops.FwError, match='同一个目录'):
+        ops.add_folders(None, 'DS', [a, b], echo=lambda _: None)
+    with pytest.raises(ops.FwError, match='用不了'):
+        ops.add_folders(None, 'DS', [a], to='a/../b', echo=lambda _: None)
+    with pytest.raises(ops.FwError, match='用不了'):
+        ops.remove_dirs(None, 'DS', ['con'], echo=lambda _: None)
+    with pytest.raises(ops.FwError, match='没有文件'):
+        ops.add_folders(None, 'DS', [a], echo=lambda _: None)

@@ -44,6 +44,8 @@ server/fwserver/     fw-server：只支持 Linux
   predictions.py     推理任务和预测集：提交时定下模型、图片清单、推理环境和最低分数，同样的请求复用已有任务；交回时核对 predictions.json 再登记预测集
   jobs.py            任务队列（领取、租约令牌、续租、过期回队、取消、日志）和推理环境的登记
   models.py          模型、模型版本、评估报告、发布、标签、追溯链；部署账号能下载哪些文件
+  changes.py         按目录改数据集：新版本 = 最新版本加上、换掉或去掉几个目录（fw dataset add / remove），服务器自己拼清单；
+                     同名目录拒绝、重复图片和标注不一致的提醒；记下每个版本的目录变化（version_changes）
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
   formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
   datasets.py        数据集和版本：建版本、冻结、差异、核对（verify）
@@ -56,12 +58,12 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
-tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
 
-- 服务端只能往下调：`cli`、`app` → `evals` → `jobs`、`models` → `trainsets` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
+- 服务端只能往下调：`cli`、`app` → `evals` → `jobs`、`models` → `trainsets` → `changes` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
 - 客户端永远不 import 服务端。
 - `fw.contract` 不依赖 `fw` 里的任何其他模块：服务端也 import 它，它必须保持纯粹。
 
@@ -76,6 +78,15 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 3. `api.missing` 问服务器哪些内容还没有；和父版本的清单比出新增、修改、删除、改名，给人确认。
 4. 小文件按 `fw-objects 1` 格式打包，一次请求几千个（`api.put_objects`），大文件一个一个传（`api.put_file`）。服务端 `store.put_verified` / `ObjectWriter` 先核对哈希再写临时文件、改名到最终位置。
 5. `api.create_version`：服务端先 `store.flush()`（一次 `syncfs`，文件内容和目录项全部落盘），再在一个事务里插入版本和清单项并冻结；冻结时数据库按清单项重算清单哈希，对不上就不冻结。
+
+`fw dataset add`（`ops.add_folders`）只读要加的目录，版本由服务器拼：
+
+1. 每个目录照样 `checks.scan_folder`、算哈希，得到这个目录自己的清单（路径是目录里的相对路径），上传这份清单。
+2. `api.preview_change` → `changes.plan`：取最新版本的清单行，去掉要去掉或替换的目录，加上新目录的文件（路径前面加池里的目录名）；同名目录记成冲突；对结果跑 `classify_paths`（「其他文件」「同名不同扩展名」只算涉及新目录的）；按哈希找重复的图片，读标注比较。预览和建版本跑的是同一个 `plan`。
+3. 有相同图片而新标注还没上传时，客户端先传标注文件再预览一次。确认后上传服务器没有的文件。
+4. `api.create_change` → `changes.create`：再跑一次 `plan`，有冲突或拒绝的理由就不建；写出完整清单，调 `datasets.create_version`（`expect_latest_id` 是预览时的最新版本，变了就 409；`inherited` 是原样留下的父版本清单行，不用再逐个查文件库），在同一个事务里写 `version_changes`，然后冻结。
+
+`fw dataset remove`（`ops.remove_dirs`）只有第 2、4 步。网页的「上传新增目录」「去掉目录」调同样的两个接口。
 
 ## 一次取回在代码里怎么走
 
@@ -131,6 +142,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 改取出来的文件不影响缓存；硬链接只在明确要求时用，只限 Linux | `layout.py`、`ops.get` | `test_editing_a_fetched_folder_leaves_the_cache_alone`、`test_hardlink_*` |
 | Ctrl+C 立即生效，不等还在排队的上传、下载（Windows 上无超时的等待接不到 Ctrl+C） | `pool.run_all`（单个任务也在线程里跑）、`cli._on_sigint` 不做清理直接 `os._exit(130)`、`Cache.close` 不等别的线程 | `test_pool.py`、`test_cache.py`、`test_ctrl_c_*` |
 | 同一数据集同时导入，后提交的被拒，不悄悄覆盖 | `datasets.create_version` | `test_concurrent_import_into_same_dataset_is_refused`、`test_someone_else_added_a_version_meanwhile` |
+| 按目录改出来的版本（add / remove）由服务器从最新版本拼，仍是完整清单；池里已有的目录不明说替换就拒绝，接口自己拦，不靠客户端；预览后最新版本变了就不建；目录变化的记录只在建版本的事务里写，之后不能改、不能删 | `changes.plan` / `changes.create`、数据库触发器（`0008_version_changes.sql`） | `test_changes.py`：`test_existing_folder_is_refused_unless_replaced`、`test_stale_preview_is_refused`、`test_history_cannot_be_rewritten` |
 | 训练集快照的记录（类别、规则、统计、来源）冻结后不能改、不能删；只有快照有这份记录，快照都有；有版本的数据集不能改类型 | 数据库触发器（`0002_trainsets.sql`） | `test_snapshot_record_cannot_change`、`test_only_trainset_versions_have_a_record` |
 | 快照只能用 `fw trainset create` 建；标注里的类别都在类别表里；冻结的就是预览的（包括来源版本）；预览后有人建了新版就不建；同时建同名第一版只成一个，另一个 409 | `datasets.create_version` 的 `trainset`、`new_dataset` 参数、`trainsets.create` | `test_trainsets_are_made_only_by_trainset_create`、`test_bad_labels_are_refused`、`test_someone_else_made_one_meanwhile`、`test_what_was_previewed_is_what_is_frozen`、`test_two_first_versions_at_once` |
 | 类别映射只改快照里的标注，数据池不变；没有改到的标注原样冻结；映射写错了（源类别没有框）就不建 | `formats.remap_json`、`remap_txt`、`trainsets._parse`、`_read_labels` | `test_class_map_drops_others_and_reads_txt_by_its_own_table`、`test_class_map_on_json_keeps_the_rest_of_the_file`、`test_class_map_snapshot_continues_without_relabeling`、`test_a_new_class_map_on_a_continued_snapshot_counts_as_relabeled`、`test_class_map_options_are_checked`、`test_remapping_keeps_numbers_and_coordinates_as_written`、`test_switching_the_label_source_counts_as_relabeled`、`test_a_txt_with_the_bytes_of_a_json_is_read_as_txt`、`test_a_class_map_on_a_json_with_a_lone_surrogate` |

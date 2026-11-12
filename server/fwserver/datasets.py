@@ -12,7 +12,7 @@ A failure anywhere leaves no version behind; objects already uploaded stay and a
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Set, Tuple
 
 from fw.contract import ContractError, classify_changes, parse_manifest
 
@@ -151,11 +151,15 @@ def get_version_by_id(conn, version_id: int) -> dict:
 def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256: str, parent_id: Optional[int],
                    expect_latest_id: Optional[int], source: str = '', note: str = '',
                    before_freeze: Optional[Callable[[], None]] = None, trainset: bool = False,
-                   record: Optional[Callable[[Any, int], None]] = None, new_dataset: Optional[dict] = None) -> dict:
+                   record: Optional[Callable[[Any, int], None]] = None, new_dataset: Optional[dict] = None,
+                   inherited: Optional[Set[Tuple[str, str, int]]] = None) -> dict:
     """trainset: the dataset must be a trainset (and only then may it be one); record(conn, version_id) writes
-    the trainset's own rows inside the transaction, before the version is frozen. new_dataset (site, line,
+    the caller's own rows (a trainset's, or how the version was changed from its parent) inside the transaction,
+    before the version is frozen. new_dataset (site, line,
     kind, note): create the dataset in the same transaction, so a failed first version leaves no name behind;
-    if the name was taken meanwhile, nothing is created (409)."""
+    if the name was taken meanwhile, nothing is created (409). inherited: entries taken unchanged from the
+    frozen parent version (changes.py): they were checked when that version was made, so the store is not asked
+    about each of them again (a file lost since then is found by fw-server verify, for both versions)."""
     check_digest(manifest_sha256)
     data = store.read(manifest_sha256)
     if data is None:
@@ -166,7 +170,8 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
         raise DatasetError(400, f'清单不合格：{e}') from None
     if not entries:
         raise DatasetError(400, '清单里没有文件')
-    bad = [(p, s, store.size(d)) for p, d, s in entries if store.size(d) != s]
+    bad = [(p, s, store.size(d)) for p, d, s in entries
+           if (inherited is None or (p, d, s) not in inherited) and store.size(d) != s]
     if bad:
         examples = '；'.join(f'{p}（{"没有" if got is None else f"大小 {got}，应为 {s}"}）' for p, s, got in bad[:5])
         raise DatasetError(400, f'有 {len(bad)} 个文件服务器上还没有或大小不对，没有建版本；重新运行导入会补传。例如 {examples}')

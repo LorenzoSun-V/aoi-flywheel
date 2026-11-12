@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, auth, datasets, db, jobs, models
+from . import __version__, auth, changes, datasets, db, jobs, models
 from .settings import Settings, SettingsError
 from .store import Store, StoreError
 
@@ -64,11 +64,13 @@ def cmd_token(args, settings):
 def verify_inputs(conn):
     """What the records above the datasets point at: model versions and evaluation reports, runner versions."""
     problems, wanted, count = models.verify_inputs(conn)
-    more_problems, more_wanted, more_count = jobs.verify_inputs(conn)
-    for digest, (size, ref) in more_wanted.items():
-        if wanted.get(digest, (None,))[0] is None:
-            wanted[digest] = (size, ref)
-    return problems + more_problems, wanted, count + more_count
+    for more in (jobs.verify_inputs, changes.verify_inputs):
+        more_problems, more_wanted, more_count = more(conn)
+        for digest, (size, ref) in more_wanted.items():
+            if wanted.get(digest, (None,))[0] is None:
+                wanted[digest] = (size, ref)
+        problems, count = problems + more_problems, count + more_count
+    return problems, wanted, count
 
 
 def cmd_verify(args, settings):
