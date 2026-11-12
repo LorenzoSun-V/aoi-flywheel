@@ -267,6 +267,190 @@ def import_folder(api: Api, name: str, folder, parent: str = 'latest', note: str
     return version
 
 
+def _pool_dir(value: str) -> str:
+    d = value.replace('\\', '/').strip().strip('/')
+    problem = path_problem(d) if d else '是空的'
+    if problem:
+        raise FwError(f'目录名 {value} 用不了：{problem}')
+    return d
+
+
+def _show_change(echo: Echo, preview: dict, limit: int = 5) -> None:
+    """Print what a change preview (the server's plan) found."""
+    for o in preview['ops']:
+        if o['op'] == 'add':
+            echo(f'  新增 {o["dir"]}/：{o["file_count"]} 个文件，{size_text(o["total_bytes"])}')
+        elif o['op'] == 'replace':
+            echo(f'  替换 {o["dir"]}/：原有 {o["removed_count"]} 个文件换成这 {o["file_count"]} 个，'
+                 f'{size_text(o["total_bytes"])}')
+        else:
+            echo(f'  去掉 {o["dir"]}/：{o["removed_count"]} 个文件')
+    checks = preview['checks']
+
+    def found(key: str, title: str, fmt=str) -> None:
+        c = checks.get(key) or {'count': 0, 'examples': []}
+        if c['count']:
+            echo(f'  {title}：{c["count"]}，例如 {"、".join(fmt(x) for x in c["examples"][:limit])}')
+
+    found('bad_paths', '文件名用不了')
+    found('collisions', '路径冲突')
+    found('same_stem_images', '同名不同扩展名的图片', _group)
+    found('unlabeled_images', '没有标注的图片')
+    found('orphan_labels', '找不到图片的标注')
+    found('meta', '说明文件（一起入库）')
+    found('others', '图片和标注以外的文件')
+    dup = preview['duplicates']
+    if dup['in_pool']['count']:
+        echo(f'  提醒：有 {dup["in_pool"]["count"]} 张图片和池里已有的内容完全相同（只存一份，但会各算一个样本），例如 '
+             + '、'.join(f'{x["new"]} = {x["existing"]}' for x in dup['in_pool']['examples'][:limit]))
+    if dup['in_new']['count']:
+        echo(f'  提醒：新增的目录里有 {dup["in_new"]["count"]} 组内容完全相同的图片，例如 '
+             + '；'.join(_group(g) for g in dup['in_new']['examples'][:limit]))
+    if dup['labels_differ']['count']:
+        def boxes(n):
+            return '没有标注' if n is None else f'{n} 个目标'
+        echo(f'  提醒：其中 {dup["labels_differ"]["count"]} 对图片相同、标注不一样（训练时会互相矛盾），例如 '
+             + '；'.join(f'{x["new"]}（{boxes(x["new_boxes"])}）和 {x["existing"]}（{boxes(x["existing_boxes"])}）'
+                        for x in dup['labels_differ']['examples'][:limit]))
+    if dup['uncompared']:
+        echo(f'  还有 {dup["uncompared"]} 对相同的图片太多，没有比较标注')
+    ch = preview['changes']
+    if ch['deleted']['count'] or ch['modified']['count']:
+        echo(f'  相比 {preview["parent"]}：新增 {ch["added"]["count"]}、修改 {ch["modified"]["count"]}、'
+             f'删除 {ch["deleted"]["count"]}、改名 {ch["renamed"]["count"]}')
+        for key, title in (('modified', '修改'), ('deleted', '删除')):
+            if ch[key]['count']:
+                echo(f'    {title}：例如 {"、".join(ch[key]["examples"][:limit])}')
+
+
+def add_folders(api: Api, name: str, folders: Sequence, to: Optional[str] = None, replace: bool = False,
+                note: str = '', allow_other_files: bool = False, force: bool = False, dry_run: bool = False,
+                confirm: Optional[Confirm] = None, workers: int = 8, echo: Echo = print) -> Optional[dict]:
+    """Add folders to dataset `name`: the next version is the newest one plus these folders, each under its
+    own name (`to`: another name or a path inside the pool, for a single folder). Only the folders are read
+    and uploaded; the server builds the version from the newest one, so the pool need not be on this machine.
+
+    A folder the pool already has is refused unless `replace` (then it is exchanged as a whole). Images
+    whose content the pool already has, and those among them labelled differently, are reported, not refused.
+    Returns the new version, or None for a dry run, a declined confirmation or nothing to do.
+    """
+    folders = [Path(f) for f in folders]
+    if not folders:
+        raise FwError('要写新增哪个目录')
+    if to is not None and len(folders) != 1:
+        raise FwError('--to 只能在新增一个目录时用')
+    targets = [_pool_dir(to) if to is not None else _pool_dir(f.resolve().name) for f in folders]
+    seen: Dict[str, Path] = {}
+    for d, f in zip(targets, folders):
+        if d.lower() in seen:
+            raise FwError(f'{seen[d.lower()]} 和 {f} 在池里会是同一个目录 {d}/；分两次加，其中一个用 --to 换名称')
+        seen[d.lower()] = f
+
+    t0 = time.perf_counter()
+    sources: Dict[str, Path] = {}
+    sizes: Dict[str, int] = {}
+    labels: List[str] = []   # digests of label files: the server reads them to compare labels of same images
+    add = []
+    manifests = []
+    for d, folder in zip(targets, folders):
+        report = scan_folder(folder)
+        echo(f'扫描 {report.root} → {d}/：{len(report.files)} 个文件，图片 {len(report.images)}，'
+             f'标注 {len(report.labels)}，说明文件 {len(report.meta)}，其他 {len(report.others)}')
+        _show(echo, '已忽略的系统文件', report.junk)
+        _show(echo, '读不了的目录', report.unreadable)
+        _show(echo, '链接和特殊文件', report.links)
+        _show(echo, '文件名用不了', report.bad_paths)
+        _show(echo, '路径冲突', report.collisions)
+        _show(echo, '同名不同扩展名的图片', [_group(g) for g in report.same_stem_images])
+        _show(echo, '图片和标注以外的文件', report.others)
+        reasons = report.blocking(allow_other_files, force)
+        if reasons:
+            raise FwError(f'没有入库（{report.root}）：\n  ' + '\n  '.join(reasons))
+        if not report.files:
+            raise FwError(f'{report.root} 里没有文件')
+        sample = [os.stat(path).st_size for _, path in report.files[:200]]
+        entries: List[Entry] = _parallel(_hash_local, report.files, _file_workers(sample, workers), '算哈希')
+        label_set = set(report.labels)
+        for rel, digest, size in entries:
+            sources.setdefault(digest, _local(report.root, rel))
+            sizes[digest] = size
+            if rel in label_set:
+                labels.append(digest)
+        data = manifest_bytes(entries)
+        manifests.append(data)
+        add.append({'dir': d, 'manifest_sha256': manifest_hash(data), 'replace': replace})
+    t1 = time.perf_counter()
+
+    # the server needs each folder's file list to say what the result would be (a few KB to a few MB; the
+    # files themselves wait for the confirmation)
+    for data in manifests:
+        api.put_bytes(data)
+    body = {'add': add, 'remove': [], 'allow_other_files': allow_other_files, 'force': force}
+    preview = api.preview_change(name, body)
+    if preview['duplicates']['not_uploaded'] and not dry_run:
+        # same images with labels the server does not have yet: send those labels (small) and ask again
+        wanted = sorted(set(labels))
+        lacking = api.missing([(d, sizes[d]) for d in wanted])
+        if lacking:
+            _upload(api, lacking, sources, sizes, workers, '上传标注')
+        preview = api.preview_change(name, body)
+    echo(f'{preview["dataset"]}：' + (f'在 {preview["parent"]} 的基础上' if preview['parent'] else '第一个版本'))
+    _show_change(echo, preview)
+    if preview['duplicates']['not_uploaded']:
+        echo(f'  有 {preview["duplicates"]["not_uploaded"]} 对相同图片的标注要等上传以后才能比较（试运行不上传）')
+    if preview['reasons']:
+        raise FwError('没有入库：\n  ' + '\n  '.join(preview['reasons']))
+    missing = api.missing([(d, sizes[d]) for d in sorted(sources)])
+    echo(f'新版本 {preview["ref"]}：{preview["file_count"]} 个文件，{size_text(preview["total_bytes"])}；'
+         f'要上传 {len(missing)} 个文件，{size_text(sum(sizes[d] for d in missing))}，其余服务器上已有')
+    if dry_run:
+        echo('试运行：没有上传图片，没有建版本')
+        return None
+    t_check = time.perf_counter()
+    if confirm is not None and not confirm(f'确认建 {preview["ref"]} 吗？'):
+        echo('没有建版本')
+        return None
+    t_upload = time.perf_counter()
+    uploaded = _upload(api, missing, sources, sizes, workers, '上传')
+    t2 = time.perf_counter()
+    body.update(expect_latest_id=preview['expect_latest_id'], note=note,
+                source='fw dataset add ' + socket.gethostname() + ':' + '、'.join(str(f.resolve()) for f in folders))
+    version = api.create_change(name, body)['version']
+    t3 = time.perf_counter()
+    echo(f'已冻结 {version["ref"]}：{version["file_count"]} 个文件，{size_text(version["total_bytes"])}；'
+         f'上传了 {len(missing)} 个文件，{size_text(uploaded)}')
+    echo(f'  用时：算哈希 {t1 - t0:.1f} 秒，查服务器和对比 {t_check - t1:.1f} 秒，上传 {t2 - t_upload:.1f} 秒，'
+         f'建版本 {t3 - t2:.1f} 秒（不含等你确认的时间）')
+    return version
+
+
+def remove_dirs(api: Api, name: str, dirs: Sequence[str], note: str = '', dry_run: bool = False,
+                confirm: Optional[Confirm] = None, echo: Echo = print) -> Optional[dict]:
+    """Take folders out of dataset `name`: the next version is the newest one without them. Earlier versions
+    keep them (versions never change), and so do the snapshots made from those."""
+    if not dirs:
+        raise FwError('要写去掉哪个目录')
+    body = {'add': [], 'remove': [_pool_dir(d) for d in dirs]}
+    preview = api.preview_change(name, body)
+    echo(f'{preview["dataset"]}：在 {preview["parent"]} 的基础上')
+    _show_change(echo, preview)
+    if preview['reasons']:
+        raise FwError('没有建版本：\n  ' + '\n  '.join(preview['reasons']))
+    echo(f'新版本 {preview["ref"]}：{preview["file_count"]} 个文件，{size_text(preview["total_bytes"])}；'
+         f'{preview["parent"]} 和更早的版本不变，随时可以取回')
+    if dry_run:
+        echo('试运行：没有建版本')
+        return None
+    if confirm is not None and not confirm(f'确认建 {preview["ref"]} 吗？'):
+        echo('没有建版本')
+        return None
+    body.update(expect_latest_id=preview['expect_latest_id'], note=note,
+                source=f'fw dataset remove {socket.gethostname()}')
+    version = api.create_change(name, body)['version']
+    echo(f'已冻结 {version["ref"]}：{version["file_count"]} 个文件，{size_text(version["total_bytes"])}')
+    return version
+
+
 def _empty_dest(dest: Path) -> None:
     if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
         raise FwError(f'{dest} 已存在且不是空目录')

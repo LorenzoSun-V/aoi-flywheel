@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, MAX_PATH_BYTES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError,
                          FrameParser, ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
 
-from . import __version__, auth, datasets, db, evals, jobs, models, predictions, trainsets
+from . import __version__, auth, changes, datasets, db, evals, jobs, models, predictions, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -116,6 +116,23 @@ class VersionBody(BaseModel):
     manifest_sha256: str
     parent_id: Optional[int]
     expect_latest_id: Optional[int]
+    source: str = ''
+    note: str = ''
+
+
+class AddDirBody(BaseModel):
+    dir: str
+    manifest_sha256: str  # the folder's own file list (paths inside the folder), uploaded like any object
+    replace: bool = False
+
+
+class ChangeBody(BaseModel):
+    """The next version = the newest one with folders added, replaced or removed (changes.py)."""
+    expect_latest_id: Optional[int] = None
+    add: List[AddDirBody] = Field(default_factory=list, max_length=changes.MAX_DIRS)
+    remove: List[str] = Field(default_factory=list, max_length=changes.MAX_DIRS)
+    allow_other_files: bool = False
+    force: bool = False
     source: str = ''
     note: str = ''
 
@@ -478,7 +495,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.get('/api/v1/datasets/{name}/versions')
     def list_versions(name: str, user: dict = Depends(data_user)):
         with conn() as c:
-            return datasets.list_versions(c, name)
+            return changes.attach(c, datasets.list_versions(c, name))
 
     @app.post('/api/v1/datasets/{name}/versions', status_code=201)
     def create_version(name: str, body: VersionBody, user: dict = Depends(data_user)):
@@ -493,7 +510,23 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.get('/api/v1/datasets/{name}/versions/{number}')
     def get_version(name: str, number: str, user: dict = Depends(data_user)):
         with conn() as c:
-            return datasets.get_version(c, name, number)
+            return changes.attach(c, [datasets.get_version(c, name, number)])[0]
+
+    @app.post('/api/v1/datasets/{name}/changes/preview')
+    def preview_change(name: str, body: ChangeBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            return changes.plan(c, store, name, [a.model_dump() for a in body.add], body.remove,
+                                body.allow_other_files, body.force).summary()
+
+    @app.post('/api/v1/datasets/{name}/changes', status_code=201)
+    def create_change(name: str, body: ChangeBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            out = changes.create(c, store, user['user_id'], name, [a.model_dump() for a in body.add], body.remove,
+                                 body.expect_latest_id, body.allow_other_files, body.force, body.source, body.note,
+                                 before_freeze=hooks.get('before_freeze'))
+        log.info('version %s frozen by %s: %s', out['version']['ref'], user['name'],
+                 ', '.join(f'{o["op"]} {o["dir"]}' for o in out['ops']))
+        return out
 
     @app.get('/api/v1/versions/{version_id}')
     def get_version_by_id(version_id: int, user: dict = Depends(data_user)):

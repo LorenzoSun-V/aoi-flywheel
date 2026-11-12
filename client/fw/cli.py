@@ -82,13 +82,15 @@ def cmd_dataset_create(args, api: Api) -> None:
 def cmd_dataset_versions(args, api: Api) -> None:
     rows = []
     for v in api.versions(args.name):
+        change = '、'.join({'add': '+', 'replace': '换 ', 'remove': '-'}[o['op']] + o['dir'] + '/'
+                          for o in v.get('ops') or [])
         rows.append([f'@{v["number"]}', v['parent']['ref'] if v.get('parent') else '-', v['file_count'],
-                     ops.size_text(v['total_bytes']), _when(v['created_at']), v['created_by'], v['note'] or '',
-                     v['source'] if args.source else ''])
+                     ops.size_text(v['total_bytes']), change or '整份导入', _when(v['created_at']), v['created_by'],
+                     v['note'] or '', v['source'] if args.source else ''])
     if not rows:
         print(f'{args.name} 还没有版本')
         return
-    headers = ['版本', '父版本', '文件数', '大小', '时间', '操作人', '备注', '来源' if args.source else '']
+    headers = ['版本', '父版本', '文件数', '大小', '目录变化', '时间', '操作人', '备注', '来源' if args.source else '']
     _table(headers, rows)
 
 
@@ -96,6 +98,19 @@ def cmd_dataset_import(args, api: Api) -> int:
     result = ops.import_folder(api, args.name, args.folder, parent=args.parent, note=args.note,
                                allow_other_files=args.allow_other_files, force=args.force, dry_run=args.dry_run,
                                confirm=None if args.yes else _ask, workers=args.workers)
+    return 0 if result is not None or args.dry_run else 1
+
+
+def cmd_dataset_add(args, api: Api) -> int:
+    result = ops.add_folders(api, args.name, args.folders, to=args.to, replace=args.replace, note=args.note,
+                             allow_other_files=args.allow_other_files, force=args.force, dry_run=args.dry_run,
+                             confirm=None if args.yes else _ask, workers=args.workers)
+    return 0 if result is not None or args.dry_run else 1
+
+
+def cmd_dataset_remove(args, api: Api) -> int:
+    result = ops.remove_dirs(api, args.name, args.dirs, note=args.note, dry_run=args.dry_run,
+                             confirm=None if args.yes else _ask)
     return 0 if result is not None or args.dry_run else 1
 
 
@@ -610,7 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser('whoami', help='看当前账号')
     s.set_defaults(func=cmd_whoami)
 
-    ds = sub.add_parser('dataset', help='数据集：list、create、versions、import、diff').add_subparsers(
+    ds = sub.add_parser('dataset', help='数据集：list、create、versions、import、add、remove、diff').add_subparsers(
         dest='action', required=True, metavar='操作')
     s = ds.add_parser('list', help='列出数据集')
     s.set_defaults(func=cmd_dataset_list)
@@ -636,6 +651,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--yes', action='store_true', help='不问确认，直接建版本')
     s.add_argument('--workers', type=int, default=8, help='并行数（默认 8）')
     s.set_defaults(func=cmd_dataset_import)
+    s = ds.add_parser('add', help='往数据集里加目录：新版本 = 最新版本 + 这些目录（只上传这些目录）')
+    s.add_argument('name', help='数据集名称')
+    s.add_argument('folders', nargs='+', metavar='目录', help='要加的目录，可以写多个；在池里各用自己的目录名')
+    s.add_argument('--to', help='放在池里的哪个目录（默认用目录自己的名称），例如 20261104 或 night/20261104；只加一个目录时可用')
+    s.add_argument('--replace', action='store_true', help='池里已有同名目录时，整个换成这一份（默认拒绝）')
+    s.add_argument('--note', default='', help='备注，例如这批数据是什么')
+    s.add_argument('--allow-other-files', action='store_true', help='图片和标注以外的文件也一起入库')
+    s.add_argument('--force', action='store_true', help='有同名不同扩展名的图片也入库')
+    s.add_argument('--dry-run', action='store_true', help='只检查和预览，不上传图片，不建版本')
+    s.add_argument('--yes', action='store_true', help='不问确认，直接建版本')
+    s.add_argument('--workers', type=int, default=8, help='并行数（默认 8）')
+    s.set_defaults(func=cmd_dataset_add)
+    s = ds.add_parser('remove', help='从数据集里去掉目录：新版本 = 最新版本 - 这些目录（旧版本不变）')
+    s.add_argument('name', help='数据集名称')
+    s.add_argument('dirs', nargs='+', metavar='目录', help='池里的目录，写版本里的相对路径，例如 20261104')
+    s.add_argument('--note', default='', help='备注，例如为什么去掉')
+    s.add_argument('--dry-run', action='store_true', help='只预览，不建版本')
+    s.add_argument('--yes', action='store_true', help='不问确认，直接建版本')
+    s.set_defaults(func=cmd_dataset_remove)
     s = ds.add_parser('diff', help='对比两个版本；只写一个就和它的父版本比')
     s.add_argument('first', help='旧版本，例如 SES-TX@1；只写这一个时，看它相比父版本改了什么')
     s.add_argument('second', nargs='?', help='新版本，例如 SES-TX@3')

@@ -130,6 +130,8 @@ export const api = {
   putObject: (digest, blob) => call(`/objects/${digest}`, { method: 'PUT', blob }),
   trainsetLayout: (name, number) => call(`/trainsets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/layout`),
   createVersion: (name, body) => call(`/datasets/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
+  previewChange: (name, body) => call(`/datasets/${encodeURIComponent(name)}/changes/preview`, { method: 'POST', body }),
+  createChange: (name, body) => call(`/datasets/${encodeURIComponent(name)}/changes`, { method: 'POST', body }),
 };
 
 // The signed-in account (null before /me answered): pages show forms only to roles that may use them.
@@ -274,17 +276,27 @@ async function datasetPage(name) {
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
       el('dd', {}, `${d.created_by}，${when(d.created_at)}`), el('dt', {}, '备注'), el('dd', {}, d.note || '-')),
     el('h2', {}, '版本'),
-    el('table', {}, el('tr', {}, ['版本', '父版本', '文件', '大小', '来源', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
+    el('table', {}, el('tr', {}, ['版本', '父版本', '文件', '大小', '目录变化', '来源', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
       list.map((v) => el('tr', {},
         el('td', {}, el('a', { href: hrefOf(['v', d.name, String(v.number)]) }, v.ref)),
         el('td', {}, v.parent ? v.parent.ref : '-'),
         el('td', {}, String(v.file_count)), el('td', {}, sizeText(v.total_bytes)),
-        el('td', { class: 'muted' }, v.source), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
+        el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, v.source), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
         el('td', { class: 'muted' }, v.note)))),
     d.kind === 'trainset' ? null : el('div', { class: 'row', style: 'margin-top:12px' },
-      el('a', { class: 'button primary', href: hrefOf(['upload', d.name]) }, '从浏览器上传新版本')),
+      el('a', { class: 'button primary', href: hrefOf(['add', d.name]) }, '上传新增目录'),
+      d.latest ? el('a', { class: 'button', href: hrefOf(['remove', d.name]) }, '去掉目录') : null,
+      el('a', { class: 'button', href: hrefOf(['upload', d.name]) }, '上传完整版本')),
+    d.kind === 'trainset' ? null : el('p', { class: 'muted' }, '平时用「上传新增目录」：只上传新的那个目录，池里原有的不动。'
+      + '「上传完整版本」是把一个目录当作新版本的全部内容，目录里没有的文件在新版本里就是删除。'),
     el('h2', {}, '比较两个版本'),
     el('div', { class: 'row' }, '从', a, '到', b, compare));
+}
+
+// How the server made a version from its parent (version.ops), in a few words.
+export function opsText(ops) {
+  if (!ops || !ops.length) return '整份导入';
+  return ops.map((o) => `${{ add: '新增', replace: '替换', remove: '去掉' }[o.op]} ${o.dir}/`).join('、');
 }
 
 function crumbsFor(version, dir) {
@@ -1129,6 +1141,7 @@ async function uploadPage(name) {
   for (const box of [allowOther, force]) box.addEventListener('change', () => check().catch((e) => result.replaceChildren(errorBox(e))));
   show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传'),
     el('h1', {}, `上传到 ${d.name}`),
+    el('p', { class: 'muted' }, ['只想加一个新目录、不动池里原有的文件？用 ', el('a', { href: hrefOf(['add', d.name]) }, '上传新增目录'), '。']),
     el('p', { class: 'muted' }, `选一个目录：目录里的全部文件成为新版本（${latest ? `父版本 ${latest.ref}；目录里没有的文件在新版本里就是删除` : '第一个版本'}）。`
       + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
       + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
@@ -1137,6 +1150,233 @@ async function uploadPage(name) {
       el('label', {}, '备注', note),
       el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
       el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
+    result);
+}
+
+// What a change preview (the server's plan for adding, replacing or removing folders) says, as page nodes.
+function changeReport(p) {
+  const list = (title, part, cls = '', fmt = (x) => (Array.isArray(x) ? x.join('  ') : x)) => (part && part.count ? el('details', { class: cls },
+    el('summary', {}, `${title}：${part.count}`),
+    el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, fmt(x)))),
+    part.count > part.examples.length ? el('p', { class: 'muted' }, `只列出前 ${part.examples.length} 个`) : null) : null);
+  const boxes = (n) => (n === null || n === undefined ? '没有标注' : `${n} 个目标`);
+  const dup = p.duplicates;
+  return [
+    el('ul', {}, p.ops.map((o) => el('li', {}, o.op === 'add' ? `新增 ${o.dir}/：${o.file_count} 个文件，${sizeText(o.total_bytes)}`
+      : o.op === 'replace' ? `替换 ${o.dir}/：原有 ${o.removed_count} 个文件换成这 ${o.file_count} 个，${sizeText(o.total_bytes)}`
+        : `去掉 ${o.dir}/：${o.removed_count} 个文件`))),
+    list('文件名用不了', p.checks.bad_paths, 'bad'), list('路径冲突', p.checks.collisions, 'bad'),
+    list('同名不同扩展名的图片', p.checks.same_stem_images, 'warn'), list('图片和标注以外的文件', p.checks.others, 'warn'),
+    list('没有标注的图片（当正常图）', p.checks.unlabeled_images), list('找不到图片的标注', p.checks.orphan_labels),
+    list('说明文件（一起入库）', p.checks.meta),
+    list('提醒：和池里已有图片内容完全相同（只存一份，但各算一个样本）', dup.in_pool, 'warn', (x) => `${x.new} = ${x.existing}`),
+    list('提醒：新增的目录里内容完全相同的图片（组）', dup.in_new, 'warn'),
+    list('提醒：图片相同、标注不一样（训练时会互相矛盾）', dup.labels_differ, 'warn',
+      (x) => `${x.new}（${boxes(x.new_boxes)}） 和 ${x.existing}（${boxes(x.existing_boxes)}）`),
+    dup.uncompared ? el('p', { class: 'muted' }, `还有 ${dup.uncompared} 对相同的图片太多，没有比较标注`) : null,
+    p.changes.deleted.count ? el('div', { class: 'error' }, `新版本里会少掉 ${p.parent} 的 ${p.changes.deleted.count} 个文件（${p.parent} 本身不变），例如：\n`
+      + p.changes.deleted.examples.slice(0, 5).join('\n')) : null,
+    p.reasons.length ? el('div', { class: 'error' }, '不能建版本：\n' + p.reasons.join('\n')) : null,
+    el('p', {}, `新版本 ${p.ref}：${p.file_count} 个文件，${sizeText(p.total_bytes)}`
+      + (p.parent ? `（在 ${p.parent} 的基础上）` : '（第一个版本）'))];
+}
+
+// Add one folder to the pool: only that folder is read and uploaded, the server builds the version.
+async function addPage(name) {
+  const show = live();
+  const d = await api.dataset(name);
+  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
+  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const target = el('input', { type: 'text', placeholder: '选了目录以后自动填目录名，可以改，例如 20261104 或 night/20261104' });
+  const replace = el('input', { type: 'checkbox' });
+  const allowOther = el('input', { type: 'checkbox' });
+  const force = el('input', { type: 'checkbox' });
+  const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
+  const result = el('div');
+  let files = [];
+  let paths = [];
+  let round = 0;  // as on the upload page: an answer of an older round is dropped
+  const controls = [picker, target, replace, allowOther, force];
+  const lock = (on) => { for (const c of controls) c.disabled = on; };
+  const listOf = (title, part, cls = '') => (part && part.count ? el('details', { class: cls },
+    el('summary', {}, `${title}：${part.count}`),
+    el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, Array.isArray(x) ? x.join('  ') : x)))) : null);
+
+  const check = async () => {
+    if (!files.length) return;
+    const mine = ++round;
+    const picked = files;
+    const pickedPaths = paths;
+    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
+    if (mine !== round) return;
+    const junk = new Set(r.junk);
+    const keep = picked.map((f, i) => [f, pickedPaths[i]]).filter(([, p]) => !junk.has(p));
+    const report = [
+      el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
+        + (r.junk.length ? `；系统文件 ${r.junk.length} 个不入库` : '')),
+      listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
+      listOf('同名不同扩展名的图片', r.same_stem_images, 'warn'), listOf('图片和标注以外的文件', r.others, 'warn')];
+    if (r.reasons.length) {
+      result.replaceChildren(...present([report, el('div', { class: 'error' }, '不能入库：\n' + r.reasons.join('\n'))]));
+      return;
+    }
+    if (!keep.length) {
+      result.replaceChildren(...present([report, el('div', { class: 'error' }, '目录里没有文件')]));
+      return;
+    }
+    const go = el('button', { class: 'primary', onclick: () => hashAndPreview(mine, keep, report)
+      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '算哈希，预览新版本');
+    result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
+  };
+
+  const hashAndPreview = async (mine, keep, report) => {
+    if (mine !== round) return;
+    const dir = target.value.trim();
+    if (!dir) throw new Error('要写放在池里的哪个目录');
+    const progress = bar();
+    result.replaceChildren(...present([report, progress]));
+    uploading = true;
+    lock(true);
+    let entries;
+    let body;
+    let plan;
+    try {
+      const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
+      entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
+      const manifest = new Blob([manifestText(entries)]);
+      const [manifestDigest] = await hashAll([manifest], () => {});
+      await api.putObject(manifestDigest, manifest);  // the folder's file list: the server needs it for the preview
+      body = { add: [{ dir, manifest_sha256: manifestDigest, replace: replace.checked }], remove: [],
+        allow_other_files: allowOther.checked, force: force.checked };
+      plan = await api.previewChange(d.name, body);
+      if (plan.duplicates.not_uploaded) {  // same images whose labels the server lacks: send the labels, ask again
+        const labels = entries.filter((e) => ['.json', '.txt'].includes(ext(e.path)));
+        const lacking = new Set();
+        for (let i = 0; i < labels.length; i += 20000) {
+          for (const x of await api.missing(labels.slice(i, i + 20000).map((e) => [e.sha256, e.size]))) lacking.add(x);
+        }
+        const todo = labels.filter((e) => lacking.delete(e.sha256));
+        let sent = 0;
+        await inParallel(todo, 4, async (e) => {
+          await api.putObject(e.sha256, e.file);
+          progress.set(++sent, todo.length, `上传标注用于比较 ${sent} / ${todo.length}`);
+        });
+        plan = await api.previewChange(d.name, body);
+      }
+    } finally { uploading = false; lock(false); }
+    if (mine !== round) return;
+    const start = plan.reasons.length ? null : el('button', { class: 'primary', onclick: () => send(mine, entries, body, plan, report) }, `上传并建 ${plan.ref}`);
+    result.replaceChildren(...present([report, changeReport(plan), start ? el('div', { class: 'row' }, start) : null]));
+  };
+
+  const send = async (mine, entries, body, plan, report) => {
+    if (mine !== round) return;
+    const here = location.hash;
+    const progress = bar();
+    result.replaceChildren(...present([report, progress]));
+    uploading = true;
+    lock(true);
+    try {
+      const unique = new Map();
+      for (const e of entries) if (!unique.has(e.sha256)) unique.set(e.sha256, e);
+      const all = [...unique.values()];
+      const missing = new Set();
+      for (let i = 0; i < all.length; i += 20000) {
+        for (const x of await api.missing(all.slice(i, i + 20000).map((e) => [e.sha256, e.size]))) missing.add(x);
+      }
+      const todo = all.filter((e) => missing.has(e.sha256));
+      const bytes = todo.reduce((a, e) => a + e.size, 0);
+      let sent = 0;
+      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${all.length - todo.length} 个服务器上已经有了）`);
+      await inParallel(todo, 4, async (e) => {
+        await api.putObject(e.sha256, e.file);
+        sent += e.size;
+        progress.set(sent, bytes, `上传 ${sizeText(sent)} / ${sizeText(bytes)}`);
+      });
+      const made = await api.createChange(d.name, { ...body, expect_latest_id: plan.expect_latest_id,
+        source: `网页上传新增目录 ${body.add[0].dir}`, note: note.value.trim() });
+      uploading = false;
+      if (location.hash === here) location.hash = hrefOf(['v', d.name, String(made.version.number)]);
+    } catch (e) {
+      result.replaceChildren(...present([report, errorBox(e)]));
+    } finally { uploading = false; lock(false); }
+  };
+
+  const again = () => check().catch((e) => result.replaceChildren(errorBox(e)));
+  picker.addEventListener('change', () => {
+    files = [...picker.files];
+    paths = relPaths(files);
+    if (files.length) target.value = (files[0].webkitRelativePath || '').split('/')[0];
+    again();
+  });
+  for (const box of [replace, allowOther, force]) box.addEventListener('change', again);
+  let typing = null;  // the name is typed letter by letter: check once it rests, not on every key
+  target.addEventListener('input', () => {
+    round++;  // what is shown belongs to the old name
+    clearTimeout(typing);
+    typing = setTimeout(again, 400);
+  });
+  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传新增目录'),
+    el('h1', {}, `往 ${d.name} 里加一个目录`),
+    el('p', { class: 'muted' }, `选一个目录，比如今天采集的那一天：只上传这个目录，新版本 = ${d.latest ? d.latest.ref : '空'} + 这个目录，池里原有的文件不动。`
+      + '池里已经有同名目录时会拦下，除非勾选「替换已有目录」。和池里重复的图片、标注不一致的重复图片只提醒，不拦。和 fw dataset add 是同一件事。'),
+    el('div', { class: 'panel form' },
+      el('label', {}, '目录', picker),
+      el('label', {}, '放在池里的目录', target),
+      el('label', {}, '备注', note),
+      el('label', { class: 'check' }, replace, '替换已有目录：池里已有这个目录时，整个换成这一份（--replace）'),
+      el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
+      el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
+    result);
+}
+
+// Take folders out of the pool: the next version is the newest one without them.
+async function removePage(name) {
+  const show = live();
+  const d = await api.dataset(name);
+  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能改；快照用 fw trainset create 建`);
+  if (!d.latest) throw new Error(`${d.name} 还没有版本`);
+  const latest = d.latest;
+  const counts = new Map();
+  for (const f of await filesOf(latest)) {
+    const slash = f.path.indexOf('/');
+    if (slash > 0) counts.set(f.path.slice(0, slash), (counts.get(f.path.slice(0, slash)) || 0) + 1);
+  }
+  const boxes = [...counts.entries()].sort((x, y) => x[0].localeCompare(y[0]))
+    .map(([dir, n]) => [dir, n, el('input', { type: 'checkbox', value: dir })]);
+  const deeper = el('input', { type: 'text', placeholder: '更里面的目录，例如 night/20261104；多个用逗号隔开（可不填）' });
+  const note = el('input', { type: 'text', placeholder: '为什么去掉，写进版本备注' });
+  const result = el('div');
+  let round = 0;
+  const body = () => ({ add: [], remove: [...boxes.filter(([, , b]) => b.checked).map(([dir]) => dir),
+    ...deeper.value.split(/[,，]/).map((x) => x.trim()).filter(Boolean)] });
+  const preview = async () => {
+    const mine = ++round;
+    const asked = body();
+    if (!asked.remove.length) { result.replaceChildren(el('div', { class: 'error' }, '先选要去掉的目录')); return; }
+    const plan = await api.previewChange(d.name, asked);
+    if (mine !== round) return;
+    const go = plan.reasons.length ? null : el('button', { class: 'primary', onclick: async () => {
+      const here = location.hash;
+      try {
+        const made = await api.createChange(d.name, { ...asked, expect_latest_id: plan.expect_latest_id,
+          source: '网页去掉目录', note: note.value.trim() });
+        if (location.hash === here) location.hash = hrefOf(['v', d.name, String(made.version.number)]);
+      } catch (e) { result.replaceChildren(errorBox(e)); }
+    } }, `建 ${plan.ref}`);
+    result.replaceChildren(...present([changeReport(plan), go ? el('div', { class: 'row' }, go) : null]));
+  };
+  const run = () => preview().catch((e) => result.replaceChildren(errorBox(e)));
+  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 去掉目录'),
+    el('h1', {}, `从 ${d.name} 里去掉目录`),
+    el('p', { class: 'muted' }, `新版本 = ${latest.ref} 去掉选中的目录。${latest.ref} 和更早的版本不变，用它们建的训练集快照也不变，随时可以取回。和 fw dataset remove 是同一件事。`),
+    el('div', { class: 'panel form' },
+      boxes.length ? boxes.map(([dir, n, box]) => el('label', { class: 'check' }, box, `${dir}/（${n} 个文件）`))
+        : el('p', { class: 'muted' }, `${latest.ref} 的文件都在最上层，没有目录可以去掉`),
+      el('label', {}, '其他目录', deeper),
+      el('label', {}, '备注', note),
+      el('div', { class: 'row' }, el('button', { class: 'primary', onclick: run }, '预览'))),
     result);
 }
 
@@ -1217,6 +1457,8 @@ async function render() {
     else if (parts[0] === 'predictions') await predictionsPage();
     else if (parts[0] === 'p' && parts[1]) await predictionPage(parts[1], query);
     else if (parts[0] === 'upload' && parts[1]) await uploadPage(parts[1]);
+    else if (parts[0] === 'add' && parts[1]) await addPage(parts[1]);
+    else if (parts[0] === 'remove' && parts[1]) await removePage(parts[1]);
     else show(el('h1', {}, '没有这个页面'), el('a', { href: '#/' }, '回首页'));
   } catch (e) {
     if (e.status === 401) return;

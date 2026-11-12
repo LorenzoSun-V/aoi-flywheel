@@ -216,6 +216,13 @@ class Api:
             'manifest_sha256': manifest_sha256, 'parent_id': parent_id, 'expect_latest_id': expect_latest_id,
             'source': source, 'note': note})
 
+    def preview_change(self, name: str, body: dict):
+        """What adding, replacing or removing folders would make of the newest version (nothing is created)."""
+        return self._json(_retry(lambda: self.http.post(f'/datasets/{name}/changes/preview', json=body)))
+
+    def create_change(self, name: str, body: dict):
+        return self.post(f'/datasets/{name}/changes', body)
+
     def diff(self, old_id: int, new_id: int):
         return self.get('/diff', old=old_id, new=new_id)
 

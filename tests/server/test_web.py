@@ -208,6 +208,41 @@ def test_the_folder_check_is_the_one_of_fw_dataset_import(service, tokens, tmp_p
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_path):
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    same = real_png(64, 32, seed)
+    base = write_tree(tmp_path / 'base', {'20261101/a.png': same, '20261101/a.json': label('scratch'),
+                                          '20261102/b.png': real_png(64, 32, seed + 1)})
+    day = write_tree(tmp_path / '20261103', {'c.png': real_png(64, 32, seed + 2), 'c.json': label('dent'),
+                                             'a_again.png': same, 'a_again.json': label('scratch', 'dent')})
+    name = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    v1 = ops.import_folder(api, name, base, echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'change.cjs'), service.url + '/', tokens['algo'], name, str(shots),
+                        str(day), '20261101'], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['target'] == '20261103'
+    assert '新增 20261103/：4 个文件' in seen['plan'] and f'新版本 {name}@2：7 个文件' in seen['plan']
+    assert '和池里已有图片内容完全相同' in seen['plan'] and '20261103/a_again.png = 20261101/a.png' in seen['plan']
+    assert '图片相同、标注不一样' in seen['plan'] and '（2 个目标） 和 20261101/a.png（1 个目标）' in seen['plan']
+    assert seen['added'] == f'/v/{name}/2'
+    assert '池里已有 20261103/' in seen['again'] and seen['offered'] == 0
+    assert '去掉 20261101/：2 个文件' in seen['removal'] and f'新版本 {name}@3：5 个文件' in seen['removal']
+    assert seen['removed'] == f'/v/{name}/3'
+    assert '新增 20261103/' in seen['versions'] and '去掉 20261101/' in seen['versions'] and '整份导入' in seen['versions']
+    v2, v3 = api.version(name, 2), api.version(name, 3)
+    assert v2['parent']['id'] == v1['id'] and v2['note'] == '第三天' and v2['source'] == '网页上传新增目录 20261103'
+    assert [o['op'] for o in v2['ops']] == ['add'] and [o['op'] for o in v3['ops']] == ['remove']
+    assert v3['note'] == '拍糊了' and v3['file_count'] == 5
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
     from fw import ops
     from helpers import quiet

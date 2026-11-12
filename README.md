@@ -96,7 +96,7 @@ sudo docker compose exec server fw-server user disable zhangsan
 - 看模型、版本、评估报告（两份比较），在模型版本页提交评估和预标注，在任务页看排队、实时日志、取消；
 - 看预测集：每张图几个框，拖阈值，大图上实线是标注、虚线是预测。
 
-- 新建数据池，从浏览器选目录上传新版本（和 `fw dataset import` 一样检查、去重、冻结；大批数据还是用命令行）。
+- 新建数据池；往数据池里上传新增目录、去掉目录（和 `fw dataset add`、`fw dataset remove` 一样）；上传完整版本（和 `fw dataset import` 一样检查、去重、冻结；大批数据还是用命令行）。
 
 网页由 fw-server 直接提供（`server/fwserver/web/`，原生 JS，不用构建），部署不加东西。
 
@@ -113,6 +113,8 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 |---|---|
 | `fw dataset create SES-TX --site SES --line TX` | 建数据集（一条产线的数据池，`--kind test` 测试集、`regression` 回归集） |
 | `fw dataset import SES-TX /data/SES/TX_v2` | 检查目录，列出相比父版本的新增、修改、删除和改名，确认后只上传服务器上没有的文件，冻结成下一个版本。`--dry-run` 只检查；`--yes` 不问确认 |
+| `fw dataset add SES-TX /data/20261104` | 往数据集里加目录：新版本 = 最新版本 + 这个目录，只上传这个目录。池里已有同名目录时拒绝（`--replace` 整个换掉）；和池里重复的图、标注不一致的重复图只提醒 |
+| `fw dataset remove SES-TX 20261101` | 从数据集里去掉目录：新版本 = 最新版本去掉它，旧版本不变 |
 | `fw dataset versions SES-TX` | 列出版本 |
 | `fw dataset diff SES-TX@2` | 和父版本比；`fw dataset diff SES-TX@1 SES-TX@3 --list` 比任意两个版本并列出全部文件 |
 | `fw get SES-TX@3 --to /data/train/SES-TX@3` | 取到一个空目录：只下载缓存里没有的，每个文件按清单核对 |
