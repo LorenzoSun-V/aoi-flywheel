@@ -48,6 +48,14 @@ def new_name():
     return f'B-{uuid.uuid4().hex[:8]}'
 
 
+def status_of_close(api, name):
+    try:
+        api.batch_step(name, 'close', {})
+    except ApiError as e:
+        return e.status
+    return 200
+
+
 def upload(api, pool, day, **kw):
     return ops.upload_batch(api, day, pool, kw.pop('labeler', '张三'), name=kw.pop('name', new_name()), echo=quiet, **kw)
 
@@ -174,6 +182,8 @@ def test_only_owner_and_asked_reviewer_act(api, field, make_api, pool, day, toke
     with pytest.raises(ApiError) as e:
         other_field.batch_step(name, 'close', {})
     assert e.value.status == 403
+    # nor an algo account that is neither its owner nor its reviewer, before or after it is sent to review
+    assert status_of_close(api, name) == 403
     # field accounts cannot review at all
     for step in ('reject', 'approve'):
         with pytest.raises(ApiError, match='不能复核') as e:
@@ -184,6 +194,8 @@ def test_only_owner_and_asked_reviewer_act(api, field, make_api, pool, day, toke
     with pytest.raises(ApiError, match='复核人不是你') as e:
         api.batch_step(name, 'approve', {})
     assert e.value.status == 403
+    assert status_of_close(api, name) == 403 and 'close' not in api.batch(name)['actions']
+    assert 'close' in admin.batch(name)['actions']
     assert admin.batch_step(name, 'approve', {})['status'] == 'approved'
     # field cannot import
     with pytest.raises(ApiError) as e:
@@ -341,6 +353,33 @@ def test_box_changes():
     assert box([a], [('ng', 50.0, 50.0, 60.0, 60.0)]) == {'added': 1, 'removed': 1, 'moved': 0, 'relabeled': 0}
     assert box([a, a], [a]) == {'added': 0, 'removed': 1, 'moved': 0, 'relabeled': 0}
     assert box([], [a, a]) == {'added': 2, 'removed': 0, 'moved': 0, 'relabeled': 0}
+
+
+def test_box_pairing_is_bounded():
+    many_old = [('ng', float(i), 0.0, i + 10.0, 10.0) for i in range(600)]
+    many_new = [('ng', i + 0.5, 0.0, i + 10.5, 10.0) for i in range(600)]
+    # too many pairs for one image: only counted
+    assert server_batches.box_changes(many_old, many_new) == {'added': 600, 'removed': 600, 'moved': 0, 'relabeled': 0}
+    a, b = [('ng', 0.0, 0.0, 10.0, 10.0)], [('ng', 1.0, 1.0, 11.0, 11.0)]
+    budget = [1]
+    assert server_batches.box_changes(a, b, budget)['moved'] == 1 and budget == [0]
+    assert server_batches.box_changes(a, b, budget) == {'added': 1, 'removed': 1, 'moved': 0, 'relabeled': 0}
+
+
+def test_two_uploads_for_one_folder_at_once(field, pool, day, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    digest, _, _ = ops._send_folder(field, day, False, False, 2, quiet)
+
+    def make(i):
+        try:
+            field.create_batch({'name': new_name(), 'pool': pool, 'dir': 'same', 'manifest_sha256': digest,
+                                'labeler': '张三'})
+            return 201
+        except ApiError as e:
+            return e.status
+    with ThreadPoolExecutor(4) as ex:
+        got = sorted(ex.map(make, range(4)))
+    assert got == [201, 409, 409, 409]
 
 
 def test_compare_ignores_reformatted_labels(field, pool, day):

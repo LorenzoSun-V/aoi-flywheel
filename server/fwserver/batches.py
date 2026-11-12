@@ -21,7 +21,8 @@
 - Every step is a row of batch_steps (only ever added) and an event, in the transaction of the step.
 
 Who may do what beyond the capability the endpoint asks for: only the owner (or an administrator) uploads
-revisions and submits; only the reviewer who was asked (or an administrator) rejects and approves.
+revisions and submits; only the reviewer who was asked (or an administrator) rejects and approves; the owner,
+the reviewer who was asked and an administrator close.
 """
 from __future__ import annotations
 
@@ -43,7 +44,9 @@ MAX_COMMENT = 2000
 MAX_IMAGES = 500         # images a rejection points at
 EXAMPLES = 200           # images a comparison lists
 MAX_LABEL_READS = 20000  # labels a comparison reads; beyond this the rest are counted but not compared
-MAX_BOXES = 2000         # boxes of one image a comparison pairs up; beyond this only the counts
+MAX_PAIRS = 250_000      # old x new boxes of one image a comparison pairs up; beyond this only added / removed
+MAX_WORK = 5_000_000     # the same, summed over one comparison
+BATCH_LOCK = 0x62617463  # advisory lock class: creating a batch for a pool
 SAME_BOX = 0.5           # two boxes are one box that was moved or renamed when they overlap this much (IoU)
 
 _BATCH = """
@@ -94,7 +97,7 @@ def _actions(user: Optional[dict], b: dict) -> List[str]:
         out.append('reject')
     if b['status'] == 'approved' and auth.allowed(user['role'], 'datasets.write'):
         out.append('import')
-    if b['status'] in UNFINISHED and (_owns(user, b) or auth.allowed(user['role'], 'batches.review')):
+    if b['status'] in UNFINISHED and (_owns(user, b) or _reviews(user, b)):
         out.append('close')
     return out
 
@@ -210,16 +213,21 @@ def create(conn, store: Store, user: dict, name: str, pool: str, dir: str, manif
     target = datasets.get_dataset(conn, pool)
     if target['kind'] in datasets.MADE:
         raise DatasetError(400, f'{target["name"]} 是{datasets.MADE[target["kind"]][0]}，批次要进的是数据池')
-    other = conn.execute('SELECT d.name, b.dir FROM batches b JOIN datasets d ON d.id = b.dataset_id '
-                         'WHERE b.pool_id = %s AND b.status = ANY(%s)', (target['id'], list(UNFINISHED))).fetchall()
-    for o in other:
-        if fold(o['dir']) == fold(d):
-            raise DatasetError(409, f'批次 {o["name"]} 也要进 {target["name"]} 的 {o["dir"]}/，还没有结束；'
-                                    f'给那个批次上传新的一版（fw batch update {o["name"]}），或换一个目录名称')
+    def no_other(c) -> None:
+        for o in c.execute('SELECT d.name, b.dir FROM batches b JOIN datasets d ON d.id = b.dataset_id '
+                           'WHERE b.pool_id = %s AND b.status = ANY(%s)', (target['id'], list(UNFINISHED))).fetchall():
+            if fold(o['dir']) == fold(d):
+                raise DatasetError(409, f'批次 {o["name"]} 也要进 {target["name"]} 的 {o["dir"]}/，还没有结束；'
+                                        f'给那个批次上传新的一版（fw batch update {o["name"]}），或换一个目录名称')
+
+    no_other(conn)  # said before anything is checked or made; decided under the lock in record()
     _check_content(store, manifest_sha256, allow_other_files, force)
     asked = _reviewer(conn, reviewer) if reviewer else None
 
     def record(c, version_id: int) -> None:
+        # one new batch per pool at a time, so that two uploads for the same folder cannot both pass the check
+        c.execute('SELECT pg_advisory_xact_lock(%s, %s)', (BATCH_LOCK, target['id'] % (1 << 31)))
+        no_other(c)
         dataset_id = c.execute('SELECT dataset_id FROM versions WHERE id = %s', (version_id,)).fetchone()['dataset_id']
         batch_id = c.execute('INSERT INTO batches (dataset_id, pool_id, dir, owner_id) VALUES (%s, %s, %s, %s) '
                              'RETURNING id', (dataset_id, target['id'], d, user['user_id'])).fetchone()['id']
@@ -388,8 +396,8 @@ def close(conn, user: dict, name: str, comment: str = '') -> dict:
     comment = _text(comment, '关闭原因', MAX_COMMENT)
     with conn.transaction():
         b = _find(conn, name, lock=True)
-        if not (_owns(user, b) or auth.allowed(user['role'], 'batches.review')):
-            raise DatasetError(403, f'{b["name"]} 不是你的批次，不能关闭')
+        if not (_owns(user, b) or _reviews(user, b)):
+            raise DatasetError(403, f'{b["name"]} 不是你的批次，你也不是它的复核人，不能关闭')
         if b['status'] not in UNFINISHED:
             raise DatasetError(409, f'{b["name"]} {STATUS[b["status"]]}，不能关闭')
         latest = _latest(conn, b)
@@ -552,10 +560,11 @@ def _iou(a: Box, b: Box) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def box_changes(old: List[Box], new: List[Box]) -> Dict[str, int]:
+def box_changes(old: List[Box], new: List[Box], budget: Optional[List[int]] = None) -> Dict[str, int]:
     """How the boxes of one image changed: added, removed, moved (same class, another place), relabeled
     (another class, with or without moving). Boxes that are the same on both sides are left out; of the rest,
-    an old and a new box that overlap by SAME_BOX or more are one box that was changed."""
+    an old and a new box that overlap by SAME_BOX or more are one box that was changed. budget: [pairs left]
+    for the whole comparison; an image with too many pairs, or when nothing is left, gets added / removed only."""
     def key(b: Box):
         return (b[0],) + tuple(round(v, 4) for v in b[1:])
 
@@ -574,8 +583,11 @@ def box_changes(old: List[Box], new: List[Box]) -> Dict[str, int]:
             left[key(b)] -= 1
             removed.append(b)
     out = {'added': len(added), 'removed': len(removed), 'moved': 0, 'relabeled': 0}
-    if not added or not removed or len(added) * len(removed) > MAX_BOXES * MAX_BOXES:
+    work = len(added) * len(removed)
+    if not work or work > MAX_PAIRS or (budget is not None and work > budget[0]):
         return out
+    if budget is not None:
+        budget[0] -= work
     pairs = sorted(((_iou(a, r), i, j) for i, a in enumerate(added) for j, r in enumerate(removed)), reverse=True)
     used_a, used_r = set(), set()
     for overlap, i, j in pairs:
@@ -618,6 +630,7 @@ def compare(conn, store: Store, name: str, old: Optional[int] = None, new: Optio
     changed: List[dict] = []
     reads = uncompared = 0
     cache: Dict[str, Optional[List[Box]]] = {}
+    budget = [MAX_WORK]
 
     def boxes(label):
         nonlocal reads
@@ -644,7 +657,7 @@ def compare(conn, store: Store, name: str, old: Optional[int] = None, new: Optio
             if ba is None or bb is None:
                 row['unreadable'] = True
             else:
-                delta = box_changes(ba, bb)
+                delta = box_changes(ba, bb, budget)
                 row.update(delta, old_boxes=len(ba), new_boxes=len(bb))
                 if not any(delta.values()) and not row['image_changed']:
                     continue  # the file changed (formatting, order, other fields) but not its boxes

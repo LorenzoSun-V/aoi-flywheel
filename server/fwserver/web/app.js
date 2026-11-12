@@ -1443,7 +1443,7 @@ async function batchesPage(query) {
 
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
 // then makes the batch, the revision or the approval. Returns the node to show.
-function folderSender({ controls, allowOther, force, onPick, label, done }) {
+function folderSender({ controls, allowOther, force, onPick, label, ready, done }) {
   const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
   const result = el('div');
   let files = [];
@@ -1483,6 +1483,7 @@ function folderSender({ controls, allowOther, force, onPick, label, done }) {
 
   const send = async (mine, keep, report) => {
     if (mine !== round) return;
+    ready();  // what the form must say, before the folder is hashed and uploaded
     const progress = bar();
     result.replaceChildren(...present([report, progress]));
     uploading = true;
@@ -1549,8 +1550,12 @@ async function batchUploadPage(name, query) {
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
   const here = location.hash;
-  const done = async (digest) => {
+  const ready = () => {
     if (!labeler.value.trim()) throw new Error(approve ? '要写修改的人的姓名' : '要写标注人姓名');
+    if (!b && !batchName.value.trim()) throw new Error('要写批次名称');
+    if (!b && !dir.value.trim()) throw new Error('要写池里的目录名');
+  };
+  const done = async (digest) => {
     const common = { manifest_sha256: digest, labeler: labeler.value.trim(), allow_other_files: allowOther.checked, force: force.checked };
     let made;
     if (approve) {
@@ -1571,7 +1576,7 @@ async function batchUploadPage(name, query) {
       dir.value = folder;
       if (!batchName.value.trim()) batchName.value = `${pool.value}-${folder}`.replace(/[^A-Za-z0-9._-]/g, '');
     },
-    done });
+    ready, done });
   const title = approve ? `通过 ${b.name}，并带上我修改后的内容` : b ? `给 ${b.name} 上传新的一版` : '上传新批次';
   show(el('div', { class: 'crumbs' }, el('a', { href: '#/batches' }, '标注批次'), b ? [' / ', bref(b.name)] : null, ` / ${approve ? '修改后通过' : b ? '新的一版' : '上传'}`),
     el('h1', {}, title),
