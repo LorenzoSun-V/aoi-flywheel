@@ -1311,7 +1311,12 @@ async function addPage(name) {
     again();
   });
   for (const box of [replace, allowOther, force]) box.addEventListener('change', again);
-  target.addEventListener('input', again);
+  let typing = null;  // the name is typed letter by letter: check once it rests, not on every key
+  target.addEventListener('input', () => {
+    round++;  // what is shown belongs to the old name
+    clearTimeout(typing);
+    typing = setTimeout(again, 400);
+  });
   show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传新增目录'),
     el('h1', {}, `往 ${d.name} 里加一个目录`),
     el('p', { class: 'muted' }, `选一个目录，比如今天采集的那一天：只上传这个目录，新版本 = ${d.latest ? d.latest.ref : '空'} + 这个目录，池里原有的文件不动。`

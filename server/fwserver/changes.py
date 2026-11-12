@@ -251,6 +251,16 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
         gone.update(files)
         ops.append(Op('remove', d, removed_count=len(files)))
     new: List[Entry] = []
+    # every folder of the pool, at any depth, by its name without case: a new folder, or a folder above it,
+    # that differs from one of them only in case would be the same folder on Windows
+    known: Dict[str, str] = {}
+    for path, _, _ in parent:
+        parts = path.split('/')[:-1]
+        for i in range(len(parts), 0, -1):
+            prefix = '/'.join(parts[:i])
+            if fold(prefix) in known:
+                break  # the folders above it are there already
+            known[fold(prefix)] = prefix
     for d, digest, replace in adds:
         data = store.read(digest)
         if data is None:
@@ -262,8 +272,12 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
         if not content:
             raise DatasetError(400, f'目录 {d} 里没有文件')
         exact = [p for p, _, _ in parent if _under(p, d)]
-        other_case = sorted({p[: len(d)] for p, _, _ in parent
-                             if fold(p).startswith(fold(d) + '/') and not _under(p, d)})
+        parts = d.split('/')
+        other_case = []
+        for i in range(1, len(parts) + 1):
+            prefix = '/'.join(parts[:i])
+            if known.setdefault(fold(prefix), prefix) != prefix:
+                other_case.append(known[fold(prefix)])
         if other_case:
             conflicts.append({'dir': d, 'files': 0, 'ref': latest['ref'], 'other_case': other_case[0]})
         elif exact and not replace:

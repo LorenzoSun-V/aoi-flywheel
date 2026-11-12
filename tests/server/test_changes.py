@@ -102,6 +102,14 @@ def test_existing_folder_is_refused_unless_replaced(api, pool, tmp_path):
     ops.add_folders(api, name, [other], echo=quiet)
     with pytest.raises(ops.FwError, match='只差大小写'):
         ops.add_folders(api, name, [other], to='abc', replace=True, echo=quiet)
+    # also when it is a folder above the new one that differs in case
+    with pytest.raises(ops.FwError, match='只差大小写的目录 ABC/'):
+        ops.add_folders(api, name, [other], to='abc/sub', echo=quiet)
+    m = manifest_bytes([('x.bmp', '0' * 64, 1)])
+    api.put_bytes(m)
+    two = api.preview_change(name, {'add': [{'dir': 'Night/a', 'manifest_sha256': manifest_hash(m)},
+                                            {'dir': 'night/b', 'manifest_sha256': manifest_hash(m)}]})
+    assert any('只差大小写的目录 Night/' in r for r in two['reasons'])
     # replacing with the same content makes no version
     with pytest.raises(ops.FwError, match='完全一样'):
         ops.add_folders(api, name, [other], replace=True, echo=quiet)
