@@ -18,6 +18,7 @@ import re
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import events
 from .datasets import NAME, DatasetError, check_digest
 from .store import Store, StoreError
 
@@ -163,6 +164,8 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
             (runner['id'], (last['number'] if last else 0) + 1, worker['user_id'], conda_env,
              bytes.fromhex(env_sha256), src_dir, src_commit, src_dirty, state, framework, onnx2engine, tool,
              worker['user_id'])).fetchone()
+        events.record(conn, worker['user_id'], 'runner.register', f'{name}@{(last["number"] if last else 0) + 1}',
+                      conda_env=conda_env, src_commit=src_commit, framework=framework)
     return dict(get_runner_version_by_id(conn, row['id']), created=True)
 
 
@@ -254,9 +257,13 @@ def find_runner(conn, runner: Optional[str], what: str) -> dict:
 def enqueue(conn, user: dict, kind: str, rv: Optional[dict], params: dict) -> dict:
     if kind not in KINDS:
         raise DatasetError(400, f'任务类型只能是 {"、".join(KINDS)}')
-    row = conn.execute('INSERT INTO jobs (kind, params, runner_version_id, submitted_by) VALUES (%s, %s, %s, %s) '
-                       'RETURNING id', (kind, json.dumps(params, ensure_ascii=False), rv['id'] if rv else None,
-                                        user['user_id'])).fetchone()
+    with conn.transaction():
+        row = conn.execute('INSERT INTO jobs (kind, params, runner_version_id, submitted_by) VALUES (%s, %s, %s, %s) '
+                           'RETURNING id', (kind, json.dumps(params, ensure_ascii=False), rv['id'] if rv else None,
+                                            user['user_id'])).fetchone()
+        events.record(conn, user['user_id'], 'job.submit', f'任务 {row["id"]}', kind=kind,
+                      model=(params.get('model') or {}).get('ref'), data=(params.get('data') or {}).get('ref'),
+                      runner=rv.get('ref') if rv else None)
     return get_job(conn, row['id'])
 
 
@@ -270,7 +277,8 @@ def submit(conn, user: dict, kind: str, runner: Optional[str] = None, params: Op
     return enqueue(conn, user, kind, rv, runner_params(rv))
 
 
-def cancel(conn, job_id: int) -> dict:
+def cancel(conn, job_id: int, user_id: Optional[int] = None) -> dict:
+    """user_id: who asked (None: the server command)."""
     with conn.transaction():
         row = conn.execute('SELECT status FROM jobs WHERE id = %s FOR UPDATE', (job_id,)).fetchone()
         if row is None:
@@ -278,8 +286,12 @@ def cancel(conn, job_id: int) -> dict:
         if row['status'] == 'queued':
             conn.execute("UPDATE jobs SET status = 'cancelled', cancel_requested = true, finished_at = now() "
                          "WHERE id = %s", (job_id,))
+            events.record(conn, user_id, 'job.cancel', f'任务 {job_id}', was='queued')
         elif row['status'] == 'running':
-            conn.execute('UPDATE jobs SET cancel_requested = true WHERE id = %s', (job_id,))
+            asked = conn.execute('UPDATE jobs SET cancel_requested = true WHERE id = %s AND NOT cancel_requested',
+                                 (job_id,)).rowcount
+            if asked:  # a retried request is not a second cancellation
+                events.record(conn, user_id, 'job.cancel', f'任务 {job_id}', was='running')
         elif row['status'] == 'cancelled':
             pass  # cancelled already (a retried request, or the worker stopped it): nothing to do
         else:

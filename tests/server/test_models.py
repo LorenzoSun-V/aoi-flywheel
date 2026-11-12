@@ -641,7 +641,8 @@ def test_releases_and_the_current_model(api, make_api, model, snapshot, tmp_path
 def test_roles(api, make_api, model, snapshot, tmp_path, cache):
     mv = register(api, model, snapshot, files_in(tmp_path))
     deploy, field, algo = make_api('deploy'), make_api('field'), make_api('algo')
-    # the deploy role sees models and releases, downloads model files and nothing else, and registers releases
+    # a field account sees models and releases, downloads their files and registers releases; it changes
+    # nothing else (deploy here is a second field account)
     assert deploy.model_version(model, 1)['id'] == mv['id']
     assert deploy.chain(f'{model}@1')['trainset']['ref'] == snapshot['ref']
     assert status_of(lambda: release(deploy, f'{model}@1', '2026-10-20T10:30+08:00', site='D', line='L')) == 200
@@ -651,17 +652,20 @@ def test_roles(api, make_api, model, snapshot, tmp_path, cache):
                                                                    'code_commit': COMMIT})) == 403
     image = next(f for f in ops.parse_manifest(api.read_object(snapshot['manifest_sha256']))
                  if f[0].startswith('images/'))
-    assert status_of(lambda: deploy.read_object(image[1])) == 403
-    assert status_of(lambda: deploy.read_object(snapshot['manifest_sha256'])) == 403
-    assert status_of(lambda: deploy.fetch_objects([(image[1], image[2])], lambda d, b: None)) == 403
-    assert status_of(lambda: deploy.version(*ops.parse_ref(snapshot['ref']))) == 403
+    assert status_of(lambda: deploy.read_object(image[1])) == 200  # it reads datasets too
+    assert status_of(lambda: deploy.version(*ops.parse_ref(snapshot['ref']))) == 200
+    assert status_of(lambda: deploy.register_eval(model, 1, {})) in (403, 422)
+    assert status_of(lambda: deploy.submit_job('check')) == 403 and status_of(deploy.jobs) == 403
     assert status_of(lambda: ops.get_model(deploy, cache, f'{model}@1', tmp_path / 'd', echo=quiet)) == 200
     # algorithm engineers register models and evaluations but not releases
     assert status_of(lambda: release(algo, f'{model}@1', '2026-10-20T10:30+08:00')) == 403
-    # field accounts see none of it
     for call in (field.models, lambda: field.model_version(model, 1), lambda: field.chain(f'{model}@1'),
-                 lambda: field.releases(), lambda: field.evals(), lambda: field.read_object(mv['onnx_sha256']),
-                 lambda: field.create_model('X', 'S', 'L', 'det', '')):
+                 lambda: field.releases(), lambda: field.evals(), lambda: field.read_object(mv['onnx_sha256'])):
+        assert status_of(call) == 200
+    # a worker sees none of it
+    worker = make_api('worker')
+    for call in (worker.models, lambda: worker.model_version(model, 1), lambda: worker.releases(),
+                 lambda: release(worker, f'{model}@1', '2026-10-20T10:30+08:00')):
         assert status_of(call) == 403
 
 
@@ -728,7 +732,7 @@ def test_command_line(api, model, snapshot, tmp_path, monkeypatch, service, toke
     assert (tmp_path / 'm' / 'model.onnx').is_file()
     assert fw_cli.main(['release', 'register', '--model', f'{model}@1', '--deploy-repo', 'git@git.example.com:d.git',
                         '--deploy-commit', 'abcdef1']) == 1
-    assert '部署账号' in capsys.readouterr().err
+    assert '现场实施账号' in capsys.readouterr().err
 
     login(monkeypatch, tmp_path, service, tokens['deploy'])
     site = f'S{uuid.uuid4().hex[:6]}'
@@ -745,7 +749,7 @@ def test_command_line(api, model, snapshot, tmp_path, monkeypatch, service, toke
     out = capsys.readouterr().out
     assert snapshot['ref'] in out and '都在文件库里' in out
     assert fw_cli.main(['release', 'show', f'{site}-TX-r1']) == 0
-    assert fw_cli.main(['get', snapshot['ref'], '--to', str(tmp_path / 'x')]) == 1  # deploy cannot fetch data
+    assert fw_cli.main(['get', snapshot['ref'], '--to', str(tmp_path / 'x')]) == 0  # a field account reads data too
 
     import fw
     m = fw.get_model(f'{model}@1', tmp_path / 'script')

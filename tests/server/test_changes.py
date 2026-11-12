@@ -222,7 +222,7 @@ def test_stale_preview_is_refused(api, pool, tmp_path):
 
 def test_roles(make_api, pool):
     name, _ = pool
-    for role in ('field', 'deploy', 'worker'):
+    for role in ('field', 'worker'):
         with pytest.raises(ApiError) as e:
             make_api(role).preview_change(name, {'remove': ['20261101']})
         assert e.value.status == 403

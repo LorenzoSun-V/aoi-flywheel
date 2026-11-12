@@ -17,7 +17,7 @@ from .api import Api, ApiError
 from .cache import Cache
 from .contract import ContractError
 
-ROLE_NAMES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'deploy': '部署', 'worker': 'GPU worker'}
+ROLE_NAMES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'worker': 'GPU worker'}
 KINDS = {'pool': '数据池', 'test': '测试集', 'regression': '回归集', 'other': '其他'}  # what fw dataset create makes
 KIND_NAMES = dict(KINDS, trainset='训练集快照')  # trainsets are made by fw trainset create only
 

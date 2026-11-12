@@ -10,7 +10,8 @@ from urllib.parse import quote
 
 import httpx
 
-from .contract import BATCH_OBJECT_MAX, CHUNK, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError, FrameParser, frame_header
+from .contract import (API_HEADER, API_LEVEL, BATCH_OBJECT_MAX, CHUNK, MIN_SERVER_LEVEL, OBJECTS_MAGIC, OBJECTS_TYPE,
+                       ContractError, FrameParser, frame_header, peer_level)
 
 SMALL_BODY = 32 * 1024 * 1024
 
@@ -41,12 +42,22 @@ class Api:
             raise ApiError(0, '还没有配置服务器地址，先运行 fw login')
         self.server = server.rstrip('/')
         headers = {'Authorization': f'Bearer {token}'} if token else {}
+        headers[API_HEADER] = str(API_LEVEL)
         self.http = httpx.Client(
             base_url=self.server + '/api/v1', headers=headers,
             timeout=httpx.Timeout(timeout, connect=15.0),
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=32),
             trust_env=False,  # the platform is on the local network: never route it through a proxy
-            transport=transport)
+            transport=transport, event_hooks={'response': [self._check_server]})
+
+    @staticmethod
+    def _check_server(r: httpx.Response) -> None:
+        """Every answer says which interface level the server has: an older server is named at once, not
+        found out by a command failing halfway."""
+        level = peer_level(r.headers.get(API_HEADER))
+        if level < MIN_SERVER_LEVEL:
+            raise ApiError(0, f'平台服务比这台机器的 fw 旧（接口第 {level} 版，这个 fw 需要第 {MIN_SERVER_LEVEL} 版）：'
+                              '请管理员先更新服务器，或者装回和服务器相配的 fw')
 
     def close(self):
         self.http.close()
@@ -189,6 +200,12 @@ class Api:
         return data
 
     # --- datasets and versions -----------------------------------------------------------------
+    def users(self):
+        return self.get('/users')
+
+    def events(self, **params):
+        return self.get('/events', **{k: v for k, v in params.items() if v not in (None, '')})
+
     def me(self):
         return self.get('/me')
 

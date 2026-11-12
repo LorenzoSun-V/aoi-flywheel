@@ -148,7 +148,7 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
         return json.loads(p.stdout.strip().splitlines()[-1])
 
     seen = walk('submit', data, r['ref'])  # other tests' runners are listed too
-    assert seen['nav'] == ['数据集', '模型', '任务', '预测集']
+    assert seen['nav'] == ['数据集', '模型', '任务', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
     assert 'nope' in seen['refused']
@@ -205,6 +205,37 @@ def test_the_folder_check_is_the_one_of_fw_dataset_import(service, tokens, tmp_p
 
     assert post(['a/' + 'x' * 1025]).status_code == 422  # one path longer than a path may be
     assert post([f'{i}.png' for i in range(300_001)]).status_code == 422  # more than the web page checks
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, tmp_path):
+    from fw import ops
+    from helpers import quiet
+    name = f'web-{os.urandom(4).hex()}'
+    dataset = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(dataset, 'SES', 'TX', 'pool', '')
+    ops.import_folder(api, dataset, write_tree(tmp_path / 'd', {'a/x.png': real_png(64, 32, 7)}), echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'accounts.cjs'), service.url + '/', tokens['admin'], name, dataset,
+                        str(shots)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['nav'] == ['数据集', '模型', '任务', '预测集', '操作记录', '账号']
+    assert seen['token'].startswith('fw_') and '只显示这一次' in seen['tokens'] and '现场笔记本' in seen['tokens']
+    assert '账号名只能用' in seen['refused']
+    admin = tokens['admin_name']
+    assert [(e[1], e[2], e[3]) for e in reversed(seen['events'])] == [
+        (admin, '新建账号', name), (admin, '改账号角色', name), (admin, '发凭据', name)]
+    assert 'from=algo' in seen['events'][1][4] and 'to=field' in seen['events'][1][4]
+    assert seen['token'] not in json.dumps(seen['events'])
+    # the account it made works, as a field account: it reads, and is offered nothing it may not do
+    assert seen['fieldNav'] == ['数据集', '模型', '预测集'] and seen['fieldWho'] == f'{name}（现场实施）'
+    assert seen['fieldButtons'] == [] and '现场实施账号不能管理账号' in seen['fieldUsers']
+    assert '现场笔记本' in seen['mine'] and '有效' in seen['mine']
+    me = make_api(token=seen['token']).me()
+    assert (me['name'], me['role']) == (name, 'field')
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

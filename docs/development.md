@@ -43,14 +43,15 @@ server/fwserver/     fw-server：只支持 Linux
   evals.py           评估任务：提交时定下模型权重、要评的图片清单和推理环境，交回时在同一个事务里登记评估报告
   predictions.py     推理任务和预测集：提交时定下模型、图片清单、推理环境和最低分数，同样的请求复用已有任务；交回时核对 predictions.json 再登记预测集
   jobs.py            任务队列（领取、租约令牌、续租、过期回队、取消、日志）和推理环境的登记
-  models.py          模型、模型版本、评估报告、发布、标签、追溯链；部署账号能下载哪些文件
+  models.py          模型、模型版本、评估报告、发布、标签、追溯链
   changes.py         按目录改数据集：新版本 = 最新版本加上、换掉或去掉几个目录（fw dataset add / remove），服务器自己拼清单；
                      同名目录拒绝、重复图片和标注不一致的提醒；记下每个版本的目录变化（version_changes）
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
   formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
   datasets.py        数据集和版本：建版本、冻结、差异、核对（verify）
-  auth.py            账号、角色、凭据（只存凭据的 sha256）
+  auth.py            账号、角色、每个角色能做什么（CAPS 一张表）、凭据（只存凭据的 sha256）
   store.py           文件库：写入、落盘（syncfs）、停写标记、核对时的读取和隔离
+  events.py          操作记录：record() 在改动的事务里写一条（谁、什么操作、对什么、细节），list_events() 读
   db.py              数据库连接池和编号迁移
   settings.py        环境变量
   migrations/        0001_init.sql …，每次改表结构加一个新文件
@@ -58,7 +59,7 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
-tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、accounts.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
@@ -122,7 +123,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 
 文件集（`filesets`、`fileset_files`）就是不属于数据集的「冻结的一组文件」：和数据集版本一样按清单哈希冻结，`fw model get` 用的是和 `fw get` 同一套缓存和摆放代码（`ops._lay_out`）。`fw-server verify` 通过 `models.verify_inputs` 也核对这些文件；`datasets.verify` 的 `more` 参数是必填的，免得哪里调用时漏掉模型文件（`--rehash` 时不认识的文件会被当成导入中断留下的）。
 
-部署账号能下载的只有模型版本文件集里的文件和清单（`models.model_objects_only`，`app.may_download`），别的一律 403。
+下载按能力 `objects.download`：管理员、算法工程师、现场实施和 worker 都能下载文件库里的文件（现场实施读全部数据集和模型，2026-11-12 定）。
 
 ## 绝不能破的规则
 
@@ -158,7 +159,10 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 附件目录读不全就不登记；令牌不打印；指标只收标准 JSON 里的有限数 | `ops._folder_files`（`os.walk` 的 `onerror`）、`ops.register_model`、`models._no_nul` | `test_an_unreadable_folder_is_never_left_out`、`test_a_token_in_the_repository_is_never_printed`、`test_numbers_out_of_range` |
 | 登记前文件已经在服务器上；登记的指标来自存着的文件；同样的东西再登记返回已有的，不一样就拒绝 | `models.register_model_version`、`register_eval`、`register_release` | `test_register_and_get_a_model_version`、`test_what_a_model_version_must_be`、`test_eval_reports` |
 | 产线现在用的模型是部署时间最晚的发布，补登旧的不顶掉新的 | `models.current_release` | `test_releases_and_the_current_model` |
-| 部署账号只能取模型版本的文件，取不了数据；现场实施什么都碰不到 | `app.may_download`、`models.model_objects_only` | `test_roles` |
+| 每个接口都要一种能力，角色能做什么只在 `auth.CAPS` 一处定；现场实施只读（数据集、模型、文件）加登记发布，worker 只做任务 | `app.need`、`auth.CAPS` | `test_accounts.py`：`test_the_table_of_capabilities`、`test_every_endpoint_asks_for_a_capability`；各模块的 `test_roles` |
+| 每一次改动都有一条操作记录，和改动在同一个事务里；被拒绝的改动不留记录；记录只增不改；凭据本身不进记录 | 各模块里的 `events.record`、数据库触发器（`0009_events_roles.sql`） | `test_changes_are_recorded_with_who_made_them`、`test_a_refused_change_leaves_no_record`、`test_the_record_cannot_be_rewritten` |
+| 总有一个在用的管理员；worker 账号不和人的角色互换；别人的凭据只有管理员能吊销 | `auth._keep_an_admin`、`auth.set_role`、`auth.revoke_token` | `test_the_last_administrator_stays`、`test_accounts_are_managed_over_http_by_administrators_only`、`test_everyone_sees_and_revokes_their_own_tokens_only` |
+| fw 和服务器互相报接口版本号，太旧的一边在第一次请求就被点名 | `contract.API_LEVEL` 等、`app.ApiLevel`、`Api._check_server` | `test_an_fw_older_than_the_server_accepts_is_told_to_update`、`test_a_server_older_than_fw_needs_is_named` |
 | 仓库地址里的账号和令牌不会被记下 | `ops.strip_credentials`，数据库 CHECK 拒绝 `https://…@` | `test_code_commit_from_git`、`test_register_and_get_a_model_version` |
 | 训练代码可以不记（数据库 NULL，接口给空字符串，旧客户端照常切片），但记了仓库或「有没提交的改动」就一定有提交号；`weights/` 下只有一个不为空的文件；读 git 时不带 `GIT_*` 环境变量 | `models.register_model_version`、`models._entries`、`ops._git`，CHECK `model_versions_code_needs_commit`、`fileset_files_weights_file`（`0004_optional_code.sql`） | `test_the_training_code_is_optional`、`test_no_training_code_reads_as_an_empty_string`、`test_empty_weights_are_refused`、`test_git_variables_never_redirect_the_code_dir`、`test_the_server_checks_weights_and_code`、`test_what_the_database_refuses` |
 | `fw-server verify` 和追溯链 `--check` 也核对模型版本和评估报告的文件（`--check` 还核对评估用的测试集） | `models.verify_inputs`、`models._check_chain` | `test_chain_from_a_release_down_to_the_pool` |
@@ -209,6 +213,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 - **训练集快照格式 1**（`docs/trainset-format.md`，`trainset.json` 里的 `fw-trainset 1`）：训练代码按它读目录。可以往 `trainset.json` 加键、加新的格式目录；改目录结构、已有键的含义或 `trainset_layout` 摆出来的路径要出 `fw-trainset 2`。划分算法（`_cut`）和标注转换（`formats.py`）改了不影响已有快照（它们冻结的是结果），但同样的参数会得到不一样的新快照，要在更新记录里写清楚。
 - **fw-objects 1**（`contract.py` 的批量传输格式）：新旧 `fw` 和服务端要能互通；要改就出新的格式号，服务端同时支持一段时间。
 - **HTTP 接口 `/api/v1`**：只加字段、加接口；改含义或删字段要出 `/api/v2`。
+- **接口版本号**（`contract.py` 的 `API_LEVEL`、`MIN_CLIENT_LEVEL`、`MIN_SERVER_LEVEL`，请求头和回答头 `X-Fw-Api`）：接口多了新东西就把 `API_LEVEL` 加一；fw 用到了旧服务器没有的东西，把 `MIN_SERVER_LEVEL` 提到那一版；服务器没法再正确服务旧 fw 时，把 `MIN_CLIENT_LEVEL` 提上去。不带这个头的一方算第 1 版。升级顺序是先服务器、后 fw。
 - **路径规则**（`contract.path_problem`、`collisions`）：放宽会让 Windows 上取不回；收紧会让旧版本在新规则下报错。改之前要想清楚旧数据。
 
 ## 测试
@@ -236,7 +241,7 @@ CI（`.github/workflows/ci.yml`）有五个作业：服务端和全部测试（L
 
 **加一条 `fw` 命令或选项**：逻辑写在 `ops.py`（训练脚本也能调），`cli.py` 只解析参数和打印；在 `tests/client/` 用假服务测；在 `docs/commands.md` 里写用途、例子和常见问题；`CHANGELOG.md` 记一笔。
 
-**加一个接口**：在 `app.py` 加路由，业务逻辑放在 `datasets.py` 或新的同层模块，检查角色；`api.py` 加对应的方法；`tests/server/` 用真实服务测，包括没权限和出错的情况。
+**加一个接口**：在 `app.py` 加路由，业务逻辑放在 `datasets.py` 或新的同层模块；路由用 `Depends(need('<能力>'))` 定谁能调（能力在 `auth.CAPS` 里，新的一类操作就加一行，`test_every_endpoint_asks_for_a_capability` 会拦下没写的）；改了东西就在同一个事务里 `events.record(...)`（新操作先加进 `events.ACTIONS`）；`api.py` 加对应的方法；`tests/server/` 用真实服务测，包括没权限和出错的情况。
 
 **加表或改表**：新的迁移文件；新表归哪个模块就写在哪个模块；冻结或不可变的数据用触发器守住，并写测试证明改不了。
 
