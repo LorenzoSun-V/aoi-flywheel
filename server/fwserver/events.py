@@ -21,6 +21,7 @@ ACTIONS = {
     'model_version.register': '登记模型版本',
     'model_version.tag': '改模型标签',
     'eval.register': '登记评估报告',
+    'prediction_set.register': '登记预测集',
     'release.register': '登记发布',
     'runner.register': '登记推理环境',
     'job.submit': '提交任务',

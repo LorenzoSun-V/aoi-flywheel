@@ -54,7 +54,12 @@ class Api:
     def _check_server(r: httpx.Response) -> None:
         """Every answer says which interface level the server has: an older server is named at once, not
         found out by a command failing halfway."""
-        level = peer_level(r.headers.get(API_HEADER))
+        stated = r.headers.get(API_HEADER)
+        if stated is None and (r.status_code >= 400 or 'json' not in r.headers.get('content-type', '')):
+            # not an answer of fw-server at all (a wrong address, a proxy's error page): say that, not "old"
+            raise ApiError(r.status_code, f'{r.request.url.host} 回答的不是平台服务（HTTP {r.status_code}）：'
+                                          '检查 fw login 里的服务器地址，或者服务是不是在运行')
+        level = peer_level(stated)
         if level < MIN_SERVER_LEVEL:
             raise ApiError(0, f'平台服务比这台机器的 fw 旧（接口第 {level} 版，这个 fw 需要第 {MIN_SERVER_LEVEL} 版）：'
                               '请管理员先更新服务器，或者装回和服务器相配的 fw')

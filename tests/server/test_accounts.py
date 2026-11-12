@@ -242,3 +242,17 @@ def test_a_server_older_than_fw_needs_is_named(service, tokens, monkeypatch):
             api.read_object('0' * 64)
     finally:
         api.close()
+
+
+def test_an_address_that_is_not_the_platform_is_called_that():
+    """A wrong address or a proxy's error page has no interface level: that is not an old server."""
+    def not_the_platform(request):
+        return httpx.Response(502, text='<html>Bad Gateway</html>', headers={'content-type': 'text/html'})
+
+    proxied = Api('http://proxy.example', 'x', transport=httpx.MockTransport(not_the_platform))
+    try:
+        with pytest.raises(ApiError, match='回答的不是平台服务（HTTP 502）') as e:
+            proxied.me()
+        assert e.value.status == 502
+    finally:
+        proxied.close()

@@ -1501,7 +1501,7 @@ async function eventsPage(query) {
   };
   const groups = [...new Set(Object.keys(r.actions).map((a) => a.split('.')[0]))];
   const groupNames = { dataset: '数据集', version: '版本', model: '模型', model_version: '模型版本', eval: '评估', release: '发布',
-    runner: '推理环境', job: '任务', user: '账号', token: '凭据' };
+    runner: '推理环境', job: '任务', prediction_set: '预测集', user: '账号', token: '凭据' };
   const action = el('select', {}, el('option', { value: '' }, '全部操作'),
     groups.map((g) => el('option', { value: g }, groupNames[g] || g)));
   action.value = (asked.action || '').split('.')[0];

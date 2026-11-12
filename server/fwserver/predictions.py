@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from fw.contract import ContractError, eval_dirs, manifest_bytes, parse_manifest, predict_selection
 
-from . import datasets, jobs, models
+from . import datasets, events, jobs, models
 from .datasets import DatasetError
 from .store import Store, StoreError
 
@@ -215,4 +215,6 @@ def register(conn, store: Store, row: dict, result: Any) -> dict:
         (p['model']['id'], row['runner_version_id'], p['data']['id'], p['data']['dirs'],
          bytes.fromhex(p['data']['inputs_sha256']), p['conf'], p['data']['images'], boxes, fid, row['id'],
          row['submitted_by'])).fetchone()['id']
+    events.record(conn, row['submitted_by'], 'prediction_set.register', f'预测集 {set_id}', model=p['model']['ref'],
+                  data=p['data']['ref'], job_id=row['id'], images=p['data']['images'], boxes=boxes)
     return {'prediction_set': set_id, 'images': p['data']['images'], 'boxes': boxes}
