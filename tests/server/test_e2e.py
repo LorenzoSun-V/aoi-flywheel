@@ -25,23 +25,31 @@ def status_of(call):
 
 def test_health_and_me(service, make_api, tokens):
     assert httpx.get(service.url + '/api/v1/health').json()['ok'] is True
-    for role in ('admin', 'algo', 'field', 'deploy'):
+    for role in ('admin', 'algo', 'field', 'worker'):
         me = make_api(role).me()
         assert me['role'] == role and me['name'] == tokens[role + '_name']
+        assert me['caps'] == auth.caps_of(role) and me['api_level'] >= 2
 
 
 def test_roles(make_api, dataset, tmp_path):
     algo = make_api('algo')
     write(tmp_path / 'v1', 'a.bmp', b'1')
     v = ops.import_folder(algo, dataset, tmp_path / 'v1', echo=quiet)
-    for role in ('field', 'deploy'):
-        api = make_api(role)
-        assert status_of(api.datasets) == 403
-        assert status_of(lambda: api.dataset(dataset)) == 403
-        assert status_of(lambda: api.create_dataset(f'X-{uuid.uuid4().hex[:6]}', '', '', 'pool', '')) == 403
-        assert status_of(lambda: api.missing([('0' * 64, 1)])) == 403
-        assert status_of(lambda: api.put_bytes(b'data')) == 403
-        assert status_of(lambda: api.read_object(v['manifest_sha256'])) == 403
+    # a field account reads every dataset and downloads its files, and changes nothing
+    field = make_api('field')
+    assert [d['name'] for d in field.datasets() if d['name'] == dataset] == [dataset]
+    assert field.dataset(dataset)['latest']['id'] == v['id'] and field.versions(dataset)[0]['id'] == v['id']
+    assert field.read_object(v['manifest_sha256'])
+    assert field.diff(v['id'], v['id']) is not None
+    for change in (lambda: field.create_dataset(f'X-{uuid.uuid4().hex[:6]}', '', '', 'pool', ''),
+                   lambda: field.missing([('0' * 64, 1)]), lambda: field.put_bytes(b'data'),
+                   lambda: field.create_version(dataset, v['manifest_sha256'], None, v['id'], '', ''),
+                   lambda: field.preview_change(dataset, {'remove': ['x']}),
+                   lambda: field.post('/folder-check', {'paths': ['a.png']})):
+        assert status_of(change) == 403
+    # a worker (a GPU machine) fetches what its jobs need and sees no lists
+    worker = make_api('worker')
+    assert status_of(worker.datasets) == 403 and worker.read_object(v['manifest_sha256'])
     assert status_of(make_api('admin').datasets) == 200
 
 

@@ -99,9 +99,10 @@ def tokens(database):
     """One account and token per role."""
     out = {}
     with db.connect(database) as c:
+        # 'deploy': a second field account, the one that fetches models and registers releases in the tests
         for role in ('admin', 'algo', 'field', 'deploy', 'worker'):
             name = f'{role}-{uuid.uuid4().hex[:6]}'
-            auth.add_user(c, name, role)
+            auth.add_user(c, name, 'field' if role == 'deploy' else role)
             out[role] = auth.create_token(c, name, f'{role} test')[0]
             out[role + '_name'] = name
     return out

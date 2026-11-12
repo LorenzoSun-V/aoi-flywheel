@@ -54,6 +54,8 @@ def test_pre_labels_from_a_prediction_set(api, gpu, setup, tmp_path):  # noqa: F
     assert job['params']['conf'] == 0.1 and [f[0] for f in job['params']['model']['files']] == ['model.onnx']
     j = run_job(api, gpu, job)
     s = api.prediction_set(j['result']['prediction_set'])
+    e = api.events(action='prediction_set', limit=1)['events'][0]  # recorded, in the name of who asked for it
+    assert e['object'] == f'预测集 {s["id"]}' and e['detail']['job_id'] == j['id'] and not e['by_server']
     assert s['images'] == 4 and s['boxes'] == 4 and s['job_id'] == job['id'] and s['dirs'] == ['A']
     assert s['data']['ref'] == data and s['model_version']['ref'] == mv['ref'] and s['runner'] == r['ref']
     assert {f['path'] for f in s['files']} == {'predictions.json', 'engine.json'}

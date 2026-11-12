@@ -16,6 +16,7 @@ from typing import Any, Callable, List, Optional, Set, Tuple
 
 from fw.contract import ContractError, classify_changes, parse_manifest
 
+from . import events
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
@@ -103,6 +104,7 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
     with conn.transaction():
         if not _insert_dataset(conn, user_id, name, site, line, kind, note):
             raise DatasetError(409, f'{name} 已经存在（数据集和训练集快照共用名称，不分大小写）')
+        events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line)
     return get_dataset(conn, name)
 
 
@@ -222,6 +224,8 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
         if before_freeze is not None:
             before_freeze()  # tests: a failure between writing the rows and freezing
         conn.execute('UPDATE versions SET frozen = true WHERE id = %s', (version_id,))
+        events.record(conn, user_id, 'version.create', f'{dataset["name"]}@{number}', kind=dataset['kind'],
+                      file_count=len(entries), total_bytes=total, parent_id=parent_id, source=source)
     version = get_version_by_id(conn, version_id)
     if parent_id is not None:
         d = diff(conn, parent_id, version_id)

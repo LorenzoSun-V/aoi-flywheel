@@ -465,12 +465,11 @@ def test_roles(make_api, tmp_path):
     name = f'T-{uuid.uuid4().hex[:8]}'
     make(make_api('admin'), name, [f'{src}@1'])
     body = {'sources': [f'{src}@1'], 'classes': CLASSES}
-    for role in ('field', 'deploy'):
-        api = make_api(role)
-        assert status_of(api.trainsets) == 403
-        assert status_of(lambda: api.trainset(name)) == 403
-        assert status_of(lambda: api.preview_trainset(name, body)) == 403
-        assert status_of(lambda: api.create_trainset(name, body)) == 403
+    field = make_api('field')  # reads snapshots, makes none
+    assert status_of(field.trainsets) == 200 and status_of(lambda: field.trainset(name)) == 200
+    assert status_of(lambda: field.preview_trainset(name, body)) == 403
+    assert status_of(lambda: field.create_trainset(name, body)) == 403
+    assert status_of(make_api('worker').trainsets) == 403
 
 
 # --- found in review (2026-11-05): each reproduced first ---------------------------------------------------

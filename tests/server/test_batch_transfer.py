@@ -88,9 +88,7 @@ def test_only_data_roles_can_transfer(make_api, tmp_path):
         field.put_objects(objs)
     assert e.value.status == 403
     make_api('algo').put_objects(objs)
-    with pytest.raises(ApiError) as e:
-        fetch_all(field, objs)
-    assert e.value.status == 403
+    assert {d for d, _ in fetch_all(field, objs)} == {d for d, _, _ in objs}  # a field account reads, uploads nothing
 
 
 def test_fetch_errors(api, tmp_path, monkeypatch):

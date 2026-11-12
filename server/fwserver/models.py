@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from fw.contract import ContractError, check_path, collisions, eval_dirs, manifest_bytes
 
-from . import datasets, trainsets
+from . import datasets, events, trainsets
 from .datasets import NAME, DatasetError, check_digest
 from .store import Store, StoreError
 
@@ -257,6 +257,7 @@ def create_model(conn, user_id: int, name: str, site: str, line: str, task: str 
         if conn.execute('INSERT INTO models (name, site, line, task, note, created_by) VALUES (%s, %s, %s, %s, %s, %s) '
                         'ON CONFLICT DO NOTHING RETURNING id', (name, site, line, task, note, user_id)).fetchone() is None:
             raise DatasetError(409, f'模型 {name} 已经存在（名称不分大小写）')
+        events.record(conn, user_id, 'model.create', name, site=site, line=line, task=task)
     return get_model(conn, name)
 
 
@@ -384,6 +385,8 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
             'RETURNING id', (model['id'], number, fid, bytes.fromhex(onnx), trainset_id, repo, commit,
                              bool(code_dirty), json.dumps(metrics, ensure_ascii=False), note, user_id)
         ).fetchone()['id']
+        events.record(conn, user_id, 'model_version.register', f'{model["name"]}@{number}', trainset_id=trainset_id,
+                      onnx_sha256=onnx)
     return dict(get_model_version_by_id(conn, mv_id), existing=False)
 
 
@@ -400,6 +403,7 @@ def set_tag(conn, user_id: int, name: str, number: str, tag: str, added: bool, n
         if changed:
             conn.execute('INSERT INTO model_tag_events (model_version_id, tag, added, note, created_by) '
                          'VALUES (%s, %s, %s, %s, %s)', (mv['id'], tag, bool(added), note, user_id))
+            events.record(conn, user_id, 'model_version.tag', mv['ref'], tag=tag, added=bool(added), note=note)
     return dict(get_model_version_by_id(conn, mv['id']), changed=changed)
 
 
@@ -511,6 +515,8 @@ def register_eval(conn, store: Store, user_id: int, name: str, number: str, test
             'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
             (mv['id'], testset_id, split, fid, json.dumps(metrics, ensure_ascii=False), tool, tool_version, note,
              user_id, dirs, job_id, runner_version_id)).fetchone()['id']
+        events.record(conn, user_id, 'eval.register', f'评估 {eval_id}', model_version=mv['ref'],
+                      testset_id=testset_id, split=split, job_id=job_id)
     return dict(get_eval(conn, eval_id), existing=False)
 
 
@@ -630,6 +636,8 @@ def register_release(conn, user_id: int, name: str, number: str, site: str, line
                  bytes.fromhex(engine_sha256) if engine_sha256 else None, engine_size, note, user_id)
             ).fetchone()['id']
             out = dict(_release(conn.execute(_RELEASE + ' WHERE r.id = %s', (rid,)).fetchone()), existing=False)
+            events.record(conn, user_id, 'release.register', out['ref'], model_version=mv['ref'], site=site,
+                          line=line, deploy_commit=commit)
     current = current_release(conn, site, line)
     out['current'] = {'ref': current['ref'], 'model_version': current['model_version'],
                       'deployed_at': current['deployed_at']}
@@ -711,19 +719,3 @@ def verify_inputs(conn) -> Tuple[List[str], Dict[str, Tuple[Optional[int], str]]
     for r in conn.execute("SELECT id, encode(inputs_sha256, 'hex') AS d FROM prediction_sets ORDER BY id"):
         wanted.setdefault(r['d'], (None, f'预测集 #{r["id"]} 的图片清单'))
     return problems, wanted, len(sets)
-
-
-# --- who may download what ---------------------------------------------------------------------------------
-def model_objects_only(conn, digests: Sequence[str]) -> bool:
-    """Whether every one of these objects belongs to a model version: one of its files or the manifest of its
-    file set. The deploy role may download those and nothing else."""
-    keys = sorted({bytes.fromhex(check_digest(d)) for d in digests})
-    if not keys:
-        return True
-    row = conn.execute(
-        'SELECT count(*) AS n FROM unnest(%s::bytea[]) AS d(sha) WHERE '
-        'EXISTS (SELECT 1 FROM fileset_files f JOIN model_versions mv ON mv.fileset_id = f.fileset_id '
-        '        WHERE f.sha256 = d.sha) OR '
-        'EXISTS (SELECT 1 FROM filesets s JOIN model_versions mv ON mv.fileset_id = s.id '
-        '        WHERE s.manifest_sha256 = d.sha)', (keys,)).fetchone()
-    return row['n'] == len(keys)

@@ -13,22 +13,16 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from fw.contract import (API_HEADER, API_LEVEL, MIN_CLIENT_LEVEL, peer_level)
 from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, MAX_PATH_BYTES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError,
                          FrameParser, ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
 
-from . import __version__, auth, changes, datasets, db, evals, jobs, models, predictions, trainsets
+from . import __version__, auth, changes, datasets, db, evals, events, jobs, models, predictions, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
 
 log = logging.getLogger('fwserver')
-DATA_ROLES = ('admin', 'algo')  # only these roles see or change datasets (design doc, roles table)
-MODEL_READERS = ('admin', 'algo', 'deploy')  # see models, evaluations, releases and the trace chain
-MODEL_WRITERS = ('admin', 'algo')            # register models, model versions, evaluations; set tags
-RELEASE_WRITERS = ('admin', 'deploy')        # register releases
-UPLOADERS = DATA_ROLES + ('worker',)         # upload files; a worker sends runner listings and job outputs
-JOB_READERS = ('admin', 'algo', 'worker')    # see jobs, their logs and the runners
-JOB_WRITERS = ('admin', 'algo')              # submit and cancel jobs
 MISSING_LIMIT = 20000
 FOLDER_LIMIT = 300_000     # files of one folder checked from the web page (bigger ones: fw dataset import)
 FOLDER_EXAMPLES = 50       # how many of each problem the check lists
@@ -93,6 +87,39 @@ WEB_HEADERS = {'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff',
                                           "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"}
 
 
+def _iso(t) -> Optional[str]:
+    return t.isoformat() if t else None
+
+
+class ApiLevel:
+    """Says which interface level this server has on every answer, and refuses an fw that is too old for it
+    (fw.contract: API_LEVEL, MIN_CLIENT_LEVEL). Plain ASGI, so uploads and downloads still stream."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        stated = dict(scope['headers']).get(API_HEADER.lower().encode())
+        level = peer_level(stated.decode('latin-1') if stated is not None else None)
+        if scope['path'].startswith('/api/') and level < MIN_CLIENT_LEVEL:
+            answer = JSONResponse({'detail': f'这台机器的 fw 太旧（接口第 {level} 版，平台要求至少第 {MIN_CLIENT_LEVEL} 版）：'
+                                             '在仓库目录 git pull 后重新运行 python -m pip install ./client'},
+                                  status_code=426, headers={API_HEADER: str(API_LEVEL)})
+            await answer(scope, receive, send)
+            return
+
+        async def with_level(message):
+            if message['type'] == 'http.response.start':
+                message = dict(message, headers=list(message.get('headers') or [])
+                               + [(API_HEADER.lower().encode(), str(API_LEVEL).encode())])
+            await send(message)
+
+        await self.app(scope, receive, with_level)
+
+
 def size_text(n: int) -> str:
     for unit, scale in (('GB', 1 << 30), ('MB', 1 << 20), ('KB', 1 << 10)):
         if n >= scale:
@@ -135,6 +162,19 @@ class ChangeBody(BaseModel):
     force: bool = False
     source: str = ''
     note: str = ''
+
+
+class UserBody(BaseModel):
+    name: str
+    role: str
+
+
+class RoleBody(BaseModel):
+    role: str
+
+
+class TokenBody(BaseModel):
+    label: str = ''
 
 
 class TrainsetBody(BaseModel):
@@ -239,10 +279,15 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     app = FastAPI(title='aoi-flywheel', version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None,
                   openapi_url='/api/v1/openapi.json')
     app.state.store = store
+    app.add_middleware(ApiLevel)
 
     @app.exception_handler(DatasetError)
     async def dataset_error(request, exc: DatasetError):
         return JSONResponse({'detail': exc.message}, status_code=exc.status)
+
+    @app.exception_handler(auth.AuthError)
+    async def auth_error(request, exc: auth.AuthError):
+        return JSONResponse({'detail': str(exc)}, status_code=400)
 
     @app.exception_handler(StoreError)
     async def store_error(request, exc: StoreError):
@@ -268,57 +313,26 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
                 auth.touch(c, user['token_id'])
         return user
 
-    def data_user(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in DATA_ROLES:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看或修改数据集')
-        return user
+    def need(cap: str):
+        """A dependency that lets through the accounts whose role has this capability (auth.CAPS)."""
+        def check(user: dict = Depends(current_user)) -> dict:
+            if not auth.allowed(user['role'], cap):
+                raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能{auth.CAPS[cap][1]}')
+            return user
+        return check
 
-    def uploader(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in UPLOADERS:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能上传文件')
-        return user
-
-    def job_reader(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in JOB_READERS:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看任务')
-        return user
-
-    def job_writer(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in JOB_WRITERS:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能提交或取消任务')
-        return user
-
-    def worker(user: dict = Depends(current_user)) -> dict:
-        if user['role'] != 'worker':
-            raise HTTPException(403, '只有 worker 账号（GPU 机）能登记推理环境、领取和交回任务')
-        return user
-
-    def model_reader(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in MODEL_READERS:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能查看模型、评估和发布')
-        return user
-
-    def model_writer(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in MODEL_WRITERS:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能登记模型和评估')
-        return user
-
-    def release_writer(user: dict = Depends(current_user)) -> dict:
-        if user['role'] not in RELEASE_WRITERS:
-            raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能登记发布；发布由部署账号在部署成功后登记')
-        return user
-
-    def may_download(user: dict, digests: List[str]) -> None:
-        """Datasets roles and workers (which fetch a job's images and models) download anything; the deploy role
-        only the files of model versions."""
-        if user['role'] in DATA_ROLES + ('worker',):
-            return
-        if user['role'] == 'deploy':
-            with conn() as c:
-                if models.model_objects_only(c, digests):
-                    return
-            raise HTTPException(403, '部署账号只能下载模型版本的文件')
-        raise HTTPException(403, f'{auth.ROLES[user["role"]]}账号不能下载文件')
+    data_reader = need('datasets.read')
+    data_user = need('datasets.write')
+    uploader = need('objects.upload')
+    downloader = need('objects.download')
+    job_reader = need('jobs.read')
+    job_writer = need('jobs.write')
+    worker = need('jobs.run')
+    model_reader = need('models.read')
+    model_writer = need('models.write')
+    release_writer = need('releases.write')
+    event_reader = need('events.read')
+    account_admin = need('users.manage')
 
     # --- service --------------------------------------------------------------------------------
     @app.get('/api/v1/health')
@@ -330,8 +344,78 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     @app.get('/api/v1/me')
     def me(user: dict = Depends(current_user)):
-        return {'name': user['name'], 'role': user['role'], 'token_id': user['token_id'],
-                'token_label': user['token_label']}
+        return {'name': user['name'], 'role': user['role'], 'role_text': auth.ROLES[user['role']],
+                'caps': auth.caps_of(user['role']), 'token_id': user['token_id'],
+                'token_label': user['token_label'], 'server_version': __version__, 'api_level': API_LEVEL}
+
+    # --- accounts, tokens, the record of who did what -------------------------------------------
+    def token_row(t: dict) -> dict:
+        return {'id': t['id'], 'account': t['name'], 'label': t['label'], 'created_at': _iso(t['created_at']),
+                'last_used_at': _iso(t['last_used_at']), 'revoked_at': _iso(t['revoked_at'])}
+
+    @app.get('/api/v1/users')
+    def list_users(user: dict = Depends(account_admin)):
+        with conn() as c:
+            return {'roles': auth.ROLES, 'users': [
+                {'name': u['name'], 'role': u['role'], 'role_text': auth.ROLES[u['role']],
+                 'created_at': _iso(u['created_at']), 'disabled_at': _iso(u['disabled_at']),
+                 'active_tokens': u['active_tokens']} for u in auth.list_users(c)]}
+
+    @app.post('/api/v1/users', status_code=201)
+    def create_user(body: UserBody, user: dict = Depends(account_admin)):
+        with conn() as c:
+            u = auth.add_user(c, body.name, body.role, actor_id=user['user_id'])
+        return {'name': u['name'], 'role': u['role']}
+
+    @app.post('/api/v1/users/{name}/role')
+    def set_user_role(name: str, body: RoleBody, user: dict = Depends(account_admin)):
+        with conn() as c:
+            u = auth.set_role(c, name, body.role, actor_id=user['user_id'])
+        return {'name': u['name'], 'role': u['role']}
+
+    @app.post('/api/v1/users/{name}/disable')
+    def disable_user(name: str, user: dict = Depends(account_admin)):
+        with conn() as c:
+            return {'tokens_revoked': auth.set_disabled(c, name, True, actor_id=user['user_id'])}
+
+    @app.post('/api/v1/users/{name}/enable')
+    def enable_user(name: str, user: dict = Depends(account_admin)):
+        with conn() as c:
+            auth.set_disabled(c, name, False, actor_id=user['user_id'])
+        return {}
+
+    @app.get('/api/v1/users/{name}/tokens')
+    def list_user_tokens(name: str, user: dict = Depends(account_admin)):
+        with conn() as c:
+            auth.get_user(c, name)
+            return {'tokens': [token_row(t) for t in auth.list_tokens(c, name)]}
+
+    @app.post('/api/v1/users/{name}/tokens', status_code=201)
+    def create_user_token(name: str, body: TokenBody, user: dict = Depends(account_admin)):
+        """The token is in this answer and nowhere else: only its hash is kept."""
+        with conn() as c:
+            token, token_id = auth.create_token(c, name, body.label, actor_id=user['user_id'])
+        return {'id': token_id, 'token': token}
+
+    @app.post('/api/v1/tokens/{token_id}/revoke')
+    def revoke_token(token_id: int, user: dict = Depends(current_user)):
+        """An administrator revokes any token; everyone else only their own."""
+        mine = None if auth.allowed(user['role'], 'users.manage') else user['user_id']
+        with conn() as c:
+            if not auth.revoke_token(c, token_id, actor_id=user['user_id'], owner_id=mine):
+                raise HTTPException(404, f'凭据 {token_id} 不存在、已吊销，或者不是你的')
+        return {}
+
+    @app.get('/api/v1/me/tokens')
+    def my_tokens(user: dict = Depends(current_user)):
+        with conn() as c:
+            return {'tokens': [token_row(t) for t in auth.list_tokens(c, user['name'])]}
+
+    @app.get('/api/v1/events')
+    def list_events(limit: int = 100, before: Optional[int] = None, actor: str = '', action: str = '', q: str = '',
+                    user: dict = Depends(event_reader)):
+        with conn() as c:
+            return events.list_events(c, limit, before, actor, action, q)
 
     # --- objects --------------------------------------------------------------------------------
     @app.post('/api/v1/objects/missing')
@@ -433,10 +517,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return {'stored': stored, 'created': created}
 
     @app.post('/api/v1/objects/fetch')
-    def fetch_objects(body: FetchBody, user: dict = Depends(current_user)):
+    def fetch_objects(body: FetchBody, user: dict = Depends(downloader)):
         """Many small objects in one streamed fw-objects body, in the order asked for."""
         digests = [check_digest(d) for d in body.objects]
-        may_download(user, digests)
         sizes = [store.size(d) for d in digests]
         missing = [d for d, s in zip(digests, sizes) if s is None]
         if missing:
@@ -466,8 +549,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return StreamingResponse(stream(), media_type=OBJECTS_TYPE, headers={'Content-Length': str(length)})
 
     @app.get('/api/v1/objects/{digest}')
-    def get_object(digest: str, user: dict = Depends(current_user)):
-        may_download(user, [check_digest(digest)])
+    def get_object(digest: str, user: dict = Depends(downloader)):
+        check_digest(digest)
         path = store.path(digest)
         if not path.is_file():
             raise HTTPException(404, f'服务器上没有文件 {digest[:12]}')
@@ -476,7 +559,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- datasets and versions -------------------------------------------------------------------
     @app.get('/api/v1/datasets')
-    def list_datasets(user: dict = Depends(data_user)):
+    def list_datasets(user: dict = Depends(data_reader)):
         with conn() as c:
             return datasets.list_datasets(c)
 
@@ -488,12 +571,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return d
 
     @app.get('/api/v1/datasets/{name}')
-    def get_dataset(name: str, user: dict = Depends(data_user)):
+    def get_dataset(name: str, user: dict = Depends(data_reader)):
         with conn() as c:
             return datasets.get_dataset(c, name)
 
     @app.get('/api/v1/datasets/{name}/versions')
-    def list_versions(name: str, user: dict = Depends(data_user)):
+    def list_versions(name: str, user: dict = Depends(data_reader)):
         with conn() as c:
             return changes.attach(c, datasets.list_versions(c, name))
 
@@ -508,7 +591,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return v
 
     @app.get('/api/v1/datasets/{name}/versions/{number}')
-    def get_version(name: str, number: str, user: dict = Depends(data_user)):
+    def get_version(name: str, number: str, user: dict = Depends(data_reader)):
         with conn() as c:
             return changes.attach(c, [datasets.get_version(c, name, number)])[0]
 
@@ -529,13 +612,13 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return out
 
     @app.get('/api/v1/versions/{version_id}')
-    def get_version_by_id(version_id: int, user: dict = Depends(data_user)):
+    def get_version_by_id(version_id: int, user: dict = Depends(data_reader)):
         with conn() as c:
             return datasets.get_version_by_id(c, version_id)
 
     # --- training-set snapshots ------------------------------------------------------------------
     @app.get('/api/v1/trainsets')
-    def list_trainsets(user: dict = Depends(data_user)):
+    def list_trainsets(user: dict = Depends(data_reader)):
         with conn() as c:
             return trainsets.list_trainsets(c)
 
@@ -554,12 +637,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return v
 
     @app.get('/api/v1/trainsets/{name}/versions/{number}')
-    def get_trainset(name: str, number: str, user: dict = Depends(data_user)):
+    def get_trainset(name: str, number: str, user: dict = Depends(data_reader)):
         with conn() as c:
             return trainsets.get(c, name, number)
 
     @app.get('/api/v1/trainsets/{name}/versions/{number}/layout')
-    def trainset_layout(name: str, number: str, user: dict = Depends(data_user)):
+    def trainset_layout(name: str, number: str, user: dict = Depends(data_reader)):
         """The folders fw get makes by default, so the web page shows a snapshot the way people get it."""
         with conn() as c:
             return trainsets.layout(c, name, number)
@@ -626,12 +709,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             return models.get_eval(c, eval_id)
 
     @app.get('/api/v1/predictions')
-    def list_prediction_sets(model: str = '', user: dict = Depends(data_user)):
+    def list_prediction_sets(model: str = '', user: dict = Depends(data_reader)):
         with conn() as c:
             return {'prediction_sets': predictions.list_sets(c, model)}
 
     @app.get('/api/v1/predictions/{set_id}')
-    def get_prediction_set(set_id: int, user: dict = Depends(data_user)):
+    def get_prediction_set(set_id: int, user: dict = Depends(data_reader)):
         with conn() as c:
             return predictions.get_set(c, set_id)
 
@@ -712,7 +795,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.post('/api/v1/jobs/{job_id}/cancel')
     def cancel_job(job_id: int, user: dict = Depends(job_writer)):
         with conn() as c:
-            return jobs.cancel(c, job_id)
+            return jobs.cancel(c, job_id, user['user_id'])
 
     @app.get('/api/v1/jobs/{job_id}/log')
     def get_job_log(job_id: int, attempt: int = 0, after: int = -1, user: dict = Depends(job_reader)):
@@ -757,7 +840,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return FileResponse(WEB / name, media_type=kind, headers=WEB_HEADERS)
 
     @app.get('/api/v1/diff')
-    def diff(old: int, new: int, user: dict = Depends(data_user)):
+    def diff(old: int, new: int, user: dict = Depends(data_reader)):
         with conn() as c:
             return datasets.diff(c, old, new)
 

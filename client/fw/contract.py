@@ -210,6 +210,25 @@ def diff_entries(old: Iterable[Entry], new: Iterable[Entry]) -> dict:
 # BATCH_OBJECT_MAX travel one per request instead.
 OBJECTS_MAGIC = b'fw-objects 1\n'
 OBJECTS_TYPE = 'application/x-fw-objects'
+
+# --- which fw works with which server ------------------------------------------------------------------
+# Every request of fw carries its interface level and every answer of the server carries the server's, in this
+# header. A side that sends none is level 1 (anything before the header existed). Raise API_LEVEL when the
+# interface gains something; raise MIN_CLIENT_LEVEL when the server can no longer serve older fw correctly, and
+# MIN_SERVER_LEVEL when fw needs something older servers lack. Then the older side is told to update, by
+# name, instead of failing somewhere in the middle of a command.
+#   2  fw dataset add / remove (POST /datasets/<name>/changes), accounts and events over HTTP, capabilities in /me
+API_HEADER = 'X-Fw-Api'
+API_LEVEL = 2
+MIN_CLIENT_LEVEL = 1
+MIN_SERVER_LEVEL = 2
+
+
+def peer_level(value: Optional[str]) -> int:
+    """The level a header value states; 1 when there is none; 0 when it is not a level at all."""
+    if value is None:
+        return 1
+    return int(value) if value.isdigit() and len(value) < 6 else 0
 BATCH_OBJECT_MAX = 16 << 20
 _FRAME = re.compile(rb'([0-9a-f]{64}) (0|[1-9][0-9]{0,17})\n')
 _FRAME_MAX = 64 + 1 + 18 + 1

@@ -132,11 +132,21 @@ export const api = {
   createVersion: (name, body) => call(`/datasets/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
   previewChange: (name, body) => call(`/datasets/${encodeURIComponent(name)}/changes/preview`, { method: 'POST', body }),
   createChange: (name, body) => call(`/datasets/${encodeURIComponent(name)}/changes`, { method: 'POST', body }),
+  users: () => call('/users'),
+  createUser: (name, role) => call('/users', { method: 'POST', body: { name, role } }),
+  setRole: (name, role) => call(`/users/${encodeURIComponent(name)}/role`, { method: 'POST', body: { role } }),
+  setDisabled: (name, off) => call(`/users/${encodeURIComponent(name)}/${off ? 'disable' : 'enable'}`, { method: 'POST', body: {} }),
+  userTokens: async (name) => (await call(`/users/${encodeURIComponent(name)}/tokens`)).tokens,
+  createToken: (name, label) => call(`/users/${encodeURIComponent(name)}/tokens`, { method: 'POST', body: { label } }),
+  revokeToken: (id) => call(`/tokens/${Number(id)}/revoke`, { method: 'POST', body: {} }),
+  myTokens: async () => (await call('/me/tokens')).tokens,
+  events: (query) => call(`/events?${new URLSearchParams(query)}`),
 };
 
 // The signed-in account (null before /me answered): pages show forms only to roles that may use them.
 let me = null;
-const can = (...roles) => !!me && roles.includes(me.role);
+// What the signed-in account may do: the capabilities /me lists (auth.CAPS on the server, which decides anyway).
+const can = (cap) => !!me && (me.caps || []).includes(cap);
 
 // Files of a version, read once per page view from its manifest (path \t sha256 \t size per line).
 const manifests = new Map();
@@ -255,7 +265,7 @@ async function datasetsPage() {
   show(el('h1', {}, '数据集'),
     rows.length ? el('table', {}, el('tr', {}, ['名称', '类型', '现场 / 产线', '版本数', '最新版本', '大小', '最新版本时间', '备注']
       .map((h) => el('th', {}, h))), body) : el('p', { class: 'muted' }, '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
-    el('div', { style: 'margin-top:16px' }, newDatasetForm()));
+    el('div', { style: 'margin-top:16px' }, can('datasets.write') ? newDatasetForm() : null));
 }
 
 async function datasetPage(name) {
@@ -283,11 +293,11 @@ async function datasetPage(name) {
         el('td', {}, String(v.file_count)), el('td', {}, sizeText(v.total_bytes)),
         el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, v.source), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
         el('td', { class: 'muted' }, v.note)))),
-    d.kind === 'trainset' ? null : el('div', { class: 'row', style: 'margin-top:12px' },
+    d.kind === 'trainset' || !can('datasets.write') ? null : el('div', { class: 'row', style: 'margin-top:12px' },
       el('a', { class: 'button primary', href: hrefOf(['add', d.name]) }, '上传新增目录'),
       d.latest ? el('a', { class: 'button', href: hrefOf(['remove', d.name]) }, '去掉目录') : null,
       el('a', { class: 'button', href: hrefOf(['upload', d.name]) }, '上传完整版本')),
-    d.kind === 'trainset' ? null : el('p', { class: 'muted' }, '平时用「上传新增目录」：只上传新的那个目录，池里原有的不动。'
+    d.kind === 'trainset' || !can('datasets.write') ? null : el('p', { class: 'muted' }, '平时用「上传新增目录」：只上传新的那个目录，池里原有的不动。'
       + '「上传完整版本」是把一个目录当作新版本的全部内容，目录里没有的文件在新版本里就是删除。'),
     el('h2', {}, '比较两个版本'),
     el('div', { class: 'row' }, '从', a, '到', b, compare));
@@ -690,7 +700,7 @@ async function modelVersionPage(name, number) {
     el('h2', {}, '文件'), fileTable(mv.files),
     el('h2', {}, '评估'), evalTable(mv.evals.slice().reverse(), false),
     el('h2', {}, '预测集'), predictionTable(mine, false),
-    can('admin', 'algo') ? await submitForms(mv) : null);
+    can('jobs.write') ? await submitForms(mv) : null);
 }
 
 // Forms for an evaluation or a prediction job of this model version on a GPU runner.
@@ -831,7 +841,7 @@ async function jobPage(id, query) {
       j.queued_ahead ? `（前面还有 ${j.queued_ahead} 个）` : '', j.cancel_requested && j.status === 'running' ? '（正在取消）' : '',
       j.attempts ? `，第 ${j.attempts} 次领取（最多 ${j.max_attempts} 次）` : '', j.worker ? `，在 ${j.worker} 上` : '');
     result.replaceChildren(j.status === 'done' ? jobResult(j) : j.error ? el('span', { class: 'bad' }, j.error) : '-');
-    cancel.hidden = !can('admin', 'algo') || !(j.status === 'queued' || j.status === 'running') || j.cancel_requested;
+    cancel.hidden = !can('jobs.write') || !(j.status === 'queued' || j.status === 'running') || j.cancel_requested;
   };
   show(el('div', { class: 'crumbs' }, el('a', { href: '#/jobs' }, '任务'), ' / ', `任务 ${j.id}`),
     query.get('reused') ? el('p', { class: 'panel' }, '同样的模型版本、推理环境、图片和 conf 已经有一个任务，用的就是它，没有再跑。') : null,
@@ -1380,6 +1390,137 @@ async function removePage(name) {
     result);
 }
 
+// --- accounts, tokens, the record of who did what ------------------------------------------------------------
+function tokenTable(tokens, onRevoke) {
+  if (!tokens.length) return el('p', { class: 'muted' }, '还没有凭据');
+  return el('table', {}, el('tr', {}, ['编号', '说明', '建立', '最近使用', '状态', ''].map((h) => el('th', {}, h))),
+    tokens.map((t) => el('tr', {},
+      el('td', {}, String(t.id)), el('td', {}, t.label || '-'), el('td', {}, when(t.created_at)),
+      el('td', {}, t.last_used_at ? when(t.last_used_at) : '没用过'),
+      el('td', { class: t.revoked_at ? 'muted' : '' }, t.revoked_at ? `已吊销 ${when(t.revoked_at)}` : '有效'),
+      el('td', {}, t.revoked_at ? null : el('button', { onclick: () => onRevoke(t) }, '吊销')))));
+}
+
+async function usersPage() {
+  const show = live();
+  const msg = el('div');
+  const say = (e) => msg.replaceChildren(errorBox(e));
+  const draw = async () => {
+    const { users, roles } = await api.users();
+    const people = Object.entries(roles).filter(([k]) => k !== 'worker');
+    const name = el('input', { type: 'text', placeholder: '账号名：字母、数字、. _ -，例如 zhangsan' });
+    const role = el('select', {}, Object.entries(roles).map(([k, v]) => el('option', { value: k }, v)));
+    role.value = 'field';
+    const detail = el('div');
+    const openTokens = async (u) => {
+      const label = el('input', { type: 'text', placeholder: '给谁或哪台机器用，例如 训练机-01' });
+      const fresh = el('div');
+      const list = async () => tokenTable(await api.userTokens(u.name), async (t) => {
+        if (!window.confirm(`吊销 ${u.name} 的凭据 ${t.id}（${t.label || '无说明'}）？用它登录的机器会立刻连不上。`)) return;
+        try { await api.revokeToken(t.id); await openTokens(u); } catch (e) { say(e); }
+      });
+      const make = async () => {
+        try {
+          const made = await api.createToken(u.name, label.value.trim());
+          const table = await list();
+          detail.replaceChildren(el('h2', {}, `${u.name} 的凭据`), el('div', { class: 'panel' },
+            el('p', {}, `凭据 ${made.id} 只显示这一次，现在就复制给使用的人：`), el('pre', { class: 'mono', id: 'new-token' }, made.token),
+            el('p', { class: 'muted' }, `用法：fw login --server ${location.origin} --token <凭据>；网页登录时粘贴同一串。`)), table);
+        } catch (e) { say(e); }
+      };
+      detail.replaceChildren(el('h2', {}, `${u.name} 的凭据`), await list(), fresh,
+        u.disabled_at ? el('p', { class: 'muted' }, '账号已停用，先启用才能发凭据')
+          : el('div', { class: 'row' }, label, el('button', { class: 'primary', onclick: make }, '发新凭据')));
+    };
+    const rows = users.map((u) => {
+      const pick = el('select', {}, (u.role === 'worker' ? [['worker', roles.worker]] : people).map(([k, v]) => el('option', { value: k }, v)));
+      pick.value = u.role;
+      pick.disabled = u.role === 'worker' || !!u.disabled_at;
+      pick.addEventListener('change', async () => {
+        if (!window.confirm(`把 ${u.name} 改成${roles[pick.value]}？下一次请求起生效，凭据不用重发。`)) { pick.value = u.role; return; }
+        try { await api.setRole(u.name, pick.value); await draw(); } catch (e) { pick.value = u.role; say(e); }
+      });
+      const toggle = el('button', { onclick: async () => {
+        if (!u.disabled_at && !window.confirm(`停用 ${u.name}？它的全部凭据立刻失效；以后启用也要重新发凭据。`)) return;
+        try { await api.setDisabled(u.name, !u.disabled_at); await draw(); } catch (e) { say(e); }
+      } }, u.disabled_at ? '启用' : '停用');
+      return el('tr', { class: u.disabled_at ? 'muted' : '' },
+        el('td', {}, u.name), el('td', {}, pick), el('td', {}, when(u.created_at)),
+        el('td', {}, u.disabled_at ? `已停用 ${when(u.disabled_at)}` : '在用'), el('td', {}, String(u.active_tokens)),
+        el('td', {}, el('div', { class: 'row' }, el('button', { onclick: () => openTokens(u).catch(say) }, '凭据'), toggle)));
+    });
+    const add = async (ev) => {
+      ev.preventDefault();
+      try { await api.createUser(name.value.trim(), role.value); await draw(); } catch (e) { say(e); }
+    };
+    msg.replaceChildren();
+    show(el('h1', {}, '账号'),
+      el('p', { class: 'muted' }, '一人一个账号。管理员管账号；算法工程师能新建和修改数据集、模型、评估和任务；现场实施能看数据集和模型、下载文件、登记发布；GPU worker 是 GPU 机用的账号。'
+        + '每一次改动都记在「操作记录」里。'),
+      msg,
+      el('table', {}, el('tr', {}, ['账号', '角色', '建立', '状态', '有效凭据', ''].map((h) => el('th', {}, h))), rows),
+      el('h2', {}, '新建账号'),
+      el('form', { class: 'panel form', onsubmit: add }, el('label', {}, '账号名', name), el('label', {}, '角色', role),
+        el('button', { class: 'primary', type: 'submit' }, '新建账号')),
+      detail);
+  };
+  await draw();
+}
+
+async function mePage() {
+  const show = live();
+  const msg = el('div');
+  const draw = async () => {
+    const tokens = await api.myTokens();
+    show(el('h1', {}, '我的凭据'),
+      el('p', { class: 'muted' }, `${me.name}（${me.role_text || me.role}）。现在登录用的是凭据 ${me.token_id}${me.token_label ? `（${me.token_label}）` : ''}。`
+        + '不再用的机器可以在这里吊销它的凭据；要新凭据找管理员。'),
+      msg,
+      tokenTable(tokens, async (t) => {
+        if (!window.confirm(t.id === me.token_id ? '这是现在登录用的凭据，吊销后要重新登录。继续？' : `吊销凭据 ${t.id}（${t.label || '无说明'}）？`)) return;
+        try { await api.revokeToken(t.id); if (t.id === me.token_id) { location.hash = '#/login'; return; } await draw(); } catch (e) { msg.replaceChildren(errorBox(e)); }
+      }));
+  };
+  await draw();
+}
+
+// The particulars of an event (its detail object) as one line of text.
+export function detailText(detail) {
+  return Object.entries(detail || {}).filter(([, v]) => v !== null && v !== '' && v !== undefined)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ');
+}
+
+async function eventsPage(query) {
+  const show = live();
+  const asked = { limit: '100' };
+  for (const k of ['before', 'actor', 'action', 'q']) if (query.get(k)) asked[k] = query.get(k);
+  const r = await api.events(asked);
+  const go = (changes) => {
+    const next = { actor: asked.actor, action: asked.action, q: asked.q, ...changes };
+    location.hash = hrefOf(['events'], next);
+  };
+  const groups = [...new Set(Object.keys(r.actions).map((a) => a.split('.')[0]))];
+  const groupNames = { dataset: '数据集', version: '版本', model: '模型', model_version: '模型版本', eval: '评估', release: '发布',
+    runner: '推理环境', job: '任务', prediction_set: '预测集', user: '账号', token: '凭据' };
+  const action = el('select', {}, el('option', { value: '' }, '全部操作'),
+    groups.map((g) => el('option', { value: g }, groupNames[g] || g)));
+  action.value = (asked.action || '').split('.')[0];
+  const actor = el('input', { type: 'text', placeholder: '账号', value: asked.actor || '' });
+  const q = el('input', { type: 'text', placeholder: '对象里的字，例如 SES-TX', value: asked.q || '' });
+  const filter = (ev) => { ev.preventDefault(); go({ action: action.value, actor: actor.value.trim(), q: q.value.trim() }); };
+  show(el('h1', {}, '操作记录'),
+    el('p', { class: 'muted' }, '谁在什么时候改了什么：建版本、登记模型和发布、提交和取消任务、账号和凭据的变动。和改动本身一起写入，只增不改。'),
+    el('form', { class: 'row', onsubmit: filter }, action, actor, q, el('button', { type: 'submit' }, '筛选')),
+    r.events.length ? el('table', {}, el('tr', {}, ['时间', '账号', '操作', '对象', '细节'].map((h) => el('th', {}, h))),
+      r.events.map((e) => el('tr', {},
+        el('td', {}, when(e.at)), el('td', {}, e.by_server ? '服务器命令行' : e.actor), el('td', {}, e.action_text),
+        el('td', {}, e.object), el('td', { class: 'muted mono' }, detailText(e.detail)))))
+      : el('p', { class: 'muted' }, '没有符合的记录'),
+    el('div', { class: 'row', style: 'margin-top:12px' },
+      asked.before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q }) }, '回到最新') : null,
+      r.next_before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q, before: r.next_before }) }, '更早的') : null));
+}
+
 function newDatasetForm() {
   const name = el('input', { type: 'text', placeholder: '名称，例如 SES-TX' });
   const site = el('input', { type: 'text', placeholder: '现场' });
@@ -1399,17 +1540,19 @@ function newDatasetForm() {
 }
 
 // --- frame and routing ------------------------------------------------------------------------------------
-// [link, text, the roles that see it, the pages it stands for]
+// [link, text, the capability that shows it, the pages it stands for]
 const NAV = [
-  ['#/', '数据集', ['admin', 'algo'], /^#\/?($|d\/|v\/|img\/|diff\/)/],
-  ['#/models', '模型', ['admin', 'algo', 'deploy'], /^#\/(models|m\/|mv\/|eval)/],
-  ['#/jobs', '任务', ['admin', 'algo', 'worker'], /^#\/(jobs|job\/)/],
-  ['#/predictions', '预测集', ['admin', 'algo'], /^#\/(predictions|p\/)/],
+  ['#/', '数据集', 'datasets.read', /^#\/?($|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/],
+  ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/],
+  ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/],
+  ['#/predictions', '预测集', 'datasets.read', /^#\/(predictions|p\/)/],
+  ['#/events', '操作记录', 'events.read', /^#\/events/],
+  ['#/users', '账号', 'users.manage', /^#\/users/],
 ];
 
 function renderNav() {
   const here = location.hash || '#/';
-  document.getElementById('nav').replaceChildren(...NAV.filter(([, , roles]) => !me || roles.includes(me.role))
+  document.getElementById('nav').replaceChildren(...NAV.filter(([, , cap]) => !me || can(cap))
     .map(([href, text, , on]) => el('a', { href, class: on.test(here) ? 'on' : '' }, text)));
 }
 
@@ -1418,7 +1561,7 @@ function renderWho(account) {
   renderNav();
   const who = document.getElementById('who');
   if (!me) { who.replaceChildren(); return; }
-  who.replaceChildren(`${me.name}（${me.role}）`, el('button', {
+  who.replaceChildren(el('a', { href: '#/me', title: '我的凭据' }, `${me.name}（${me.role_text || me.role}）`), el('button', {
     onclick: () => { try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ } renderWho(null); location.hash = '#/login'; },
   }, '退出'));
 }
@@ -1437,8 +1580,8 @@ async function render() {
   const { parts, query } = route(location.hash);
   renderNav();
   if (parts[0] === 'login' || !token()) { loginPage(); return; }
-  if (parts.length === 0 && me && !['admin', 'algo'].includes(me.role)) {  // their home: what they may see
-    location.hash = me.role === 'worker' ? '#/jobs' : '#/models';
+  if (parts.length === 0 && me && !can('datasets.read')) {  // their home: what they may see
+    location.hash = can('jobs.read') ? '#/jobs' : '#/models';
     return;
   }
   try {
@@ -1458,6 +1601,9 @@ async function render() {
     else if (parts[0] === 'p' && parts[1]) await predictionPage(parts[1], query);
     else if (parts[0] === 'upload' && parts[1]) await uploadPage(parts[1]);
     else if (parts[0] === 'add' && parts[1]) await addPage(parts[1]);
+    else if (parts[0] === 'users') await usersPage();
+    else if (parts[0] === 'events') await eventsPage(query);
+    else if (parts[0] === 'me') await mePage();
     else if (parts[0] === 'remove' && parts[1]) await removePage(parts[1]);
     else show(el('h1', {}, '没有这个页面'), el('a', { href: '#/' }, '回首页'));
   } catch (e) {

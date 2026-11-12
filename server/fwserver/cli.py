@@ -35,6 +35,9 @@ def cmd_user(args, settings):
             _print_rows(['账号', '角色', '建立时间', '停用时间', '有效凭据'],
                         [[u['name'], auth.ROLES[u['role']], _stamp(u['created_at']), _stamp(u['disabled_at']),
                           u['active_tokens']] for u in auth.list_users(conn)])
+        elif args.action == 'role':
+            u = auth.set_role(conn, args.name, args.role)
+            print(f'{u["name"]} 现在是{auth.ROLES[u["role"]]}；它的凭据照常有效')
         elif args.action == 'disable':
             n = auth.set_disabled(conn, args.name, True)
             print(f'已停用 {args.name}，吊销了 {n} 个凭据')
@@ -113,12 +116,15 @@ def build_parser():
     s = sub.add_parser('migrate', help='把数据库升级到这个版本的程序需要的结构')
     s.set_defaults(func=cmd_migrate)
 
-    s = sub.add_parser('user', help='账号：add、list、disable、enable')
+    s = sub.add_parser('user', help='账号：add、list、role、disable、enable')
     u = s.add_subparsers(dest='action', required=True, metavar='操作')
     a = u.add_parser('add')
     a.add_argument('name')
     a.add_argument('--role', required=True, choices=list(auth.ROLES),
-                   help='admin 管理员、algo 算法工程师、field 现场实施、deploy 部署')
+                   help='admin 管理员、algo 算法工程师、field 现场实施、worker GPU 机')
+    a = u.add_parser('role', help='改角色（worker 账号不和人的角色互换）')
+    a.add_argument('name')
+    a.add_argument('role', choices=list(auth.ROLES))
     u.add_parser('list')
     for action in ('disable', 'enable'):
         a = u.add_parser(action, help='停用会立即吊销这个账号的全部凭据' if action == 'disable' else None)
