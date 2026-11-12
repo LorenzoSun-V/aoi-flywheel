@@ -140,6 +140,13 @@ export const api = {
   createToken: (name, label) => call(`/users/${encodeURIComponent(name)}/tokens`, { method: 'POST', body: { label } }),
   revokeToken: (id) => call(`/tokens/${Number(id)}/revoke`, { method: 'POST', body: {} }),
   myTokens: async () => (await call('/me/tokens')).tokens,
+  batches: (query = {}) => call(`/batches?${new URLSearchParams(query)}`),
+  batch: (name) => call(`/batches/${encodeURIComponent(name)}`),
+  reviewers: async () => (await call('/reviewers')).reviewers,
+  createBatch: (body) => call('/batches', { method: 'POST', body }),
+  reviseBatch: (name, body) => call(`/batches/${encodeURIComponent(name)}/revisions`, { method: 'POST', body }),
+  batchStep: (name, step, body) => call(`/batches/${encodeURIComponent(name)}/${step}`, { method: 'POST', body }),
+  compareBatch: (name, older, newer) => call(`/batches/${encodeURIComponent(name)}/compare?old=${older}&new=${newer}`),
   events: (query) => call(`/events?${new URLSearchParams(query)}`),
 };
 
@@ -268,8 +275,19 @@ async function datasetsPage() {
     el('div', { style: 'margin-top:16px' }, can('datasets.write') ? newDatasetForm() : null));
 }
 
+// A version's source: 'batch:NAME@N' (a labelling batch that was imported) links to the batch.
+export function batchOfSource(source) {
+  const m = /^batch:([A-Za-z0-9][A-Za-z0-9._-]*)@(\d+)$/.exec(source || '');
+  return m ? { name: m[1], revision: Number(m[2]) } : null;
+}
+function sourceNode(source) {
+  const b = batchOfSource(source);
+  return b ? ['批次 ', el('a', { href: hrefOf(['b', b.name]) }, b.name), ` 第 ${b.revision} 版`] : (source || '-');
+}
+
 async function datasetPage(name) {
   const show = live();
+  if ((await api.dataset(name)).kind === 'batch') { location.hash = hrefOf(['b', name]); return; }
   const [d, versions] = await Promise.all([api.dataset(name), api.versions(name)]);
   const list = versions.slice().reverse();
   const pick = (id) => el('select', { id }, list.map((v) => el('option', { value: String(v.number) }, v.ref)));
@@ -291,7 +309,7 @@ async function datasetPage(name) {
         el('td', {}, el('a', { href: hrefOf(['v', d.name, String(v.number)]) }, v.ref)),
         el('td', {}, v.parent ? v.parent.ref : '-'),
         el('td', {}, String(v.file_count)), el('td', {}, sizeText(v.total_bytes)),
-        el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, v.source), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
+        el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, sourceNode(v.source)), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
         el('td', { class: 'muted' }, v.note)))),
     d.kind === 'trainset' || !can('datasets.write') ? null : el('div', { class: 'row', style: 'margin-top:12px' },
       el('a', { class: 'button primary', href: hrefOf(['add', d.name]) }, '上传新增目录'),
@@ -311,7 +329,8 @@ export function opsText(ops) {
 
 function crumbsFor(version, dir) {
   const parts = dir ? dir.split('/') : [];
-  const out = [el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', version.dataset]) }, version.dataset),
+  const out = [version.kind === 'batch' ? el('a', { href: '#/batches' }, '标注批次') : el('a', { href: '#/' }, '数据集'), ' / ',
+    el('a', { href: hrefOf([version.kind === 'batch' ? 'b' : 'd', version.dataset]) }, version.dataset),
     ' / ', el('a', { href: hrefOf(['v', version.dataset, String(version.number)]) }, `@${version.number}`)];
   parts.forEach((p, i) => {
     out.push(' / ');
@@ -373,7 +392,7 @@ async function versionPage(name, number, query) {
       el('dt', {}, '文件'), el('dd', {}, `${version.file_count} 个，${sizeText(version.total_bytes)}`),
       el('dt', {}, '父版本'), el('dd', {}, version.parent ? version.parent.ref : '-'),
       el('dt', {}, '登记'), el('dd', {}, `${version.created_by}，${when(version.created_at)}`),
-      el('dt', {}, '来源'), el('dd', {}, version.source || '-'),
+      el('dt', {}, '来源'), el('dd', {}, sourceNode(version.source)),
       el('dt', {}, '清单哈希'), el('dd', { class: 'mono' }, version.manifest_sha256)),
     !snapshot || dir ? null : el('p', { class: 'muted' }, flat
       ? '目录和 fw get 默认取回的一样：train 里有框的图在 train/images，没有框的在 neg_train；val、test 的图不分有没有框，都在各自的 images 里。'
@@ -1391,6 +1410,294 @@ async function removePage(name) {
 }
 
 // --- accounts, tokens, the record of who did what ------------------------------------------------------------
+// --- labelling batches: upload, review, import ---------------------------------------------------------
+const BATCH_CLASS = { open: '', review: 'warn', rejected: 'bad', approved: 'ok', imported: 'muted', closed: 'muted' };
+const bref = (name) => el('a', { href: hrefOf(['b', name]) }, name);
+
+export function boxChangeText(row) {
+  if (row.unreadable) return '标注读不出框，没有逐框比较';
+  const parts = [['added', '加框'], ['removed', '删框'], ['moved', '挪动'], ['relabeled', '改类别']]
+    .filter(([k]) => row[k]).map(([k, t]) => `${t} ${row[k]}`);
+  const text = parts.length ? `${parts.join('、')}（${row.old_boxes} → ${row.new_boxes} 个框）` : '';
+  return row.image_changed ? `图片本身换了${text ? `；${text}` : ''}` : text;
+}
+
+async function batchesPage(query) {
+  const show = live();
+  const view = query.get('view') || (can('batches.review') ? 'todo' : 'mine');
+  const { batches } = await api.batches(view === 'todo' ? { todo: true } : view === 'mine' ? { mine: true } : {});
+  const tabs = [can('batches.review') ? ['todo', '待我复核'] : null, ['mine', '我上传的'], ['all', '全部']].filter(Boolean)
+    .map(([k, t]) => el('a', { href: hrefOf(['batches'], { view: k }), class: k === view ? 'on' : '' }, t));
+  const rows = batches.map((b) => el('tr', {},
+    el('td', {}, bref(b.name)), el('td', {}, `第 ${b.revision} 版`),
+    el('td', {}, el('span', { class: `tag ${BATCH_CLASS[b.status]}` }, b.status_text)),
+    el('td', {}, `${b.pool} / ${b.dir}/`), el('td', {}, `${b.file_count} 个文件，${sizeText(b.total_bytes)}`),
+    el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), el('td', {}, when(b.updated_at))));
+  const empty = { todo: '没有待你复核的批次。', mine: '你还没有上传过批次。', all: '还没有批次。' }[view];
+  show(el('h1', {}, '标注批次'),
+    el('p', { class: 'muted' }, '一个批次是一个要进数据池的目录：上传（每次上传都冻结成一版，不进数据池）、提交给复核人、退回或通过，通过以后由算法工程师入库。'),
+    el('div', { class: 'row tabs' }, tabs, can('batches.write') ? el('a', { class: 'button primary', href: '#/batch-new' }, '上传新批次') : null),
+    rows.length ? el('table', {}, el('tr', {}, ['批次', '版次', '状态', '入库到', '大小', '上传账号', '标注人', '复核人', '最近变化']
+      .map((h) => el('th', {}, h))), rows) : el('p', { class: 'muted' }, empty));
+}
+
+// Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
+// then makes the batch, the revision or the approval. Returns the node to show.
+function folderSender({ controls, allowOther, force, onPick, label, done }) {
+  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const result = el('div');
+  let files = [];
+  let paths = [];
+  let round = 0;
+  const all = [picker, allowOther, force, ...controls];
+  const lock = (on) => { for (const c of all) c.disabled = on; };
+  const listOf = (title, part, cls = '') => (part && part.count ? el('details', { class: cls },
+    el('summary', {}, `${title}：${part.count}`),
+    el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, Array.isArray(x) ? x.join('  ') : x)))) : null);
+
+  const check = async () => {
+    if (!files.length) return;
+    const mine = ++round;
+    const picked = files;
+    const pickedPaths = paths;
+    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
+    if (mine !== round) return;
+    const junk = new Set(r.junk);
+    const keep = picked.map((f, i) => [f, pickedPaths[i]]).filter(([, p]) => !junk.has(p));
+    const report = [
+      el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
+        + (r.junk.length ? `；系统文件 ${r.junk.length} 个不上传` : '')
+        + (r.unlabeled_images.count ? `；没有标注的图片 ${r.unlabeled_images.count} 张` : '')),
+      listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
+      listOf('同名不同扩展名的图片', r.same_stem_images, 'warn'), listOf('图片和标注以外的文件', r.others, 'warn')];
+    const problem = r.reasons.length ? `不能上传：\n${r.reasons.join('\n')}` : !r.images.count ? '目录里没有图片' : null;
+    if (problem) {
+      result.replaceChildren(...present([report, el('div', { class: 'error' }, problem)]));
+      return;
+    }
+    const go = el('button', { class: 'primary', id: 'send-folder', onclick: () => send(mine, keep, report)
+      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, label);
+    result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
+  };
+
+  const send = async (mine, keep, report) => {
+    if (mine !== round) return;
+    const progress = bar();
+    result.replaceChildren(...present([report, progress]));
+    uploading = true;
+    lock(true);
+    try {
+      const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
+      const entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
+      const unique = new Map();
+      for (const e of entries) if (!unique.has(e.sha256)) unique.set(e.sha256, e);
+      const every = [...unique.values()];
+      const missing = new Set();
+      for (let i = 0; i < every.length; i += 20000) {
+        for (const x of await api.missing(every.slice(i, i + 20000).map((e) => [e.sha256, e.size]))) missing.add(x);
+      }
+      const todo = every.filter((e) => missing.has(e.sha256));
+      const bytes = todo.reduce((a, e) => a + e.size, 0);
+      let sent = 0;
+      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${every.length - todo.length} 个服务器上已经有了）`);
+      await inParallel(todo, 4, async (e) => {
+        await api.putObject(e.sha256, e.file);
+        sent += e.size;
+        progress.set(sent, bytes, `上传 ${sizeText(sent)} / ${sizeText(bytes)}`);
+      });
+      const manifest = new Blob([manifestText(entries)]);
+      const [manifestDigest] = await hashAll([manifest], () => {});
+      await api.putObject(manifestDigest, manifest);
+      await done(manifestDigest);
+    } finally { uploading = false; lock(false); }
+  };
+
+  const again = () => check().catch((e) => result.replaceChildren(errorBox(e)));
+  picker.addEventListener('change', () => {
+    files = [...picker.files];
+    paths = relPaths(files);
+    if (files.length && onPick) onPick((files[0].webkitRelativePath || '').split('/')[0]);
+    again();
+  });
+  for (const box of [allowOther, force]) box.addEventListener('change', again);
+  return { picker, result };
+}
+
+const reviewerSelect = (names, first) => el('select', { id: 'reviewer' },
+  el('option', { value: '' }, first), names.map((n) => el('option', { value: n }, n)));
+
+// A new batch (name null), the owner's next revision, or (approve) the reviewer's corrected folder.
+async function batchUploadPage(name, query) {
+  const show = live();
+  const approve = query.get('approve') === '1';
+  const b = name ? await api.batch(name) : null;
+  if (b && !b.actions.includes(approve ? 'approve' : 'revise')) {
+    throw new Error(`${b.name} 现在是「${b.status_text}」，或者不是你的批次，不能${approve ? '通过' : '上传新的一版'}`);
+  }
+  const pools = b ? [] : (await api.datasets()).filter((d) => d.kind !== 'trainset');
+  const names = approve ? [] : await api.reviewers();
+  const pool = el('select', { id: 'pool' }, pools.map((d) => el('option', { value: d.name }, d.name)));
+  if (query.get('pool')) pool.value = query.get('pool');
+  const batchName = el('input', { type: 'text', id: 'batch-name', placeholder: '字母、数字和 . _ -，例如 SES-TX-20261104' });
+  const dir = el('input', { type: 'text', id: 'batch-dir', placeholder: '入库后在池里的目录名，选了目录以后自动填' });
+  const labeler = el('input', { type: 'text', id: 'labeler', placeholder: approve ? '修改的人的姓名（必填）' : '标注人姓名（必填）' });
+  const reviewer = reviewerSelect(names, b && b.reviewer ? '先不提交复核' : '先不提交复核（比如还没标完）');
+  if (b && b.reviewer && names.includes(b.reviewer)) reviewer.value = b.reviewer;
+  const note = el('input', { type: 'text', placeholder: b ? '这一版改了什么' : '这批数据是什么（来源、日期）' });
+  const comment = el('input', { type: 'text', placeholder: '复核意见（可以不写）' });
+  const allowOther = el('input', { type: 'checkbox' });
+  const force = el('input', { type: 'checkbox' });
+  const here = location.hash;
+  const done = async (digest) => {
+    if (!labeler.value.trim()) throw new Error(approve ? '要写修改的人的姓名' : '要写标注人姓名');
+    const common = { manifest_sha256: digest, labeler: labeler.value.trim(), allow_other_files: allowOther.checked, force: force.checked };
+    let made;
+    if (approve) {
+      made = await api.batchStep(b.name, 'approve', { ...common, comment: comment.value.trim(), revision: b.revision, source: '网页复核时上传' });
+    } else if (b) {
+      made = await api.reviseBatch(b.name, { ...common, note: note.value.trim(), reviewer: reviewer.value || null,
+        expect_latest_id: b.latest_id, source: '网页上传批次新的一版' });
+    } else {
+      made = await api.createBatch({ ...common, name: batchName.value.trim(), pool: pool.value, dir: dir.value.trim(),
+        note: note.value.trim(), reviewer: reviewer.value || null, source: '网页上传批次' });
+    }
+    uploading = false;
+    if (location.hash === here) location.hash = hrefOf(['b', made.name]);
+  };
+  const { picker, result } = folderSender({ controls: [pool, batchName, dir, labeler, reviewer, note, comment], allowOther, force,
+    label: approve ? '上传并通过' : b ? '上传新的一版' : '上传批次',
+    onPick: b ? null : (folder) => {
+      dir.value = folder;
+      if (!batchName.value.trim()) batchName.value = `${pool.value}-${folder}`.replace(/[^A-Za-z0-9._-]/g, '');
+    },
+    done });
+  const title = approve ? `通过 ${b.name}，并带上我修改后的内容` : b ? `给 ${b.name} 上传新的一版` : '上传新批次';
+  show(el('div', { class: 'crumbs' }, el('a', { href: '#/batches' }, '标注批次'), b ? [' / ', bref(b.name)] : null, ` / ${approve ? '修改后通过' : b ? '新的一版' : '上传'}`),
+    el('h1', {}, title),
+    el('p', { class: 'muted' }, approve
+      ? `选你修改后的整个目录（${b.dir}/）：它成为第 ${b.revision + 1} 版，记下是你改的，并且直接通过。`
+      : b ? `选批次的整个目录现在的样子：冻结成第 ${b.revision + 1} 版，之前的各版都保留。没变的文件不会重新上传。`
+        : '选一个目录，原始图片或已经标注的都行：冻结成批次的第 1 版，不会进数据池；复核通过以后由算法工程师入库。'),
+    el('div', { class: 'panel form' },
+      b ? null : el('label', {}, '进哪个数据池', pool),
+      el('label', {}, '目录', picker),
+      b ? null : el('label', {}, '批次名称', batchName),
+      b ? null : el('label', {}, '池里的目录名', dir),
+      el('label', {}, approve ? '修改人姓名' : '标注人姓名', labeler),
+      approve ? el('label', {}, '复核意见', comment) : el('label', {}, '复核人', reviewer),
+      approve ? null : el('label', {}, '说明', note),
+      el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起上传'),
+      el('label', { class: 'check' }, force, '同名不同扩展名的图片也上传')),
+    result);
+}
+
+function compareTable(c, limit = 200) {
+  const [name, number] = c.new.split('@');
+  const rows = c.images.examples.slice(0, limit).map((r) => el('tr', {},
+    el('td', { class: 'mono' }, el('a', { href: hrefOf(['img', name, number, ...r.image.split('/')]) }, r.image)),
+    el('td', {}, boxChangeText(r))));
+  const f = c.files;
+  return el('div', {},
+    el('p', {}, `${c.new} 相比 ${c.old}：文件新增 ${f.added.count}、修改 ${f.modified.count}、删除 ${f.deleted.count}、改名 ${f.renamed.count}；`
+      + `图片 ${c.images.old} → ${c.images.new} 张（新增 ${c.images.added}，去掉 ${c.images.removed}）。`),
+    el('p', { id: 'box-changes' }, `标注有变化的图片 ${c.images.changed} 张：加框 ${c.boxes.added}、删框 ${c.boxes.removed}、挪动 ${c.boxes.moved}、改类别 ${c.boxes.relabeled}。`,
+      ' ', el('a', { href: hrefOf(['diff', name], { old: String(c.old_id), new: String(c.new_id) }) }, '看全部文件变化')),
+    rows.length ? el('table', {}, el('tr', {}, ['图片', '标注变化'].map((h) => el('th', {}, h))), rows) : null,
+    c.images.changed > rows.length ? el('p', { class: 'muted' }, `只列了前 ${rows.length} 张；全部用 fw batch diff ${name} 看。`) : null,
+    c.uncompared ? el('p', { class: 'muted' }, `还有 ${c.uncompared} 张图片的标注太多，没有比较。`) : null);
+}
+
+async function batchPage(name, query) {
+  const show = live();
+  const msg = el('div');
+  const say = (e) => msg.replaceChildren(errorBox(e));
+  const draw = async () => {
+    const b = await api.batch(name);
+    const has = (a) => b.actions.includes(a);
+    const newer = Number(query.get('new')) || b.revision;
+    const older = Number(query.get('old')) || newer - 1;
+    const compare = older >= 1 && older !== newer ? await api.compareBatch(b.name, older, newer) : null;
+    const act = (fn) => async () => { try { msg.replaceChildren(); await fn(); await draw(); } catch (e) { say(e); } };
+    const forms = [];
+    if (has('revise')) {
+      forms.push(el('div', { class: 'row' }, el('a', { class: 'button', href: hrefOf(['batch-up', b.name]) }, '上传新的一版'),
+        el('span', { class: 'muted' }, `或者：fw batch get ${b.name}，用 LiteAnno 改好后 fw batch update ${b.name} <目录> --labeler <姓名>`)));
+    }
+    if (has('submit')) {
+      const names = await api.reviewers();
+      const who = reviewerSelect(names, '选复核人');
+      if (b.reviewer && names.includes(b.reviewer)) who.value = b.reviewer;
+      forms.push(el('div', { class: 'row' }, who, el('button', { class: 'primary', id: 'submit-review', onclick: act(async () => {
+        if (!who.value) throw new Error('要选复核人');
+        await api.batchStep(b.name, 'submit', { reviewer: who.value, revision: b.revision });
+      }) }, `把第 ${b.revision} 版提交复核`)));
+    }
+    if (has('import')) {
+      const replace = el('input', { type: 'checkbox', id: 'import-replace' });
+      const out = el('div');
+      const preview = async () => {
+        try {
+          const body = { replace: replace.checked };
+          const plan = await api.batchStep(b.name, 'import/preview', body);
+          const go = plan.reasons.length ? null : el('button', { class: 'primary', id: 'import-go', onclick: act(() => api.batchStep(b.name, 'import',
+            { ...body, expect_latest_id: plan.expect_latest_id })) }, `入库，建 ${plan.ref}`);
+          out.replaceChildren(...present([changeReport(plan), go ? el('div', { class: 'row' }, go) : null]));
+        } catch (e) { out.replaceChildren(errorBox(e)); }
+      };
+      forms.push(el('div', { class: 'panel form' },
+        el('p', {}, `复核通过了。入库：把第 ${b.revision} 版作为 ${b.dir}/ 加进 ${b.pool}，和「上传新增目录」是同样的检查，文件不用再上传。`),
+        el('label', { class: 'check' }, replace, `替换已有目录：${b.pool} 里已有 ${b.dir}/ 时，整个换成这一份`),
+        el('div', { class: 'row' }, el('button', { id: 'import-preview', onclick: preview }, '预览入库')), out));
+    }
+    if (has('approve') || has('reject')) {
+      const comment = el('textarea', { id: 'review-comment', rows: 3, placeholder: '复核意见：退回时必填，写清楚哪里要改' });
+      const images = el('textarea', { id: 'review-images', rows: 3, class: 'mono', placeholder: '有问题的图片，一行一个（批次目录里的相对路径），可以不填' });
+      forms.push(el('div', { class: 'panel form' },
+        el('p', { class: 'muted' }, has('approve') ? `复核第 ${b.revision} 版：` : `已经通过；入库之前发现问题还可以退回第 ${b.revision} 版：`, el('a', { href: hrefOf(['v', b.name, String(b.revision)]) }, '在网页里看图片和框'),
+          `，或者 fw batch get ${b.name} 取到本地用 LiteAnno 打开。`),
+        el('label', {}, '意见', comment), el('label', {}, '问题图片', images),
+        el('div', { class: 'row' },
+          has('approve') ? el('button', { class: 'primary', id: 'approve', onclick: act(() => api.batchStep(b.name, 'approve',
+            { comment: comment.value.trim(), revision: b.revision })) }, '通过') : null,
+          has('approve') ? el('a', { class: 'button', href: hrefOf(['batch-up', b.name], { approve: '1' }) }, '我改过了：上传修改后的目录并通过') : null,
+          el('button', { id: 'reject', onclick: act(() => api.batchStep(b.name, 'reject', { comment: comment.value.trim(),
+            images: images.value.split('\n').map((x) => x.trim()).filter(Boolean), revision: b.revision })) }, '退回'))));
+    }
+    if (has('close')) {
+      forms.push(el('div', { class: 'row' }, el('button', { id: 'close-batch', onclick: act(async () => {
+        const why = window.prompt(`关闭 ${b.name}？它不会再复核或入库，各版内容保留。可以写原因：`, '');
+        if (why === null) return;
+        await api.batchStep(b.name, 'close', { comment: why.trim() });
+      }) }, '关闭这个批次')));
+    }
+    const revisions = b.revisions.slice().reverse().map((r) => el('tr', {},
+      el('td', {}, el('a', { href: hrefOf(['v', b.name, String(r.number)]) }, `第 ${r.number} 版`)),
+      el('td', {}, `${r.file_count} 个文件，${sizeText(r.total_bytes)}`),
+      el('td', {}, r.labeler + (r.by_reviewer ? '（复核人修改）' : '')), el('td', {}, r.created_by), el('td', {}, when(r.created_at)),
+      el('td', { class: 'muted' }, r.note),
+      el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '和上一版比') : '')));
+    const steps = b.steps.map((s) => el('tr', {},
+      el('td', {}, when(s.at)), el('td', {}, s.actor),
+      el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
+        s.pool_version ? ['，成为 ', vref(s.pool_version)] : null),
+      el('td', {}, s.comment, s.images.length ? el('ul', { class: 'mono' }, s.images.map((i) => el('li', {},
+        el('a', { href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i)))) : null)));
+    show(el('div', { class: 'crumbs' }, el('a', { href: '#/batches' }, '标注批次'), ` / ${b.name}`),
+      el('h1', {}, b.name, ' ', el('span', { class: `tag ${BATCH_CLASS[b.status]}`, id: 'batch-status' }, b.status_text)),
+      el('p', {}, '入库后是 ', el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` 的 ${b.dir}/`,
+        b.imported ? ['；已入库为 ', vref(b.imported)] : null,
+        `。上传账号 ${b.owner}，复核人 ${b.reviewer || '还没有指定'}。`),
+      msg, forms,
+      el('h2', {}, '各版'),
+      el('table', {}, el('tr', {}, ['版次', '大小', '标注人', '上传账号', '时间', '说明', ''].map((h) => el('th', {}, h))), revisions),
+      compare ? [el('h2', {}, '这一版改了什么'), compareTable(compare)] : null,
+      el('h2', {}, '经过'),
+      el('table', {}, el('tr', {}, ['时间', '账号', '做了什么', '意见'].map((h) => el('th', {}, h))), steps));
+  };
+  await draw();
+}
+
 function tokenTable(tokens, onRevoke) {
   if (!tokens.length) return el('p', { class: 'muted' }, '还没有凭据');
   return el('table', {}, el('tr', {}, ['编号', '说明', '建立', '最近使用', '状态', ''].map((h) => el('th', {}, h))),
@@ -1543,6 +1850,7 @@ function newDatasetForm() {
 // [link, text, the capability that shows it, the pages it stands for]
 const NAV = [
   ['#/', '数据集', 'datasets.read', /^#\/?($|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/],
+  ['#/batches', '标注批次', 'batches.read', /^#\/(batches|b\/|batch-new|batch-up\/)/],
   ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/],
   ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/],
   ['#/predictions', '预测集', 'datasets.read', /^#\/(predictions|p\/)/],
@@ -1601,6 +1909,10 @@ async function render() {
     else if (parts[0] === 'p' && parts[1]) await predictionPage(parts[1], query);
     else if (parts[0] === 'upload' && parts[1]) await uploadPage(parts[1]);
     else if (parts[0] === 'add' && parts[1]) await addPage(parts[1]);
+    else if (parts[0] === 'batches') await batchesPage(query);
+    else if (parts[0] === 'batch-new') await batchUploadPage(null, query);
+    else if (parts[0] === 'batch-up' && parts[1]) await batchUploadPage(parts[1], query);
+    else if (parts[0] === 'b' && parts[1]) await batchPage(parts[1], query);
     else if (parts[0] === 'users') await usersPage();
     else if (parts[0] === 'events') await eventsPage(query);
     else if (parts[0] === 'me') await mePage();

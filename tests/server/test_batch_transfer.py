@@ -81,14 +81,14 @@ def test_upload_refused_while_the_store_is_flagged(api, tmp_path, service):
         (store.root / FLAG).unlink()
 
 
-def test_only_data_roles_can_transfer(make_api, tmp_path):
+def test_who_can_transfer(make_api, tmp_path):
     objs = make_objects(tmp_path, [10])
     field = make_api('field')
-    with pytest.raises(ApiError) as e:
-        field.put_objects(objs)
-    assert e.value.status == 403
-    make_api('algo').put_objects(objs)
-    assert {d for d, _ in fetch_all(field, objs)} == {d for d, _, _ in objs}  # a field account reads, uploads nothing
+    field.put_objects(objs)  # a field account uploads files (for its labelling batches) and reads them
+    assert {d for d, _ in fetch_all(field, objs)} == {d for d, _, _ in objs}
+    with pytest.raises(ApiError) as e:  # an account without the capability
+        make_api(token='fw_' + 'x' * 43).put_objects(objs)
+    assert e.value.status == 401
 
 
 def test_fetch_errors(api, tmp_path, monkeypatch):

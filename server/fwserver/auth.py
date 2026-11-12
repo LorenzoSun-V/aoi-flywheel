@@ -21,8 +21,11 @@ PEOPLE = ('admin', 'algo', 'field')  # roles of people; worker is the account of
 CAPS = {
     'datasets.read': (('admin', 'algo', 'field'), '查看数据集'),
     'datasets.write': (('admin', 'algo'), '新建或修改数据集、训练集快照'),
-    'objects.upload': (('admin', 'algo', 'worker'), '上传文件'),
+    'objects.upload': (('admin', 'algo', 'field', 'worker'), '上传文件'),
     'objects.download': (('admin', 'algo', 'field', 'worker'), '下载文件'),
+    'batches.read': (('admin', 'algo', 'field'), '查看标注批次'),
+    'batches.write': (('admin', 'algo', 'field'), '上传标注批次、提交复核'),
+    'batches.review': (('admin', 'algo'), '复核标注批次；复核由算法工程师账号做'),
     'models.read': (('admin', 'algo', 'field'), '查看模型、评估和发布'),
     'models.write': (('admin', 'algo'), '登记模型和评估'),
     'releases.write': (('admin', 'field'), '登记发布；发布由现场实施账号在部署成功后登记'),
@@ -115,6 +118,12 @@ def list_users(conn) -> List[dict]:
         'SELECT u.id, u.name, u.role, u.created_at, u.disabled_at, '
         '(SELECT count(*) FROM tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL) AS active_tokens '
         'FROM users u ORDER BY u.name').fetchall()
+
+
+def names_with(conn, cap: str) -> List[str]:
+    """The enabled accounts that have a capability, by name (e.g. who can be asked to review a batch)."""
+    return [r['name'] for r in conn.execute('SELECT name FROM users WHERE disabled_at IS NULL AND role = ANY(%s) '
+                                            'ORDER BY lower(name)', (list(CAPS[cap][0]),))]
 
 
 def set_disabled(conn, name: str, disabled: bool, actor_id: Optional[int] = None) -> int:

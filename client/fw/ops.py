@@ -424,6 +424,142 @@ def add_folders(api: Api, name: str, folders: Sequence, to: Optional[str] = None
     return version
 
 
+# --- labelling batches -----------------------------------------------------------------------------------
+def _send_folder(api: Api, folder, allow_other_files: bool, force: bool, workers: int, echo: Echo,
+                 what: str = '没有上传') -> Tuple[str, int, int]:
+    """Check a folder as fw dataset import does, upload what the server lacks and its file list (paths inside
+    the folder). Returns (the file list's hash, files, files uploaded)."""
+    report = scan_folder(folder)
+    echo(f'扫描 {report.root}：{len(report.files)} 个文件，图片 {len(report.images)}，标注 {len(report.labels)}，'
+         f'说明文件 {len(report.meta)}，其他 {len(report.others)}')
+    _show(echo, '已忽略的系统文件', report.junk)
+    _show(echo, '读不了的目录', report.unreadable)
+    _show(echo, '链接和特殊文件', report.links)
+    _show(echo, '文件名用不了', report.bad_paths)
+    _show(echo, '路径冲突', report.collisions)
+    _show(echo, '同名不同扩展名的图片', [_group(g) for g in report.same_stem_images])
+    _show(echo, '图片和标注以外的文件', report.others)
+    reasons = report.blocking(allow_other_files, force)
+    if reasons:
+        raise FwError(f'{what}（{report.root}）：\n  ' + '\n  '.join(reasons))
+    if not report.images:
+        raise FwError(f'{report.root} 里没有图片')
+    sample = [os.stat(path).st_size for _, path in report.files[:200]]
+    entries: List[Entry] = _parallel(_hash_local, report.files, _file_workers(sample, workers), '算哈希')
+    sources = {digest: _local(report.root, rel) for rel, digest, _ in entries}
+    sizes = {digest: size for _, digest, size in entries}
+    missing = api.missing([(d, sizes[d]) for d in sorted(sources)])
+    echo(f'要上传 {len(missing)} 个文件，{size_text(sum(sizes[d] for d in missing))}，其余服务器上已有')
+    _upload(api, missing, sources, sizes, workers, '上传')
+    data = manifest_bytes(entries)
+    api.put_bytes(data)
+    return manifest_hash(data), len(entries), len(missing)
+
+
+def _batch_line(b: dict) -> str:
+    who = f'，复核人 {b["reviewer"]}' if b['reviewer'] and b['status'] in ('review', 'approved', 'rejected') else ''
+    return (f'{b["name"]} 第 {b["revision"]} 版：{b["status_text"]}{who}；{b["file_count"]} 个文件，'
+            f'{size_text(b["total_bytes"])}；入库后是 {b["pool"]} 的 {b["dir"]}/')
+
+
+def upload_batch(api: Api, folder, pool: str, labeler: str, name: Optional[str] = None, to: Optional[str] = None,
+                 reviewer: Optional[str] = None, note: str = '', allow_other_files: bool = False,
+                 force: bool = False, workers: int = 8, echo: Echo = print) -> dict:
+    """A new labelling batch from a folder (raw images, or images with labels). It is frozen as the batch's
+    first revision and does not enter the pool; that happens after review, with fw batch import.
+    name: the batch's name (default: <pool>-<folder name>); to: the folder's name in the pool (default: its
+    own); reviewer: also send it to review."""
+    folder = Path(folder)
+    d = _pool_dir(to if to is not None else folder.resolve().name)
+    name = name or f'{pool}-{d.replace("/", "-")}'
+    if not re.match(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z", name):
+        raise FwError(f'批次名称 {name} 用不了：只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符；用 --name 另起一个')
+    if not (labeler or '').strip():
+        raise FwError('要写标注人姓名（--labeler）')
+    api.dataset(pool)  # a wrong pool name is said before anything is hashed
+    digest, _, _ = _send_folder(api, folder, allow_other_files, force, workers, echo, '没有上传批次')
+    b = api.create_batch({'name': name, 'pool': pool, 'dir': d, 'manifest_sha256': digest, 'labeler': labeler,
+                          'note': note, 'reviewer': reviewer, 'allow_other_files': allow_other_files, 'force': force,
+                          'source': f'fw batch upload {socket.gethostname()}:{folder.resolve()}'})
+    echo('已上传批次 ' + _batch_line(b))
+    for notice in b.get('notices') or []:
+        echo(f'  提醒：{notice}')
+    if b['status'] == 'open':
+        echo(f'  还没有提交复核：标完以后 fw batch update {b["name"]} <目录> 上传新的一版，再 fw batch submit {b["name"]} '
+             f'--reviewer <账号>')
+    return b
+
+
+def update_batch(api: Api, name: str, folder, labeler: str, reviewer: Optional[str] = None, note: str = '',
+                 allow_other_files: bool = False, force: bool = False, workers: int = 8,
+                 echo: Echo = print) -> dict:
+    """The next revision of an open or rejected batch, from the whole folder as it is now. reviewer: also send
+    it to review ('-': the reviewer asked last time)."""
+    if not (labeler or '').strip():
+        raise FwError('要写标注人姓名（--labeler）')
+    before = api.batch(name)
+    if 'revise' not in before['actions']:
+        raise FwError(f'{before["name"]} 现在是「{before["status_text"]}」，或者不是你的批次，不能上传新的一版')
+    digest, _, _ = _send_folder(api, folder, allow_other_files, force, workers, echo, '没有上传')
+    b = api.revise_batch(name, {'manifest_sha256': digest, 'labeler': labeler, 'note': note, 'reviewer': reviewer,
+                                'expect_latest_id': before['latest_id'], 'allow_other_files': allow_other_files,
+                                'force': force,
+                                'source': f'fw batch update {socket.gethostname()}:{Path(folder).resolve()}'})
+    echo('已上传 ' + _batch_line(b))
+    show_batch_compare(echo, api.compare_batch(b['name']))
+    return b
+
+
+def show_batch_compare(echo: Echo, c: dict, limit: int = 10) -> None:
+    f, i, x = c['files'], c['images'], c['boxes']
+    echo(f'{c["new"]} 相比 {c["old"]}：文件新增 {f["added"]["count"]}、修改 {f["modified"]["count"]}、'
+         f'删除 {f["deleted"]["count"]}、改名 {f["renamed"]["count"]}；图片 {i["old"]} → {i["new"]} 张'
+         f'（新增 {i["added"]}，去掉 {i["removed"]}）')
+    echo(f'  标注有变化的图片 {i["changed"]} 张：加框 {x["added"]}、删框 {x["removed"]}、挪动 {x["moved"]}、'
+         f'改类别 {x["relabeled"]}')
+    for row in i['examples'][:limit]:
+        if row['unreadable']:
+            detail = '标注读不出框，没有逐框比较'
+        else:
+            parts = [f'{title} {row[k]}' for k, title in (('added', '加框'), ('removed', '删框'), ('moved', '挪动'),
+                                                          ('relabeled', '改类别')) if row[k]]
+            detail = '、'.join(parts) + f'（{row["old_boxes"]} → {row["new_boxes"]} 个框）' if parts else ''
+        if row['image_changed']:
+            detail = '图片本身换了' + ('；' + detail if detail else '')
+        echo(f'    {row["image"]}：{detail}')
+    if i['changed'] > limit:
+        echo(f'    …… 共 {i["changed"]} 张，网页的批次页里可以逐张看')
+    if c['uncompared']:
+        echo(f'  还有 {c["uncompared"]} 张图片的标注太多，没有比较')
+
+
+def import_batch(api: Api, name: str, replace: bool = False, allow_other_files: bool = False, force: bool = False,
+                 note: str = '', dry_run: bool = False, confirm: Optional[Confirm] = None,
+                 echo: Echo = print) -> Optional[dict]:
+    """Add an approved batch to its pool as its folder: the same checks and report as fw dataset add; nothing
+    is uploaded, the files are on the server already."""
+    body = {'replace': replace, 'allow_other_files': allow_other_files, 'force': force}
+    preview = api.batch_step(name, 'import/preview', body)
+    echo(f'批次 {preview["batch"]["ref"]} 入库到 {preview["dataset"]}：'
+         + (f'在 {preview["parent"]} 的基础上' if preview['parent'] else '第一个版本'))
+    _show_change(echo, preview)
+    if preview['reasons']:
+        raise FwError('没有入库：\n  ' + '\n  '.join(preview['reasons']))
+    echo(f'新版本 {preview["ref"]}：{preview["file_count"]} 个文件，{size_text(preview["total_bytes"])}')
+    if dry_run:
+        echo('试运行：没有建版本')
+        return None
+    if confirm is not None and not confirm(f'确认建 {preview["ref"]} 吗？'):
+        echo('没有建版本')
+        return None
+    body.update(expect_latest_id=preview['expect_latest_id'], note=note)
+    out = api.batch_step(name, 'import', body)
+    version = out['version']
+    echo(f'已冻结 {version["ref"]}：{version["file_count"]} 个文件，{size_text(version["total_bytes"])}；'
+         f'批次 {out["batch"]["name"]} 已入库')
+    return version
+
+
 def remove_dirs(api: Api, name: str, dirs: Sequence[str], note: str = '', dry_run: bool = False,
                 confirm: Optional[Confirm] = None, echo: Echo = print) -> Optional[dict]:
     """Take folders out of dataset `name`: the next version is the newest one without them. Earlier versions

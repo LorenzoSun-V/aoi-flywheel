@@ -46,6 +46,8 @@ server/fwserver/     fw-server：只支持 Linux
   models.py          模型、模型版本、评估报告、发布、标签、追溯链
   changes.py         按目录改数据集：新版本 = 最新版本加上、换掉或去掉几个目录（fw dataset add / remove），服务器自己拼清单；
                      同名目录拒绝、重复图片和标注不一致的提醒；记下每个版本的目录变化（version_changes）
+  batches.py         标注批次：上传成冻结的一版（内部数据集 kind='batch' 的版本）、提交复核、退回、通过、入库（用 changes.create）、
+                     关闭；谁能做哪一步；两版之间逐图的框变化
   trainsets.py       训练集快照：配对图片和标注、核对类别、划分、摆出快照的目录，再用 datasets 建版本
   formats.py         读 LiteAnno JSON 和 YOLO txt、读图片文件头的尺寸、写 YOLO 和 COCO（纯函数）
   datasets.py        数据集和版本：建版本、冻结、差异、核对（verify）
@@ -159,7 +161,9 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 附件目录读不全就不登记；令牌不打印；指标只收标准 JSON 里的有限数 | `ops._folder_files`（`os.walk` 的 `onerror`）、`ops.register_model`、`models._no_nul` | `test_an_unreadable_folder_is_never_left_out`、`test_a_token_in_the_repository_is_never_printed`、`test_numbers_out_of_range` |
 | 登记前文件已经在服务器上；登记的指标来自存着的文件；同样的东西再登记返回已有的，不一样就拒绝 | `models.register_model_version`、`register_eval`、`register_release` | `test_register_and_get_a_model_version`、`test_what_a_model_version_must_be`、`test_eval_reports` |
 | 产线现在用的模型是部署时间最晚的发布，补登旧的不顶掉新的 | `models.current_release` | `test_releases_and_the_current_model` |
-| 每个接口都要一种能力，角色能做什么只在 `auth.CAPS` 一处定；现场实施只读（数据集、模型、文件）加登记发布，worker 只做任务 | `app.need`、`auth.CAPS` | `test_accounts.py`：`test_the_table_of_capabilities`、`test_every_endpoint_asks_for_a_capability`；各模块的 `test_roles` |
+| 每个接口都要一种能力，角色能做什么只在 `auth.CAPS` 一处定；现场实施只读（数据集、模型、文件）加登记发布和上传自己的标注批次，worker 只做任务 | `app.need`、`auth.CAPS` | `test_accounts.py`：`test_the_table_of_capabilities`、`test_every_endpoint_asks_for_a_capability`；各模块的 `test_roles` |
+| 批次的每一版是冻结的版本，不进数据池；标注人姓名必填；只有上传的账号（或管理员）能传新的一版和提交，只有被指定的复核人（或管理员）能通过和退回，现场实施不能复核和入库；看的不是最新一版就不受理；入库和批次状态在同一个事务里；批次、各版、经过都不能删，经过不能改，结束了的批次不能再变 | `batches.py`、`app.need`、数据库触发器（`0010_batches.sql`） | `test_batches.py`：`test_field_uploads_a_batch_that_stays_out_of_the_pool`、`test_only_owner_and_asked_reviewer_act`、`test_stale_revision_is_refused`、`test_import_fails_whole_when_the_freeze_fails`、`test_database_guards`、`test_every_step_is_an_event`；`test_web.py`：`test_a_batch_from_upload_to_the_pool_in_the_browser` |
+| 标注批次不能当数据池用：不能整份导入、加目录、当快照来源或测试集，也不在数据集列表里 | `datasets.MADE`、`datasets.create_version`、`changes.plan`、`trainsets._sources`、`evals`、`models.register_eval` | `test_batches_are_refused_where_pools_are_meant` |
 | 每一次改动都有一条操作记录，和改动在同一个事务里；被拒绝的改动不留记录；记录只增不改；凭据本身不进记录 | 各模块里的 `events.record`、数据库触发器（`0009_events_roles.sql`） | `test_changes_are_recorded_with_who_made_them`、`test_a_refused_change_leaves_no_record`、`test_the_record_cannot_be_rewritten` |
 | 总有一个在用的管理员；worker 账号不和人的角色互换；别人的凭据只有管理员能吊销 | `auth._keep_an_admin`、`auth.set_role`、`auth.revoke_token` | `test_the_last_administrator_stays`、`test_accounts_are_managed_over_http_by_administrators_only`、`test_everyone_sees_and_revokes_their_own_tokens_only` |
 | fw 和服务器互相报接口版本号，太旧的一边在第一次请求就被点名 | `contract.API_LEVEL` 等、`app.ApiLevel`、`Api._check_server` | `test_an_fw_older_than_the_server_accepts_is_told_to_update`、`test_a_server_older_than_fw_needs_is_named` |

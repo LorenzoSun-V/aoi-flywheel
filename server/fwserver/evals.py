@@ -118,6 +118,8 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     mv = models.get_model_version(conn, *_ref(params.get('model'), '评哪个模型版本'))
     data_ref, _, split = str(params.get('data') or '').partition(':')
     version = datasets.get_version(conn, *_ref(data_ref, '在哪个数据集版本上评'))
+    if version['kind'] == 'batch':
+        raise DatasetError(400, f'{version["ref"]} 是还没入库的标注批次，不能当测试集')
     snapshot = version['kind'] == 'trainset'
     dirs = params.get('dirs') or []
     if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):

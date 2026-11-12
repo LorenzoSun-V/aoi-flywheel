@@ -475,6 +475,8 @@ def register_eval(conn, store: Store, user_id: int, name: str, number: str, test
     mv = get_model_version(conn, name, _pinned(name, number))
     testset = datasets.get_version_by_id(conn, testset_id)
     split = split or ''
+    if testset['kind'] == 'batch':
+        raise DatasetError(400, f'{testset["ref"]} 是还没入库的标注批次，不能当测试集')
     if testset['kind'] == 'trainset':
         if split not in SPLITS:
             raise DatasetError(400, f'{testset["ref"]} 是训练集快照，要写明评的是哪个划分，例如 {testset["ref"]}:test')

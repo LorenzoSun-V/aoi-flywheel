@@ -34,10 +34,13 @@ def test_the_table_of_capabilities():
     assert set(auth.ROLES) == {'admin', 'algo', 'field', 'worker'}
     assert all(set(roles) <= set(auth.ROLES) and text for roles, text in auth.CAPS.values())
     # the three roles the user decided on (2026-11-12): admin; algo changes datasets, models, evaluations and
-    # jobs; field reads datasets and models, downloads and registers releases
+    # jobs, reviews batches; field reads datasets and models, downloads, registers releases, and uploads
+    # labelling batches (its own), which needs the upload of files
     assert auth.caps_of('algo') == sorted(['datasets.read', 'datasets.write', 'objects.upload', 'objects.download',
-                                           'models.read', 'models.write', 'jobs.read', 'jobs.write', 'events.read'])
-    assert auth.caps_of('field') == sorted(['datasets.read', 'objects.download', 'models.read', 'releases.write'])
+                                           'models.read', 'models.write', 'jobs.read', 'jobs.write', 'events.read',
+                                           'batches.read', 'batches.write', 'batches.review'])
+    assert auth.caps_of('field') == sorted(['datasets.read', 'objects.download', 'objects.upload', 'models.read',
+                                            'releases.write', 'batches.read', 'batches.write'])
     assert auth.caps_of('worker') == sorted(['objects.upload', 'objects.download', 'jobs.read', 'jobs.run'])
     assert set(auth.caps_of('admin')) == set(auth.CAPS) - {'jobs.run'}
 

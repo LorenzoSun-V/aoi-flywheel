@@ -177,6 +177,8 @@ def _sources(conn, refs: List[str]) -> List[Tuple[dict, dict]]:
         dataset = datasets.get_dataset(conn, name)
         if dataset['kind'] == 'trainset':
             raise DatasetError(400, f'{version["ref"]} 是训练集快照，来源要用数据池版本')
+        if dataset['kind'] == 'batch':
+            raise DatasetError(400, f'{version["ref"]} 是还没入库的标注批次，来源要用数据池版本；批次复核通过并入库后再用')
         if not dataset['site'] or not dataset['line']:
             raise DatasetError(400, f'{dataset["name"]} 没有填现场或产线，取出时的目录 <现场>/<产线>/ 定不下来；'
                                     f'换一个填了现场和产线的数据集')

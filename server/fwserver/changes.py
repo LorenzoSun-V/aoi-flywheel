@@ -104,7 +104,7 @@ class Plan:
 
 
 # --- labels of duplicate images ------------------------------------------------------------------------
-def _label_index(entries: List[Entry]) -> Dict[str, Entry]:
+def label_index(entries: List[Entry]) -> Dict[str, Entry]:
     """Labels by their path with the extension in lower case."""
     out: Dict[str, Entry] = {}
     for e in entries:
@@ -114,7 +114,7 @@ def _label_index(entries: List[Entry]) -> Dict[str, Entry]:
     return out
 
 
-def _label_of(image: str, labels: Dict[str, Entry]) -> Optional[Entry]:
+def label_of(image: str, labels: Dict[str, Entry]) -> Optional[Entry]:
     """The label an image is paired with (as trainsets._samples pairs them): the .json or .txt of its name in
     its folder, or the .txt where YOLO looks for it; a JSON wins over a txt."""
     stem = _stem(image)
@@ -172,12 +172,12 @@ def _duplicates(store: Store, kept: List[Entry], new: List[Entry], entries: List
     groups = sorted(sorted(paths) for paths in in_new.values() if len(paths) > 1)
     pairs = [(a, b) for a, b, _ in pool_pairs] + [(p, g[0]) for g in groups for p in g[1:]]
 
-    labels = _label_index(entries)
+    labels = label_index(entries)
     seen: Dict[str, Optional[Tuple[str, int, Any]]] = {}
     reads = 0
     differ, uncompared, not_uploaded = [], 0, 0
     for new_image, other in pairs:
-        a, b = _label_of(new_image, labels), _label_of(other, labels)
+        a, b = label_of(new_image, labels), label_of(other, labels)
         if a is None and b is None:
             continue
         if a is not None and b is not None and a[1] == b[1]:
@@ -222,8 +222,9 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
          force: bool = False) -> Plan:
     """add: [{dir, manifest_sha256, replace}], the manifest being the folder's own file list in the store."""
     dataset = datasets.get_dataset(conn, name)
-    if dataset['kind'] == 'trainset':
-        raise DatasetError(400, f'{dataset["name"]} 是训练集快照，只能用 fw trainset create 建新版本')
+    if dataset['kind'] in datasets.MADE:
+        what, how = datasets.MADE[dataset['kind']]
+        raise DatasetError(400, f'{dataset["name"]} 是{what}，只能用 {how} 建新版本')
     if not add and not remove:
         raise DatasetError(400, '要写新增或去掉哪个目录')
     if len(add) + len(remove) > MAX_DIRS:
@@ -326,9 +327,11 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
 
 def create(conn, store: Store, user_id: int, name: str, add: List[dict], remove: List[str],
            expect_latest_id: Optional[int], allow_other_files: bool = False, force: bool = False,
-           source: str = '', note: str = '', before_freeze=None) -> dict:
+           source: str = '', note: str = '', before_freeze=None, also=None) -> dict:
     """Make the version that plan() describes. expect_latest_id: the newest version the caller saw in its
-    preview; if the dataset moved on meanwhile nothing is made (409) and the caller previews again."""
+    preview; if the dataset moved on meanwhile nothing is made (409) and the caller previews again.
+    also(conn, version_id): more rows of the caller's, written in the same transaction before the version is
+    frozen (batches.py: the batch that went in)."""
     p = plan(conn, store, name, add, remove, allow_other_files, force)
     if (p.latest['id'] if p.latest else None) != expect_latest_id:
         now = p.latest['ref'] if p.latest else '没有版本'
@@ -343,6 +346,8 @@ def create(conn, store: Store, user_id: int, name: str, add: List[dict], remove:
                       'removed_count, content_sha256) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
                       (version_id, i, o.op, o.dir, o.file_count, o.total_bytes, o.removed_count,
                        bytes.fromhex(o.content_sha256) if o.content_sha256 else None))
+        if also is not None:
+            also(c, version_id)
 
     version = datasets.create_version(conn, store, user_id, p.dataset['name'], digest,
                                       p.latest['id'] if p.latest else None, expect_latest_id, source, note,

@@ -218,10 +218,11 @@ OBJECTS_TYPE = 'application/x-fw-objects'
 # MIN_SERVER_LEVEL when fw needs something older servers lack. Then the older side is told to update, by
 # name, instead of failing somewhere in the middle of a command.
 #   2  fw dataset add / remove (POST /datasets/<name>/changes), accounts and events over HTTP, capabilities in /me
+#   3  labelling batches (fw batch ..., /batches); field accounts upload files
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 2
+API_LEVEL = 3
 MIN_CLIENT_LEVEL = 1
-MIN_SERVER_LEVEL = 2
+MIN_SERVER_LEVEL = 3
 
 
 def peer_level(value: Optional[str]) -> int:

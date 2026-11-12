@@ -89,3 +89,11 @@ details ul { margin: 6px 0; max-height: 240px; overflow: auto; }
 details.bad summary { color: var(--bad); }
 details.warn summary { color: var(--warn); }
 @media (max-width: 900px) { .viewer { grid-template-columns: 1fr; } }
+
+.tabs a.on { font-weight: 600; color: inherit; border-bottom: 2px solid var(--accent); }
+.tabs a.button { margin-left: auto; }
+.tag.warn { background: #fff6e0; color: var(--warn); }
+.tag.bad { background: #fdecec; color: var(--bad); }
+.tag.ok { background: #e7f6ec; color: var(--ok); }
+.tag.muted { background: #f1f5f9; color: inherit; }
+textarea { font: inherit; width: 100%; }

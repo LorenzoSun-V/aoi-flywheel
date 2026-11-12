@@ -17,6 +17,12 @@ LIMIT = 500
 ACTIONS = {
     'dataset.create': '新建数据集',
     'version.create': '建版本',
+    'batch.upload': '上传批次版本',
+    'batch.submit': '批次提交复核',
+    'batch.reject': '退回批次',
+    'batch.approve': '批次复核通过',
+    'batch.import': '批次入库',
+    'batch.close': '关闭批次',
     'model.create': '新建模型',
     'model_version.register': '登记模型版本',
     'model_version.tag': '改模型标签',
