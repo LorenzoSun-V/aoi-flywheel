@@ -65,7 +65,7 @@ def test_field_uploads_a_batch_that_stays_out_of_the_pool(api, field, pool, day,
     b = ops.upload_batch(field, day, pool, '张三', name=new_name(), echo=echo)
     assert b['status'] == 'open' and b['revision'] == 1 and b['dir'] == '20261104' and b['pool'] == pool
     assert b['owner'] == tokens['field_name'] and b['labeler'] == '张三' and b['file_count'] == 3
-    assert b['actions'] == ['revise', 'submit', 'close']
+    assert b['actions'] == ['revise', 'prelabel', 'submit', 'close']
     assert any('还没有提交复核' in x for x in out)
     # the pool is untouched and the batch is not listed as a dataset
     assert api.dataset(pool)['latest']['number'] == 1

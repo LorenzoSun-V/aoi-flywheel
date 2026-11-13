@@ -146,6 +146,8 @@ export const api = {
   createBatch: (body) => call('/batches', { method: 'POST', body }),
   reviseBatch: (name, body) => call(`/batches/${encodeURIComponent(name)}/revisions`, { method: 'POST', body }),
   batchStep: (name, step, body) => call(`/batches/${encodeURIComponent(name)}/${step}`, { method: 'POST', body }),
+  batchPrelabels: (name) => call(`/batches/${encodeURIComponent(name)}/prelabel`),
+  prelabelBatch: (name, body) => call(`/batches/${encodeURIComponent(name)}/prelabel`, { method: 'POST', body }),
   compareBatch: (name, older, newer) => call(`/batches/${encodeURIComponent(name)}/compare?old=${older}&new=${newer}`),
   events: (query) => call(`/events?${new URLSearchParams(query)}`),
 };
@@ -1629,6 +1631,29 @@ async function batchPage(name, query) {
       forms.push(el('div', { class: 'row' }, el('a', { class: 'button', href: hrefOf(['batch-up', b.name]) }, '上传新的一版'),
         el('span', { class: 'muted' }, `或者：fw batch get ${b.name}，用 LiteAnno 改好后 fw batch update ${b.name} <目录> --labeler <姓名>`)));
     }
+    const pre = await api.batchPrelabels(b.name);
+    if (pre.prelabels.some((r) => ['queued', 'running'].includes(r.status))) refreshLater(async () => {  // not while something is being typed
+      if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) await draw();
+    }, 10000);
+    if (has('prelabel')) {
+      const d = pre.defaults;
+      const model = el('input', { type: 'text', id: 'prelabel-model', value: d.model ? d.model.ref : '',
+        placeholder: '模型版本，例如 det-ses@3' });
+      const runner = el('select', { id: 'prelabel-runner' }, d.runners.map((r) => el('option', { value: r }, r)));
+      const conf = el('input', { type: 'text', id: 'prelabel-conf', placeholder: '0.1', style: 'width:5em' });
+      forms.push(el('div', { class: 'panel form' },
+        el('p', { class: 'muted' }, `预标注：让模型先给第 ${b.revision} 版的图画框，在 GPU 机上排队跑；跑完用 fw batch get ${b.name} --prelabel 取到本地改。`
+          + (d.model ? `默认用 ${d.site}/${d.line} 现在发布的模型（${d.model.release}）。` : `${d.site}/${d.line} 还没有登记过发布，要写用哪个模型版本。`)),
+        el('label', {}, '模型版本', model),
+        d.runners.length ? el('label', {}, '推理环境', runner) : el('p', { class: 'bad' }, '还没有能推理的推理环境，请算法工程师在 GPU 机上登记。'),
+        el('label', {}, '最低分数', conf),
+        el('div', { class: 'row' }, el('button', { id: 'prelabel-go', disabled: !d.runners.length, onclick: act(async () => {
+          const c = conf.value.trim();
+          if (c && !(Number(c) > 0 && Number(c) < 1)) throw new Error('最低分数要在 0 和 1 之间');
+          await api.prelabelBatch(b.name, { model: model.value.trim() || null, runner: runner.value || null,
+            conf: c ? Number(c) : null, revision: b.revision });
+        }) }, '跑预标注'))));
+    }
     if (has('submit')) {
       const names = await api.reviewers();
       const who = reviewerSelect(names, '选复核人');
@@ -1684,7 +1709,7 @@ async function batchPage(name, query) {
       el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '和上一版比') : '')));
     const steps = b.steps.map((s) => el('tr', {},
       el('td', {}, when(s.at)), el('td', {}, s.actor),
-      el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
+      el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.job_id ? `（任务 ${s.job_id}）` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
         s.pool_version ? ['，成为 ', vref(s.pool_version)] : null),
       el('td', {}, s.comment, s.images.length ? el('ul', { class: 'mono' }, s.images.map((i) => el('li', {},
         el('a', { href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i)))) : null)));
@@ -1696,6 +1721,16 @@ async function batchPage(name, query) {
       msg, forms,
       el('h2', {}, '各版'),
       el('table', {}, el('tr', {}, ['版次', '大小', '标注人', '上传账号', '时间', '说明', ''].map((h) => el('th', {}, h))), revisions),
+      pre.prelabels.length ? [el('h2', {}, '预标注'),
+        el('table', { id: 'prelabels' }, el('tr', {}, ['版次', '模型版本', '状态', '图片', '框', '提交', '结果'].map((h) => el('th', {}, h))),
+          pre.prelabels.map((r) => el('tr', {},
+            el('td', {}, `第 ${r.revision} 版`), el('td', {}, can('models.read') ? mref(r.model) : r.model),
+            el('td', {}, r.status_text + (r.status === 'queued' ? `（前面还有 ${r.queued_ahead} 个）` : ''),
+              r.error ? el('div', { class: 'bad' }, r.error) : null),
+            el('td', {}, String(r.images)), el('td', {}, r.boxes == null ? '' : String(r.boxes)),
+            el('td', {}, `${r.submitted_by}，${when(r.created_at)}`),
+            el('td', {}, r.prediction_set ? [el('a', { href: hrefOf(['p', String(r.prediction_set)]) }, `预测集 #${r.prediction_set}`),
+              r.revision === b.revision ? el('div', { class: 'mono muted' }, `fw batch get ${b.name} --prelabel`) : null] : ''))))] : null,
       compare ? [el('h2', {}, '这一版改了什么'), compareTable(compare)] : null,
       el('h2', {}, '经过'),
       el('table', {}, el('tr', {}, ['时间', '账号', '做了什么', '意见'].map((h) => el('th', {}, h))), steps));

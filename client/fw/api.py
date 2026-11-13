@@ -266,6 +266,12 @@ class Api:
         """step: submit, reject, approve, close, import/preview, import."""
         return self.post(f'/batches/{name}/{step}', body)
 
+    def prelabel_batch(self, name: str, body: dict):
+        return self.post(f'/batches/{name}/prelabel', body)
+
+    def batch_prelabels(self, name: str):
+        return self.get(f'/batches/{name}/prelabel')
+
     def compare_batch(self, name: str, old: Optional[int] = None, new: Optional[int] = None):
         return self.get(f'/batches/{name}/compare', **{k: v for k, v in (('old', old), ('new', new)) if v is not None})
 

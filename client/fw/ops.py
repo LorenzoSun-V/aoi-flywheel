@@ -533,6 +533,58 @@ def show_batch_compare(echo: Echo, c: dict, limit: int = 10) -> None:
         echo(f'  还有 {c["uncompared"]} 张图片的标注太多，没有比较')
 
 
+def prelabel_batch(api: Api, name: str, model: Optional[str] = None, runner: Optional[str] = None,
+                   conf: Optional[float] = None, wait: bool = False, poll: float = 5.0,
+                   echo: Echo = print) -> dict:
+    """Have the newest revision of a batch pre-labelled by a model version (default: the one released on the
+    pool's line). Returns the pre-label's row (job, state, prediction set once done). wait: until it ended."""
+    body = {'model': model, 'runner': runner}
+    if conf is not None:
+        body['conf'] = conf
+    job = api.prelabel_batch(name, body)
+    p = job['params']
+    if job.get('reused'):
+        echo(f'同样的预标注已经有了：任务 {job["id"]}（{job["status_text"]}），不再排队')
+    else:
+        echo(f'已提交预标注：{p["model"]["ref"]} 在 {p["data"]["ref"]} 上，{p["data"]["images"]} 张图，推理环境 {job["runner"]}，'
+             f'保留分数不低于 {p["conf"]:g} 的框；前面还有 {job["queued_ahead"]} 个任务')
+
+    def row() -> dict:
+        return [x for x in api.batch_prelabels(name)['prelabels'] if x['job_id'] == job['id']][0]
+
+    r = row()
+    while wait and r['status'] in ('queued', 'running'):
+        time.sleep(poll)
+        r = row()
+    if r['status'] == 'done':
+        echo(f'预标注好了（{r["boxes"]} 个框）：fw batch get {name} --prelabel 取到本地，用 LiteAnno 改好后 '
+             f'fw batch update {name} <目录> --labeler <姓名>')
+    elif r['status'] in ('queued', 'running'):
+        echo(f'看进度：fw batch show {name}；跑完以后 fw batch get {name} --prelabel')
+    else:
+        raise FwError(f'预标注任务 {r["job_id"]} {r["status_text"]}' + (f'：{r["error"]}' if r['error'] else ''))
+    return r
+
+
+def get_batch_prelabels(api: Api, cache: Cache, name: str, dest, threshold: Optional[float] = None,
+                        replace: bool = False, workers: int = 8, echo: Echo = print) -> dict:
+    """Lay out the newest revision of a batch with its pre-labels (get_predictions), as plain files that can
+    be edited. The pre-label used is the newest one that finished for that revision."""
+    b = api.batch(name)
+    rows = [r for r in api.batch_prelabels(name)['prelabels'] if r['revision'] == b['revision']]
+    done = [r for r in rows if r['status'] == 'done']
+    if not done:
+        busy = [r for r in rows if r['status'] in ('queued', 'running')]
+        if busy:
+            raise FwError(f'{b["name"]} 第 {b["revision"]} 版的预标注还没跑完（任务 {busy[0]["job_id"]}，{busy[0]["status_text"]}）；'
+                          f'过一会儿再取')
+        raise FwError(f'{b["name"]} 第 {b["revision"]} 版还没有预标注；先 fw batch prelabel {b["name"]}')
+    r = done[0]
+    echo(f'{b["name"]} 第 {b["revision"]} 版的预标注：{r["model"]}，预测集 #{r["prediction_set"]}')
+    return get_predictions(api, cache, r['prediction_set'], dest, threshold=threshold, replace=replace, link='copy',
+                           workers=workers, echo=echo)
+
+
 def import_batch(api: Api, name: str, replace: bool = False, allow_other_files: bool = False, force: bool = False,
                  note: str = '', dry_run: bool = False, confirm: Optional[Confirm] = None,
                  echo: Echo = print) -> Optional[dict]:

@@ -18,6 +18,9 @@
   fw dataset add (a folder the pool already has is refused unless replaced; duplicate images are reported).
   The pool version's source is `batch:<name>@<revision>`, and the batch keeps the pool version's id; both are
   written in the transaction that freezes the pool version.
+- Pre-labels: the owner asks for a model version to be run over the newest revision of an open or rejected
+  batch (predictions.submit_for_batch; the job is noted here), fetches the result as a folder with
+  fw batch get --prelabel, corrects it and uploads it as the next revision.
 - Every step is a row of batch_steps (only ever added) and an event, in the transaction of the step.
 
 Who may do what beyond the capability the endpoint asks for: only the owner (or an administrator) uploads
@@ -38,7 +41,8 @@ from .store import Store
 
 STATUS = {'open': '待提交复核', 'review': '待复核', 'rejected': '已退回', 'approved': '复核通过', 'imported': '已入库',
           'closed': '已关闭'}
-STEPS = {'upload': '上传', 'submit': '提交复核', 'reject': '退回', 'approve': '通过', 'import': '入库', 'close': '关闭'}
+STEPS = {'upload': '上传', 'submit': '提交复核', 'reject': '退回', 'approve': '通过', 'import': '入库', 'close': '关闭',
+         'prelabel': '预标注'}
 UNFINISHED = ('open', 'review', 'rejected', 'approved')
 MAX_COMMENT = 2000
 MAX_IMAGES = 500         # images a rejection points at
@@ -89,6 +93,8 @@ def _actions(user: Optional[dict], b: dict) -> List[str]:
     out = []
     if _owns(user, b) and b['status'] in ('open', 'rejected'):
         out.append('revise')
+    if _owns(user, b) and b['status'] in ('open', 'rejected'):
+        out.append('prelabel')
     if _owns(user, b) and b['status'] == 'open':
         out.append('submit')
     if _reviews(user, b) and b['status'] == 'review':
@@ -137,11 +143,11 @@ def _same_revision(b: dict, latest: dict, revision: Optional[int]) -> None:
 
 def _step(conn, batch_id: int, actor_id: int, step: str, version_id: Optional[int], comment: str = '',
           reviewer_id: Optional[int] = None, self_review: bool = False, images: Optional[List[str]] = None,
-          pool_version_id: Optional[int] = None) -> None:
+          pool_version_id: Optional[int] = None, job_id: Optional[int] = None) -> None:
     conn.execute('INSERT INTO batch_steps (batch_id, actor_id, step, version_id, reviewer_id, self_review, comment, '
-                 'images, pool_version_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                 'images, pool_version_id, job_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
                  (batch_id, actor_id, step, version_id, reviewer_id, self_review, comment,
-                  json.dumps(images or [], ensure_ascii=False), pool_version_id))
+                  json.dumps(images or [], ensure_ascii=False), pool_version_id, job_id))
 
 
 def _text(value: Any, what: str, limit: int, required: bool = False) -> str:
@@ -407,6 +413,43 @@ def close(conn, user: dict, name: str, comment: str = '') -> dict:
     return get(conn, name, user)
 
 
+# --- pre-labels ---------------------------------------------------------------------------------------
+def prelabel_target(conn, user: dict, name: str, revision: Optional[int] = None, lock: bool = False) -> dict:
+    """The batch and its newest revision, if this account may have it pre-labelled now (predictions.py)."""
+    b = _find(conn, name, lock=lock)
+    if not _owns(user, b):
+        raise DatasetError(403, f'{b["name"]} 不是你的批次；只有上传它的账号能给它跑预标注')
+    if b['status'] not in ('open', 'rejected'):
+        raise DatasetError(409, f'{b["name"]} 现在是「{STATUS[b["status"]]}」，不能跑预标注；'
+                                f'预标注是给还在标的批次用的（待提交复核或已退回）')
+    latest = _latest(conn, b)
+    _same_revision(b, latest, revision)
+    return dict(b, latest_id=latest['id'], revision=latest['number'], ref=f'{b["name"]}@{latest["number"]}')
+
+
+def note_prelabel(conn, user: dict, b: dict, job_id: int, what: str) -> None:
+    """Inside the transaction that queued (or found) the job, with the batch locked: one step per job."""
+    if conn.execute('SELECT 1 FROM batch_steps WHERE batch_id = %s AND job_id = %s', (b['id'], job_id)).fetchone():
+        return
+    _step(conn, b['id'], user['user_id'], 'prelabel', b['latest_id'], comment=what, job_id=job_id)
+    conn.execute('UPDATE batches SET updated_at = now() WHERE id = %s', (b['id'],))
+    events.record(conn, user['user_id'], 'batch.prelabel', b['ref'], job_id=job_id, what=what)
+
+
+def prelabel_jobs(conn, name: str) -> List[Tuple[int, int]]:
+    """(job id, revision) of every pre-label asked for, oldest first."""
+    b = _find(conn, name)
+    return [(r['job_id'], r['number']) for r in conn.execute(
+        'SELECT s.job_id, v.number FROM batch_steps s JOIN versions v ON v.id = s.version_id '
+        'WHERE s.batch_id = %s AND s.job_id IS NOT NULL ORDER BY s.id', (b['id'],))]
+
+
+def pool_of(conn, name: str) -> dict:
+    """The batch's pool: name, site, line."""
+    b = _find(conn, name)
+    return conn.execute('SELECT name, site, line FROM datasets WHERE id = %s', (b['pool_id'],)).fetchone()
+
+
 # --- into the pool -----------------------------------------------------------------------------------
 def _approved(conn, name: str) -> Tuple[dict, dict]:
     b = get(conn, name)
@@ -495,11 +538,11 @@ def get(conn, name: str, user: Optional[dict] = None) -> dict:
     out['steps'] = [
         {'at': _stamp(s['at']), 'actor': s['actor'], 'step': s['step'], 'step_text': STEPS[s['step']],
          'revision': numbers.get(s['version_id']), 'reviewer': s['reviewer'], 'self_review': s['self_review'],
-         'comment': s['comment'], 'images': s['images'],
+         'comment': s['comment'], 'images': s['images'], 'job_id': s['job_id'],
          'pool_version': f'{row["pool"]}@{s["pool_number"]}' if s['pool_number'] is not None else None}
         for s in conn.execute(
             'SELECT s.at, a.name AS actor, s.step, s.version_id, r.name AS reviewer, s.self_review, s.comment, '
-            's.images, pv.number AS pool_number FROM batch_steps s JOIN users a ON a.id = s.actor_id '
+            's.images, s.job_id, pv.number AS pool_number FROM batch_steps s JOIN users a ON a.id = s.actor_id '
             'LEFT JOIN users r ON r.id = s.reviewer_id LEFT JOIN versions pv ON pv.id = s.pool_version_id '
             'WHERE s.batch_id = %s ORDER BY s.id', (row['id'],))]
     return out

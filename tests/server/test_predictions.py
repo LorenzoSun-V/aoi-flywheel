@@ -247,3 +247,92 @@ def test_verify_names_prediction_sets(sql, api, gpu, setup):  # noqa: F811
     _, wanted, _ = models.verify_inputs(sql)
     assert wanted[s['inputs_sha256']] == (None, f'预测集 #{s["id"]} 的图片清单')
     assert all(wanted[f['sha256']][1] == f'预测集 #{s["id"]}' for f in s['files'])
+
+
+# --- pre-labelling a labelling batch ---------------------------------------------------------------------
+def raw_folder(tmp_path, name='20261105'):
+    from helpers import write
+    folder = tmp_path / name
+    for i in range(3):
+        write(folder, f'raw{i}.png', png(f'batch-raw-{i}-{os.urandom(4).hex()}'))
+    return folder
+
+
+def test_a_batch_is_pre_labelled_by_its_owner(api, make_api, gpu, setup, tmp_path, tokens, monkeypatch, capsys):  # noqa: F811
+    mv, data, r, _ = setup
+    field, other = make_api('field'), make_api('deploy')
+    folder = raw_folder(tmp_path)
+    name = f'B-{os.urandom(4).hex()}'
+    b = ops.upload_batch(field, folder, data.split('@')[0], '张三', name=name, echo=quiet)
+    assert 'prelabel' in b['actions']
+    # a field account cannot submit jobs in general, only the pre-label of its own batch
+    assert status_of(lambda: field.submit_job('predict', runner=r['runner'], params={'model': mv['ref'],
+                                                                                    'data': f'{name}@1'})) == 403
+    assert status_of(lambda: other.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner']})) == 403
+    assert status_of(lambda: field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner'],
+                                                        'revision': 2})) == 409
+    assert status_of(lambda: field.prelabel_batch(name, {'model': 'no-such@1', 'runner': r['runner']})) == 404
+    assert field.batch_prelabels(name)['prelabels'] == []
+    out = []
+    row = ops.prelabel_batch(field, name, model=mv['ref'], runner=r['runner'], echo=out.append)
+    assert row['status'] == 'queued' and row['revision'] == 1 and row['model'] == mv['ref'] and row['images'] == 3
+    assert any('已提交预标注' in x for x in out)
+    again = field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner']})
+    assert again['reused'] and again['id'] == row['job_id']
+    b = field.batch(name)
+    steps = [s for s in b['steps'] if s['step'] == 'prelabel']
+    assert len(steps) == 1 and steps[0]['job_id'] == row['job_id'] and mv['ref'] in steps[0]['comment']
+    assert steps[0]['actor'] == tokens['field_name'] and steps[0]['revision'] == 1
+    e = api.events(action='batch.prelabel', q=name)['events']
+    assert len(e) == 1 and e[0]['detail']['job_id'] == row['job_id'] and e[0]['actor'] == tokens['field_name']
+    cache = Cache(tmp_path / 'cache')
+    try:
+        with pytest.raises(ops.FwError, match='还没跑完'):
+            ops.get_batch_prelabels(field, cache, name, tmp_path / 'early', echo=quiet)
+        run_job(api, gpu, {'id': row['job_id']})
+        [done] = field.batch_prelabels(name)['prelabels']
+        assert done['status'] == 'done' and done['boxes'] == 3 and done['prediction_set']
+        got = ops.get_batch_prelabels(field, cache, name, tmp_path / 'work', echo=quiet)
+        assert got['prelabeled'] == 3 and got['kept'] == 0
+        doc = json.loads((tmp_path / 'work' / 'raw0.json').read_text(encoding='utf-8'))
+        assert doc['checked'] is False and doc['flywheel']['model'] == mv['ref']
+        # the files are plain copies: correcting them and uploading the folder is the next revision
+        doc['checked'] = True
+        (tmp_path / 'work' / 'raw0.json').write_text(json.dumps(doc), encoding='utf-8')
+        b = ops.update_batch(field, name, tmp_path / 'work', '张三', reviewer=tokens['algo_name'], echo=quiet)
+        assert b['revision'] == 2 and b['status'] == 'review' and b['file_count'] == 7
+        # in review it is no longer the owner's to pre-label, and revision 2 has no pre-labels of its own
+        assert 'prelabel' not in b['actions']
+        assert status_of(lambda: field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner']})) == 409
+        with pytest.raises(ops.FwError, match='还没有预标注'):
+            ops.get_batch_prelabels(field, cache, name, tmp_path / 'none', echo=quiet)
+    finally:
+        cache.close()
+    # the command line
+    monkeypatch.setattr(ops, 'connect', lambda: field)
+    monkeypatch.setattr(field, 'close', lambda: None)
+    assert fw_cli.main(['batch', 'show', name]) == 0
+    assert f'预标注第 1 版（任务 {row["job_id"]}，{done["status_text"]}）' in capsys.readouterr().out
+
+
+def test_pre_label_defaults(api, make_api, gpu, setup, tmp_path):  # noqa: F811
+    mv, data, r, _ = setup
+    field = make_api('field')
+    # a line without a release: the model must be named
+    lonely = pool(api, tmp_path, sample_files('A', 1), line=f'L{os.urandom(3).hex()}')
+    b = ops.upload_batch(field, raw_folder(tmp_path, 'x1'), lonely, '张三', name=f'B-{os.urandom(4).hex()}', echo=quiet)
+    d = field.batch_prelabels(b['name'])['defaults']
+    assert d['model'] is None and r['runner'] in d['runners']
+    with pytest.raises(Exception, match='还没有登记过发布'):
+        field.prelabel_batch(b['name'], {'runner': r['runner']})
+    # with a release on the pool's line, that model version is the default
+    from test_models import release
+    import datetime
+    release(make_api('deploy'), mv['ref'], datetime.datetime.now().astimezone().isoformat())
+    b = ops.upload_batch(field, raw_folder(tmp_path, 'x2'), data.split('@')[0], '张三',
+                         name=f'B-{os.urandom(4).hex()}', echo=quiet)
+    d = field.batch_prelabels(b['name'])['defaults']
+    assert d['model']['ref'] and d['site'] == 'SES' and d['line'] == 'TX'
+    job = field.prelabel_batch(b['name'], {'runner': r['runner']})
+    assert job['params']['model']['ref'] == d['model']['ref'] and job['params']['data']['ref'] == f'{b["name"]}@1'
+    api.cancel_job(job['id'])

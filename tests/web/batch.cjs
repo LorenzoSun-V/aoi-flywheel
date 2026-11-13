@@ -60,6 +60,7 @@ const { chromium } = require('playwright');
   await field.reload();
   await field.waitForSelector('a:has-text("上传新的一版")');
   seen.rejected = await field.textContent('main');
+  seen.prelabel = await field.locator('#prelabel-go').count();  // the owner may have a rejected batch pre-labelled
   await field.click('a:has-text("上传新的一版")');
   await field.waitForSelector('#labeler');
   await field.setInputFiles('input[type=file]', fixed);
