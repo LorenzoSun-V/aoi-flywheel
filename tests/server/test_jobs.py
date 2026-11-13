@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -789,3 +790,105 @@ def test_what_the_worker_says_is_seen_at_once_when_it_is_not_on_a_terminal(servi
     finally:
         p.kill()
         p.wait(10)
+
+
+# --- found on the real machine, 2026-11-13: what a killed worker leaves behind -------------------------------
+def fw_worker(service, sql, tmp_path, **more):
+    """A real `fw worker` process with an account of its own: (process, its Api)."""
+    name = f'gpu-{uuid.uuid4().hex[:6]}'
+    auth.add_user(sql, name, 'worker')
+    token = auth.create_token(sql, name, 'killed')[0]
+    env = dict(os.environ, FW_SERVER=service.url, FW_TOKEN=token, FW_CONFIG=str(tmp_path / 'none.json'),
+               FW_CACHE=str(tmp_path / 'cache'), **more)
+    p = subprocess.Popen([sys.executable, '-c', 'import sys; from fw.cli import main; sys.exit(main())', 'worker'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    a = Api(service.url, token)
+    a.name = name
+    return p, a
+
+
+def test_what_a_killed_worker_left_running_is_stopped_by_the_next_worker(api, service, sql, make_worker, fake_conda,
+                                                                         tmp_path):
+    """A worker killed with -9 cannot stop its command (it runs in a session of its own and lives on, holding
+    the GPU while the retry runs). The next worker on the machine stops it before it runs anything."""
+    p, w = fw_worker(service, sql, tmp_path)
+    left = []
+    try:
+        r = runner(w, fake_conda)
+        (fake_conda.listings / f'{r["conda_env"]}.hang').write_text('')
+        api.submit_job('check', runner=r['runner'])
+        pids = fake_conda.listings / f'{r["conda_env"]}.pids'
+        for _ in range(200):
+            if pids.exists() and pids.read_text().strip():
+                break
+            time.sleep(0.1)
+        left = list(map(int, pids.read_text().split()))
+        p.kill()
+        p.wait(10)
+        time.sleep(0.5)
+        assert all(alive(pid) for pid in left)  # the fault: nothing stopped them
+        mine = subprocess.Popen(['sleep', '63'], env=dict(os.environ, **worker.owner_mark()))  # of a live worker
+        left.append(mine.pid)
+        said = []
+        assert worker.run_worker(make_worker(), said.append, once=True) == 0
+        assert not any(alive(pid) for pid in left[:2])
+        assert mine.poll() is None  # what a worker that is still there runs is not touched
+        assert any('2 个进程' in line for line in said)
+    finally:
+        p.kill()
+        for pid in left:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        w.close()
+
+
+HOLD = ('import sys, time\n'
+        'from pathlib import Path\n'
+        'from fw import worker\n'
+        'with worker.held_folder(Path(sys.argv[1])) as f:\n'
+        '    f.mkdir()\n'
+        '    (f / "x").write_text("x")\n'
+        '    print("held", flush=True)\n'
+        '    time.sleep(60)\n')
+
+
+def test_the_folders_a_killed_worker_left_are_removed_by_the_next_worker(make_worker, tmp_path, monkeypatch):
+    """A killed worker cannot remove its job folder (found on the real machine: one per killed claim, about
+    120 MB each). The next worker removes the folders no running worker holds, and nothing else."""
+    jobs = tmp_path / 'jobs'
+    jobs.mkdir()
+    monkeypatch.setenv('FW_WORK_DIR', str(jobs))
+    dead = subprocess.Popen([sys.executable, '-c', HOLD, str(jobs / 'job-7-1')], stdout=subprocess.PIPE)
+    live = subprocess.Popen([sys.executable, '-c', HOLD, str(jobs / 'job-8-1')], stdout=subprocess.PIPE)
+    try:
+        assert dead.stdout.readline() == b'held\n' and live.stdout.readline() == b'held\n'
+        dead.kill()
+        dead.wait(10)
+        (jobs / 'job-3-2').mkdir()  # left by a worker older than this rule: no one holds it
+        (jobs / 'job-3-2' / 'data').mkdir()
+        (jobs / 'notes').mkdir()  # not a job folder
+        (jobs / 'job-x').mkdir()
+        said = []
+        assert worker.run_worker(make_worker(), said.append, once=True) == 0
+        assert sorted(p.name for p in jobs.iterdir() if not p.name.endswith('.lock')) == ['job-8-1', 'job-x', 'notes']
+        assert sorted(p.name for p in jobs.glob('*.lock')) == ['job-8-1.lock']
+        assert any('2 个任务目录' in line for line in said)
+        # and not while the folders are being kept to look into a problem
+        (jobs / 'job-9-1').mkdir()
+        monkeypatch.setenv('FW_KEEP_WORK', '1')
+        worker.run_worker(make_worker(), said.append, once=True)
+        assert (jobs / 'job-9-1').is_dir()
+    finally:
+        dead.kill()
+        live.kill()
+        live.wait(10)
+
+
+def test_a_job_folder_is_gone_with_its_lock_when_the_job_ends(tmp_path):
+    folder = tmp_path / 'job-1-1'
+    with worker.held_folder(folder) as f:
+        f.mkdir()
+        assert worker.sweep_folders(tmp_path) == 0 and f.is_dir()  # held by this very process
+    assert list(tmp_path.iterdir()) == []
