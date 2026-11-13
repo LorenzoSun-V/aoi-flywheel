@@ -544,12 +544,12 @@ def sweep_processes(wait: float = 10.0) -> int:
     for d in proc.iterdir():
         if not d.name.isdigit() or int(d.name) == os.getpid():
             continue
+        was = _started(int(d.name))  # read first: the environment and the kill are then of this one process
         try:
             env = (d / 'environ').read_bytes()  # other accounts' processes cannot be read: not ours
         except OSError:
             continue
         mark = next((v[len(needle):] for v in env.split(b'\0') if v.startswith(needle)), None)
-        was = _started(int(d.name))
         if mark is None or was is None or not _owner_gone(mark.decode('ascii', 'replace')):
             continue
         try:
