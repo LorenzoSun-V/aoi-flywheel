@@ -98,3 +98,18 @@ details.warn summary { color: var(--warn); }
 .tag.ver { background: #e7f6ec; color: var(--ok); font-variant-numeric: tabular-nums; }
 .tag.muted { background: #f1f5f9; color: inherit; }
 textarea { font: inherit; width: 100%; }
+
+/* browsing by site and line: the tree on the left of the list pages */
+.browse { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
+#places { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; position: sticky; top: 60px; }
+#places ul { list-style: none; margin: 8px 0 0; padding: 0; }
+#places li a { display: flex; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 6px; color: inherit; }
+#places li a:hover { background: #f1f5f9; text-decoration: none; }
+#places li a.on { background: #eef2ff; color: #3730a3; font-weight: 600; }
+#places li.site { margin-top: 6px; font-weight: 600; }
+#places li.line a { padding-left: 22px; font-weight: 400; }
+#places li.line a.on { font-weight: 600; }
+#places .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.browse .list > form.row { margin-bottom: 12px; }
+.browse .list > h2:first-of-type { margin-top: 0; }
+.small { font-size: 12px; }

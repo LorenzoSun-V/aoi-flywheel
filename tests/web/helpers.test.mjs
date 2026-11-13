@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
+  scopeOf, scopeQuery,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -117,4 +118,11 @@ test('sha256 in plain JS', async () => {
   }
   const big = randomBytes((4 << 20) + 5);  // more than one chunk of a file
   assert.equal(await hashFile(new Blob([big])), createHash('sha256').update(big).digest('hex'));
+});
+
+test('the site and line being browsed, from the address', () => {
+  assert.deepEqual(scopeOf(new URLSearchParams('site=SES&line=TX&q=det')), { site: 'SES', line: 'TX', q: 'det' });
+  assert.deepEqual(scopeOf(new URLSearchParams('line=TX')), { site: '', line: '', q: '' });  // a line belongs to a site
+  assert.deepEqual(scopeQuery({ site: 'SES', line: '', q: '' }, { todo: true, mine: false }), { todo: true, site: 'SES' });
+  assert.deepEqual(scopeQuery({ site: '', line: '', q: '' }), {});
 });
