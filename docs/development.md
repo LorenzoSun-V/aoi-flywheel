@@ -12,6 +12,7 @@
 | `docs/manifest-format.md` | 清单格式 1 | 格式变了（只能出新版本，见下文） |
 | `docs/dev-guide.md` | 常见任务一步一步怎么做（加命令、加接口、加表、改网页）、测试里踩过的坑、提交前的核对清单 | 做法或约定变了，或者又踩了一个值得记下的坑 |
 | `CLAUDE.md`（仓库根目录） | 给 Claude 的工作说明：检查命令、绝对不要做的事、每个改动要带上什么 | 检查命令或硬规则变了 |
+| `docs/worker-fault-tests.md` | 在真机上测 worker 被杀、断电、断网、取消时任务怎么收场的步骤和记录表 | 租约、重试、取消的规则变了，或者真机上测出了和预期不一样的地方 |
 | `docs/trainset-format.md` | 训练集快照的目录、`classes.txt`、`trainset.json`、划分规则 | 快照格式或划分规则变了 |
 | `docs/development.md` | 本文 | 分层、规则、测试方式变了 |
 | `CHANGELOG.md` | 每个 PR 用户能看到的变化 | 每个 PR |

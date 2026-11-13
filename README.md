@@ -2,7 +2,7 @@
 
 数据飞轮平台的底座：数据集版本、模型版本、预标注（推理）。设计见[架构文档](docs/architecture.md)（[在线版](https://claude.ai/artifact/A8f2NKVHhLEF295TwomviL)）。
 
-文档：[命令手册](docs/commands.md)（全部命令、选项、环境变量和常见问题）、[维护和开发说明](docs/development.md)（代码结构、不能破的规则、测试、怎么扩展）、[开发指南](docs/dev-guide.md)（常见任务一步一步怎么做）、[清单格式](docs/manifest-format.md)、[训练集快照的格式](docs/trainset-format.md)、[更新记录](CHANGELOG.md)。
+文档：[命令手册](docs/commands.md)（全部命令、选项、环境变量和常见问题）、[维护和开发说明](docs/development.md)（代码结构、不能破的规则、测试、怎么扩展）、[开发指南](docs/dev-guide.md)（常见任务一步一步怎么做）、[真机上测 worker 故障的步骤](docs/worker-fault-tests.md)、[清单格式](docs/manifest-format.md)、[训练集快照的格式](docs/trainset-format.md)、[更新记录](CHANGELOG.md)。
 
 分四步做，每步一个 PR：
 
