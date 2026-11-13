@@ -549,9 +549,12 @@ def sweep_processes(wait: float = 10.0) -> int:
         except OSError:
             continue
         mark = next((v[len(needle):] for v in env.split(b'\0') if v.startswith(needle)), None)
-        if mark is None or not _owner_gone(mark.decode('ascii', 'replace')) or _started(int(d.name)) is None:
+        was = _started(int(d.name))
+        if mark is None or was is None or not _owner_gone(mark.decode('ascii', 'replace')):
             continue
         try:
+            if _started(int(d.name)) != was:  # ended since its environment was read: the pid may be another's
+                continue
             os.kill(int(d.name), signal.SIGKILL)
             killed.append(int(d.name))
         except OSError:
