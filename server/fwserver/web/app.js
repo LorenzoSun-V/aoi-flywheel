@@ -107,6 +107,10 @@ export const api = {
   dataset: (name) => call(`/datasets/${encodeURIComponent(name)}`),
   versions: (name) => call(`/datasets/${encodeURIComponent(name)}/versions`),
   version: (name, number) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
+  labels: (name) => call(`/datasets/${encodeURIComponent(name)}/labels`),
+  addLabel: (name, number, label, note) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
+  modelLabels: (name) => call(`/models/${encodeURIComponent(name)}/labels`),
+  addModelLabel: (name, number, label, note) => call(`/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
   diff: (oldId, newId) => call(`/diff?old=${oldId}&new=${newId}`),
   object: (digest) => call(`/objects/${digest}`, { raw: true }),
   models: () => call('/models'),
@@ -259,6 +263,39 @@ function loginPage() {
   input.focus();
 }
 
+// A version's labels (v0.1.0), as chips after its name.
+function labelChips(v) {
+  return (v.labels || []).map((x) => [' ', el('span', { class: 'tag ver' }, x)]);
+}
+
+// The form that gives a version of a dataset, a snapshot or (model true) a model its label. The platform
+// proposes the next one after the highest so far; a label is written once and never moved.
+async function labelForm(name, versions, model, done) {
+  const info = await (model ? api.modelLabels(name) : api.labels(name));
+  const which = el('select', { id: 'label-version' }, versions.map((v) => el('option', { value: String(v.number) },
+    v.ref + ((v.labels || []).length ? `（${v.labels.join('、')}）` : ''))));
+  const label = el('input', { id: 'label-text', placeholder: 'v0.1.0', size: 12 });
+  const note = el('input', { id: 'label-note', placeholder: '备注（可不写）', size: 30 });
+  const msg = el('div', {});
+  const go = el('button', { id: 'label-go', class: 'primary', onclick: async () => {
+    go.disabled = true;
+    try {
+      await (model ? api.addModelLabel : api.addLabel)(name, which.value, label.value.trim(), note.value.trim());
+      await done();
+    } catch (e) { msg.replaceChildren(errorBox(e)); go.disabled = false; }
+  } }, '起版本号');
+  const retired = info.labels.filter((r) => r.retired);
+  return [el('h2', {}, '版本号'),
+    el('p', { class: 'muted' }, '给一个版本起 v主.次.修订 这样的版本号，例如冷启动 v0.0.1、加了数据 v0.1.0、稳定了 v1.0.0。'
+      + `起了以后 ${name}@v0.1.0 就是这个版本，哪里都能用。一个版本可以有几个版本号；版本号定了就不能改到别的版本上。`),
+    el('div', { class: 'row' }, which, label,
+      ['patch', 'minor', 'major'].map((k) => el('button', { id: `label-${k}`, title: { patch: '小改', minor: '加了数据', major: '大版本' }[k],
+        onclick: () => { label.value = info.suggest[k]; } }, info.suggest[k])), note, go),
+    msg,
+    retired.length ? el('p', { class: 'muted' }, '已撤销、不能再用的版本号：'
+      + retired.map((r) => `${r.label}（原来指 ${r.ref}，${r.retired_note}）`).join('、')) : null];
+}
+
 async function datasetsPage() {
   const show = live();
   const rows = await api.datasets();
@@ -267,7 +304,7 @@ async function datasetsPage() {
     el('td', {}, d.kind === 'trainset' ? el('span', { class: 'tag' }, '训练集快照') : d.kind),
     el('td', {}, [d.site, d.line].filter(Boolean).join(' / ')),
     el('td', {}, String(d.version_count)),
-    el('td', {}, d.latest ? el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref) : '-'),
+    el('td', {}, d.latest ? [el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref), labelChips(d.latest)] : '-'),
     el('td', {}, d.latest ? `${d.latest.file_count} 个文件，${sizeText(d.latest.total_bytes)}` : ''),
     el('td', {}, d.latest ? when(d.latest.created_at) : ''),
     el('td', { class: 'muted' }, d.note)));
@@ -306,9 +343,10 @@ async function datasetPage(name) {
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
       el('dd', {}, `${d.created_by}，${when(d.created_at)}`), el('dt', {}, '备注'), el('dd', {}, d.note || '-')),
     el('h2', {}, '版本'),
-    el('table', {}, el('tr', {}, ['版本', '父版本', '文件', '大小', '目录变化', '来源', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
+    el('table', {}, el('tr', {}, ['版本', '版本号', '父版本', '文件', '大小', '目录变化', '来源', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
       list.map((v) => el('tr', {},
         el('td', {}, el('a', { href: hrefOf(['v', d.name, String(v.number)]) }, v.ref)),
+        el('td', {}, labelChips(v)),
         el('td', {}, v.parent ? v.parent.ref : '-'),
         el('td', {}, String(v.file_count)), el('td', {}, sizeText(v.total_bytes)),
         el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, sourceNode(v.source)), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
@@ -320,7 +358,8 @@ async function datasetPage(name) {
     d.kind === 'trainset' || !can('datasets.write') ? null : el('p', { class: 'muted' }, '平时用「上传新增目录」：只上传新的那个目录，池里原有的不动。'
       + '「上传完整版本」是把一个目录当作新版本的全部内容，目录里没有的文件在新版本里就是删除。'),
     el('h2', {}, '比较两个版本'),
-    el('div', { class: 'row' }, '从', a, '到', b, compare));
+    el('div', { class: 'row' }, '从', a, '到', b, compare),
+    list.length && can('datasets.write') ? await labelForm(d.name, list, false, () => datasetPage(name)) : null);
 }
 
 // How the server made a version from its parent (version.ops), in a few words.
@@ -389,7 +428,7 @@ async function versionPage(name, number, query) {
     el('button', { disabled: page + 1 >= pages, onclick: () => { location.hash = hrefOf(vparts, { dir, page: page + 1 }); } }, '下一页')) : null;
   const labeled = images.filter((f) => labelOf(f)).length;
   show(crumbsFor(version, dir),
-    el('h1', {}, version.ref + (dir ? ` · ${dir}` : '')),
+    el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version)),
     dir ? null : el('dl', { class: 'kv' },
       el('dt', {}, '文件'), el('dd', {}, `${version.file_count} 个，${sizeText(version.total_bytes)}`),
       el('dt', {}, '父版本'), el('dd', {}, version.parent ? version.parent.ref : '-'),
@@ -669,14 +708,15 @@ async function modelPage(name) {
       el('dt', {}, '任务'), el('dd', {}, TASK_NAMES[m.task] || m.task),
       el('dt', {}, '建立'), el('dd', {}, `${m.created_by}，${when(m.created_at)}`), el('dt', {}, '备注'), el('dd', {}, m.note || '-')),
     el('h2', {}, '版本'),
-    list.length ? el('table', {}, el('tr', {}, ['版本', '训练集快照', 'ONNX', '代码提交', '标签', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
-      list.map((v) => el('tr', {}, el('td', {}, mref(v.ref)), el('td', {}, vref(v.trainset.ref)),
+    list.length ? el('table', {}, el('tr', {}, ['版本', '版本号', '训练集快照', 'ONNX', '代码提交', '标签', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
+      list.map((v) => el('tr', {}, el('td', {}, mref(v.ref)), el('td', {}, labelChips(v)), el('td', {}, vref(v.trainset.ref)),
         el('td', { class: 'mono' }, `${v.onnx_sha256.slice(0, 12)}（${sizeText(v.onnx_size || 0)}）`),
         el('td', { class: 'mono' }, v.code_commit ? v.code_commit.slice(0, 10) + (v.code_dirty ? '*' : '') : '-'),
         el('td', {}, v.tags.map((t) => el('span', { class: 'tag' }, t))),
         el('td', {}, v.created_by), el('td', {}, when(v.created_at)), el('td', { class: 'muted' }, v.note))))
       : el('p', { class: 'muted' }, '还没有版本；用 fw model register 登记。'),
-    el('h2', {}, '评估'), evalTable(evals.slice().reverse(), true));
+    el('h2', {}, '评估'), evalTable(evals.slice().reverse(), true),
+    list.length && can('models.write') ? await labelForm(m.name, list, true, () => modelPage(name)) : null);
 }
 
 function evalTable(rows, withModel) {
@@ -707,7 +747,7 @@ async function modelVersionPage(name, number) {
   const [chain, sets] = await Promise.all([api.chain(mv.ref), api.predictionSets(mv.model)]);
   const mine = sets.filter((p) => p.model_version.id === mv.id).reverse();
   show(el('div', { class: 'crumbs' }, el('a', { href: '#/models' }, '模型'), ' / ', el('a', { href: hrefOf(['m', mv.model]) }, mv.model), ' / ', `@${mv.number}`),
-    el('h1', {}, mv.ref, ...mv.tags.map((t) => [' ', el('span', { class: 'tag' }, t)])),
+    el('h1', {}, mv.ref, labelChips(mv), ...mv.tags.map((t) => [' ', el('span', { class: 'tag' }, t)])),
     el('dl', { class: 'kv' },
       el('dt', {}, '训练集快照'), el('dd', {}, vref(mv.trainset.ref)),
       el('dt', {}, '来源数据池'), el('dd', {}, chain.sources.length ? chain.sources.map((v, i) => [i ? '、' : '', vref(v.ref)]) : '-'),

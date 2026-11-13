@@ -285,6 +285,15 @@ class ModelVersionBody(BaseModel):
     note: str = ''
 
 
+class LabelBody(BaseModel):
+    label: str = Field(max_length=32)
+    note: str = Field(default='', max_length=2000)
+
+
+class RetireLabelBody(BaseModel):
+    note: str = Field(default='', max_length=2000)
+
+
 class TagBody(BaseModel):
     tag: str
     added: bool = True
@@ -398,6 +407,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     model_reader = need('models.read')
     model_writer = need('models.write')
     release_writer = need('releases.write')
+    label_admin = need('labels.retire')
     event_reader = need('events.read')
     account_admin = need('users.manage')
 
@@ -662,6 +672,22 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         with conn() as c:
             return changes.attach(c, [datasets.get_version(c, name, number)])[0]
 
+    # Version labels (v0.1.0): another name for a version of a dataset, a snapshot or a model.
+    @app.get('/api/v1/datasets/{name}/labels')
+    def list_version_labels(name: str, user: dict = Depends(data_reader)):
+        with conn() as c:
+            return datasets.list_labels(c, name)
+
+    @app.post('/api/v1/datasets/{name}/versions/{number}/labels')
+    def add_version_label(name: str, number: str, body: LabelBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            return datasets.add_label(c, user['user_id'], name, number, body.label, body.note)
+
+    @app.post('/api/v1/datasets/{name}/labels/{label}/retire')
+    def retire_version_label(name: str, label: str, body: RetireLabelBody, user: dict = Depends(label_admin)):
+        with conn() as c:
+            return datasets.retire_label(c, user['user_id'], name, label, body.note)
+
     @app.post('/api/v1/datasets/{name}/changes/preview')
     def preview_change(name: str, body: ChangeBody, user: dict = Depends(data_user)):
         with conn() as c:
@@ -847,6 +873,21 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def get_model_version(name: str, number: str, user: dict = Depends(model_reader)):
         with conn() as c:
             return models.model_version_detail(c, name, number)
+
+    @app.get('/api/v1/models/{name}/labels')
+    def list_model_labels(name: str, user: dict = Depends(model_reader)):
+        with conn() as c:
+            return models.list_labels(c, name)
+
+    @app.post('/api/v1/models/{name}/versions/{number}/labels')
+    def add_model_label(name: str, number: str, body: LabelBody, user: dict = Depends(model_writer)):
+        with conn() as c:
+            return models.add_label(c, user['user_id'], name, number, body.label, body.note)
+
+    @app.post('/api/v1/models/{name}/labels/{label}/retire')
+    def retire_model_label(name: str, label: str, body: RetireLabelBody, user: dict = Depends(label_admin)):
+        with conn() as c:
+            return models.retire_label(c, user['user_id'], name, label, body.note)
 
     @app.post('/api/v1/models/{name}/versions/{number}/tags')
     def set_tag(name: str, number: str, body: TagBody, user: dict = Depends(model_writer)):

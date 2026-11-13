@@ -18,10 +18,10 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import config
-from .api import Api
+from .api import Api, ApiError
 from .cache import Cache, remove_file
 from .checks import IMAGE_EXTS, scan_folder
-from .contract import (BATCH_OBJECT_MAX, EMPTY_SHA256, NEG_TRAIN, TRAINSET_FORMATS, ContractError, Entry, batches,
+from .contract import (BATCH_OBJECT_MAX, BUMPS, LABEL_HELP, is_label, split_ref, EMPTY_SHA256, NEG_TRAIN, TRAINSET_FORMATS, ContractError, Entry, batches,
                        collisions, diff_entries, manifest_bytes, manifest_hash, parse_manifest, path_problem,
                        sha256_file, trainset_layout)
 from .layout import Layout
@@ -44,13 +44,56 @@ def connect() -> Api:
     return Api(cfg.get('server', ''), cfg.get('token'))
 
 
-def parse_ref(ref: str) -> Tuple[str, str]:
-    """'SES-TX' -> latest version, 'SES-TX@3' -> version 3."""
-    name, _, number = ref.partition('@')
-    number = number or 'latest'
-    if not name or not (number == 'latest' or number.isdigit()):
-        raise FwError(f'版本写成 数据集名@序号，例如 SES-TX@3（不写 @序号 就是最新版）：{ref}')
-    return name, number
+def parse_ref(ref: str, what: str = '版本', labels: bool = True) -> Tuple[str, str]:
+    """'SES-TX' -> the newest version, 'SES-TX@3' -> version 3, 'SES-TX@v0.1.0' -> the version with that
+    label (contract.split_ref)."""
+    try:
+        return split_ref(ref, what, labels)
+    except ContractError as e:
+        raise FwError(str(e))
+
+
+def label_text(v: dict) -> str:
+    """' (v0.1.0, v1.0.0)' after a version's name, or nothing."""
+    return f'（{"、".join(v["labels"])}）' if v.get('labels') else ''
+
+
+def check_new_label(api: Api, name: str, label: Optional[str], model: bool = False) -> None:
+    """Before something is made that is to get this label at once (--label): refuse now what would be refused
+    after, when the version exists already."""
+    if label is None:
+        return
+    if not is_label(label):
+        raise FwError(f'{label}：{LABEL_HELP}')
+    try:
+        rows = (api.model_labels(name) if model else api.labels(name))['labels']
+    except ApiError as e:
+        if e.status == 404:  # no such dataset yet: its first snapshot
+            return
+        raise
+    for r in rows:
+        if r['label'] == label:
+            raise FwError(f'{name} 的版本号 {label} 已经' + ('撤销，不能再用' if r['retired'] else f'用在 {r["ref"]} 上')
+                          + '；换一个（fw label list 看有哪些）')
+
+
+def add_label(api: Api, ref: str, label: Optional[str] = None, bump: Optional[str] = None, model: bool = False,
+              note: str = '', echo: Echo = print) -> dict:
+    """Give a version of a dataset, a snapshot or (model) a model its label: the one written, or the next one
+    after the highest so far (bump: patch, minor or major)."""
+    name, number = parse_ref(ref, '模型版本' if model else '版本')
+    if (label is None) == (bump is None):
+        raise FwError('写版本号（例如 v0.1.0），或者用 --bump patch / minor / major 让平台接着最高的那个往下排，二选一')
+    if bump is not None:
+        if bump not in BUMPS:
+            raise FwError(f'--bump 只能是 {"、".join(BUMPS)}')
+        label = (api.model_labels(name) if model else api.labels(name))['suggest'][bump]
+    elif not is_label(label):
+        raise FwError(f'{label}：{LABEL_HELP}')
+    v = (api.add_model_label if model else api.add_label)(name, number, label, note)
+    echo(f'{v["ref"]} 的版本号是 {label}：以后写 {name}@{label} 就是它' + (
+        f'（它还有 {"、".join(x for x in v["labels"] if x != label)}）' if len(v['labels']) > 1 else ''))
+    return v
 
 
 def size_text(n: int) -> str:
@@ -1102,12 +1145,8 @@ MODEL_INFO = 'fw-model.json'  # written by get_model next to the files; not part
 
 
 def parse_model_ref(ref: str) -> Tuple[str, str]:
-    """'SES-TX-detr' -> latest version, 'SES-TX-detr@3' -> version 3."""
-    name, _, number = (ref or '').partition('@')
-    number = number or 'latest'
-    if not name or not (number == 'latest' or number.isdigit()):
-        raise FwError(f'模型版本写成 模型名@序号，例如 SES-TX-detr@3（不写 @序号 就是最新版）：{ref}')
-    return name, number
+    """'SES-TX-detr' -> the newest version, 'SES-TX-detr@3' -> version 3, 'SES-TX-detr@v0.1.0'."""
+    return parse_ref(ref, '模型版本')
 
 
 def strip_credentials(url: str) -> str:

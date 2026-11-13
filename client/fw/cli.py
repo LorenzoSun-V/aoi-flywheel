@@ -17,6 +17,7 @@ import httpx
 from . import __version__, config, ops, worker
 from .api import Api, ApiError
 from .cache import Cache
+from . import contract
 from .contract import ContractError
 
 ROLE_NAMES = {'admin': '管理员', 'algo': '算法工程师', 'field': '现场实施', 'worker': 'GPU worker'}
@@ -62,12 +63,17 @@ def cmd_whoami(args, api: Api) -> None:
           f'服务器 {api.server}')
 
 
+def _labels(v: dict) -> str:
+    """' v0.1.0 v1.0.0' after a version's number in a table."""
+    return ''.join(' ' + x for x in v.get('labels') or [])
+
+
 def cmd_dataset_list(args, api: Api) -> None:
     rows = []
     for d in api.datasets():
         v = d.get('latest')
         rows.append([d['name'], KIND_NAMES.get(d['kind'], d['kind']), d['site'], d['line'],
-                     f'@{v["number"]}' if v else '-', v['file_count'] if v else 0,
+                     f'@{v["number"]}' + _labels(v) if v else '-', v['file_count'] if v else 0,
                      ops.size_text(v['total_bytes']) if v else '-', _when(v['created_at']) if v else '-'])
     if rows:
         _table(['数据集', '类型', '现场', '产线', '最新', '文件数', '大小', '更新时间'], rows)
@@ -86,13 +92,14 @@ def cmd_dataset_versions(args, api: Api) -> None:
     for v in api.versions(args.name):
         change = '、'.join({'add': '+', 'replace': '换 ', 'remove': '-'}[o['op']] + o['dir'] + '/'
                           for o in v.get('ops') or [])
-        rows.append([f'@{v["number"]}', v['parent']['ref'] if v.get('parent') else '-', v['file_count'],
+        rows.append([f'@{v["number"]}', ' '.join(v.get('labels') or []) or '-',
+                     v['parent']['ref'] if v.get('parent') else '-', v['file_count'],
                      ops.size_text(v['total_bytes']), change or '整份导入', _when(v['created_at']), v['created_by'],
                      v['note'] or '', v['source'] if args.source else ''])
     if not rows:
         print(f'{args.name} 还没有版本')
         return
-    headers = ['版本', '父版本', '文件数', '大小', '目录变化', '时间', '操作人', '备注', '来源' if args.source else '']
+    headers = ['版本', '版本号', '父版本', '文件数', '大小', '目录变化', '时间', '操作人', '备注', '来源' if args.source else '']
     _table(headers, rows)
 
 
@@ -162,12 +169,35 @@ def cmd_batch_show(args, api: Api) -> None:
             print(f'      问题图片 {image}')
 
 
+def cmd_label_add(args, api: Api) -> None:
+    ops.add_label(api, args.ref, args.label, args.bump, model=args.model, note=args.note)
+
+
+def cmd_label_list(args, api: Api) -> None:
+    out = api.model_labels(args.name) if args.model else api.labels(args.name)
+    rows = [[r['label'], r['ref'], f'已撤销：{r["retired_note"]}（{r["retired_by"]}）' if r['retired'] else '在用',
+             _when(r['created_at']), r['created_by'], r['note']] for r in out['labels']]
+    if rows:
+        _table(['版本号', '版本', '状态', '时间', '操作人', '备注'], rows)
+    else:
+        print(f'{args.name} 还没有版本号')
+    s = out['suggest']
+    print(f'下一个可以是：{s["patch"]}（小改，--bump patch）、{s["minor"]}（加了数据或功能，--bump minor）、'
+          f'{s["major"]}（大版本，--bump major）')
+
+
+def cmd_label_retire(args, api: Api) -> None:
+    v = (api.retire_model_label if args.model else api.retire_label)(args.name, args.label, args.note)
+    print(f'{args.name} 的版本号 {args.label} 已撤销（原来指 {v["ref"]}）；这个版本号以后不能再用')
+
+
 def cmd_batch_prelabel(args, api: Api) -> None:
     ops.prelabel_batch(api, args.name, model=args.model, runner=args.runner, conf=args.conf, wait=args.wait)
 
 
 def cmd_batch_get(args, api: Api) -> None:
-    name, _, number = args.ref.partition('@')
+    name, number = ops.parse_ref(args.ref, '批次的版次', labels=False)
+    number = '' if number == 'latest' else number
     b = api.batch(name)
     cache = Cache()
     try:
@@ -276,12 +306,16 @@ def cmd_trainset_create(args, api: Api) -> int:
     class_map = ops.parse_class_map(args.class_map)
     split = ops.read_split_file(args.split_file) if args.split_file else None
     test_dirs = [d for item in args.test_dirs for d in item.split(',') if d.strip()]
+    if not args.dry_run:
+        ops.check_new_label(api, args.name, args.label)
     result = ops.create_trainset(api, args.name, args.sources, classes, val=args.val, seed=args.seed,
                                  test_dirs=test_dirs, merge_test=args.merge_test, new_to=args.new_to, split=split,
                                  fresh=args.fresh, note=args.note, require_labels=args.require_labels,
                                  dry_run=args.dry_run, test=args.test, label_source=args.label_source,
                                  label_classes=label_classes, class_map=class_map,
                                  confirm=None if args.yes else _ask)
+    if result is not None and args.label:
+        ops.add_label(api, result['ref'], args.label)
     return 0 if result is not None or args.dry_run else 1
 
 
@@ -289,7 +323,8 @@ def cmd_trainset_list(args, api: Api) -> None:
     rows = []
     for d in api.trainsets():
         v = d.get('latest')
-        rows.append([d['name'], d['site'], d['line'], f'@{v["number"]}' if v else '-', v['file_count'] if v else 0,
+        rows.append([d['name'], d['site'], d['line'], f'@{v["number"]}' + _labels(v) if v else '-',
+                     v['file_count'] if v else 0,
                      ops.size_text(v['total_bytes']) if v else '-', _when(v['created_at']) if v else '-'])
     if rows:
         _table(['训练集', '现场', '产线', '最新', '文件数', '大小', '更新时间'], rows)
@@ -302,7 +337,7 @@ def cmd_trainset_show(args, api: Api) -> None:
     v = api.trainset(name, number)
     ts = v['trainset']
     rule = ts['rule']
-    print(f'{v["ref"]}（id {v["id"]}）：{v["file_count"]} 个文件，{ops.size_text(v["total_bytes"])}，'
+    print(f'{v["ref"]}{ops.label_text(v)}（id {v["id"]}）：{v["file_count"]} 个文件，{ops.size_text(v["total_bytes"])}，'
           f'{_when(v["created_at"])} {v["created_by"]}' + (f'，备注：{v["note"]}' if v['note'] else ''))
     print(f'来源：{"、".join(ts["sources"])}')
     if rule['mode'] == 'split-file':
@@ -365,8 +400,8 @@ def cmd_model_versions(args, api: Api) -> None:
     if not rows:
         print(f'{args.name} 还没有版本；用 fw model register 登记')
         return
-    _table(['版本', '训练集快照', 'ONNX', '代码提交', '标签', '登记人', '登记时间', '备注'],
-           [[v['ref'], v['trainset']['ref'], v['onnx_sha256'][:12], (v['code_commit'] or '-')[:10] + ('*' if v['code_dirty'] else ''),
+    _table(['版本', '版本号', '训练集快照', 'ONNX', '代码提交', '标签', '登记人', '登记时间', '备注'],
+           [[v['ref'], ' '.join(v.get('labels') or []) or '-', v['trainset']['ref'], v['onnx_sha256'][:12], (v['code_commit'] or '-')[:10] + ('*' if v['code_dirty'] else ''),
              _tags(v) or '-', v['created_by'], _when(v['created_at']), v['note']] for v in rows])
     if any(v['code_dirty'] for v in rows):
         print('提交号后面有 * 的：训练时代码有没提交的改动')
@@ -374,7 +409,7 @@ def cmd_model_versions(args, api: Api) -> None:
 
 def cmd_model_show(args, api: Api) -> None:
     mv = api.model_version(*ops.parse_model_ref(args.ref))
-    print(f'{mv["ref"]}：{mv["site"]}/{mv["line"]}，{TASK_NAMES.get(mv["task"], mv["task"])}，'
+    print(f'{mv["ref"]}{ops.label_text(mv)}：{mv["site"]}/{mv["line"]}，{TASK_NAMES.get(mv["task"], mv["task"])}，'
           f'{mv["created_by"]} 登记于 {_when(mv["created_at"])}')
     print(f'训练集快照：{mv["trainset"]["ref"]}；类别：{"、".join(mv["classes"])}')
     print('训练代码：' + ops.code_text(mv) + ('（训练时有没提交的改动）' if mv['code_dirty'] else ''))
@@ -396,8 +431,12 @@ def cmd_model_show(args, api: Api) -> None:
 
 
 def cmd_model_register(args, api: Api) -> None:
-    ops.register_model(api, args.name, args.onnx, args.trainset, args.metrics, args.file, args.code_commit,
-                       args.code_repo, args.note, workers=args.workers, weights=args.weights, code_dir=args.code_dir)
+    ops.check_new_label(api, args.name, args.label, model=True)
+    mv = ops.register_model(api, args.name, args.onnx, args.trainset, args.metrics, args.file, args.code_commit,
+                            args.code_repo, args.note, workers=args.workers, weights=args.weights,
+                            code_dir=args.code_dir)
+    if args.label:
+        ops.add_label(api, mv['ref'], args.label, model=True)
 
 
 def cmd_model_get(args, api: Api) -> None:
@@ -790,6 +829,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--list', action='store_true', help='列出全部变化的文件（制表符分隔）')
     s.set_defaults(func=cmd_dataset_diff)
 
+    lb = sub.add_parser('label', help='版本号（v0.1.0 这样的名字）：add、list、retire').add_subparsers(
+        dest='cmd', required=True)
+    s = lb.add_parser('add', help='给数据集、训练集快照或模型的一个版本起版本号；起了以后 名称@v0.1.0 就是它')
+    s.add_argument('ref', help='哪个版本：名称@序号；只写名称就是最新版')
+    s.add_argument('label', nargs='?', help='版本号，v主.次.修订，例如 v0.1.0')
+    s.add_argument('--bump', choices=contract.BUMPS, help='不写版本号，接着现在最高的往下排：patch 小改、minor 加了数据、major 大版本')
+    s.add_argument('--model', action='store_true', help='名称是模型（默认是数据集或训练集快照）')
+    s.add_argument('-m', '--note', default='', help='备注')
+    s.set_defaults(func=cmd_label_add)
+    s = lb.add_parser('list', help='列出一个数据集、快照或模型的全部版本号，和下一个可以起什么')
+    s.add_argument('name')
+    s.add_argument('--model', action='store_true', help='名称是模型')
+    s.set_defaults(func=cmd_label_list)
+    s = lb.add_parser('retire', help='撤销一个起错的版本号（管理员）；撤销后它不再指任何版本，也不能再用')
+    s.add_argument('name')
+    s.add_argument('label')
+    s.add_argument('--model', action='store_true', help='名称是模型')
+    s.add_argument('-m', '--note', required=True, help='原因')
+    s.set_defaults(func=cmd_label_retire)
+
     bt = sub.add_parser('batch', help='标注批次：上传、复核、入库（upload、update、prelabel、submit、list、show、get、diff、'
                                       'reject、approve、import、close）').add_subparsers(
         dest='action', required=True, metavar='操作')
@@ -886,6 +945,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--from', dest='sources', action='append', required=True, metavar='版本',
                    help='来源数据池版本，例如 SES-TX@4；可写多次')
     s.add_argument('--classes', required=True, help='类别表 classes.txt：一行一个类别名，行号（从 0 起）是类别编号')
+    s.add_argument('--label', metavar='版本号', help='建好后给它起版本号，例如 v0.1.0（以后也能用 fw label add 起）')
     s.add_argument('--val', type=float, default=0.2, help='按比例划分时 val 的比例（默认 0.2）')
     s.add_argument('--test', type=float, default=0.0,
                    help='按比例划分时 test 的比例（默认 0，不分）；7:2:1 就是 --val 0.2 --test 0.1。有框的图和没有框的图分别按比例分')
@@ -945,6 +1005,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--code-commit', help='可选：训练代码的 git 提交号（不用 --code-dir 时）')
     s.add_argument('--code-repo', help='可选：训练代码仓库地址，和 --code-commit 一起写')
     s.add_argument('--note', default='', help='备注')
+    s.add_argument('--label', metavar='版本号', help='登记后给它起版本号，例如 v0.1.0（以后也能用 fw label add --model 起）')
     s.add_argument('--workers', type=int, default=8)
     s.set_defaults(func=cmd_model_register)
     s = md.add_parser('get', help='把模型版本的文件取到本地目录（部署账号也能用）')

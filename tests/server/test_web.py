@@ -239,6 +239,29 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path):
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    name = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    ops.import_folder(api, name, write_tree(tmp_path / 'one', {'a.png': real_png(64, 32, seed)}), echo=quiet)
+    ops.import_folder(api, name, write_tree(tmp_path / 'two', {'a.png': real_png(64, 32, seed + 1)}), echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'labels.cjs'), service.url + '/', tokens['algo'], name, str(shots)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['proposed'] == 'v0.1.0' and seen['next'] == 'v0.2.0'
+    assert f'{name}@1' in seen['row'] and 'v0.1.0' in seen['row']
+    assert f'已经用在 {name}@1 上' in seen['taken']
+    assert seen['title'].startswith(f'{name}@1') and 'v0.1.0' in seen['title']
+    assert api.version(name, 'v0.1.0')['number'] == 1 and api.labels(name)['labels'][0]['note'] == '冷启动'
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_path):
     from fw import ops
     from helpers import quiet

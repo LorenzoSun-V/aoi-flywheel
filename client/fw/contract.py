@@ -211,6 +211,49 @@ def diff_entries(old: Iterable[Entry], new: Iterable[Entry]) -> dict:
 OBJECTS_MAGIC = b'fw-objects 1\n'
 OBJECTS_TYPE = 'application/x-fw-objects'
 
+# --- naming a version ---------------------------------------------------------------------------------
+# A version is written <name>@<which>, where <which> is its number (SES-TX@3), one of its labels
+# (SES-TX@v0.1.0) or nothing (SES-TX: the newest). This is the one place that reads that; the server looks the
+# version up (datasets.get_version, models.get_model_version).
+LABEL = re.compile(r'v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\Z')
+LABEL_HELP = '版本号写成 v主.次.修订，例如 v0.1.0（小写 v，三段数字，不带前导 0）'
+BUMPS = ('patch', 'minor', 'major')
+
+
+def is_label(text) -> bool:
+    return isinstance(text, str) and LABEL.match(text) is not None
+
+
+def label_key(label: str) -> Tuple[int, int, int]:
+    """For sorting labels by what they mean: v0.10.0 after v0.9.0."""
+    m = LABEL.match(label)
+    if m is None:
+        raise ContractError(f'{label!r}：{LABEL_HELP}')
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def split_ref(ref, what: str = '版本', labels: bool = True) -> Tuple[str, str]:
+    """'SES-TX' -> ('SES-TX', 'latest'); 'SES-TX@3' -> ('SES-TX', '3'); 'SES-TX@v0.1.0' -> ('SES-TX',
+    'v0.1.0'). labels false: for things that are only counted (the revisions of a batch)."""
+    if not isinstance(ref, str) or not ref.strip():
+        raise ContractError(f'要写{what}')
+    name, sep, which = ref.strip().partition('@')
+    which = which if sep else 'latest'
+    ok = which == 'latest' or (which.isascii() and which.isdigit() and int(which) > 0) or (labels and is_label(which))
+    if not name or not ok:
+        raise ContractError(f'{what}写法不对：{ref}。写成 名称@序号（SES-TX@3）'
+                            + ('、名称@版本号（SES-TX@v0.1.0）' if labels else '') + '，只写名称就是最新版')
+    return name, which
+
+
+def next_labels(labels: Iterable[str]) -> Dict[str, str]:
+    """What the next label could be, from the highest one given so far (retired ones count: their strings
+    stay taken): {'patch': ..., 'minor': ..., 'major': ...}. With none yet: v0.0.1, v0.1.0, v1.0.0."""
+    keys = [label_key(x) for x in labels]
+    a, b, c = max(keys) if keys else (0, 0, 0)
+    return {'patch': f'v{a}.{b}.{c + 1}', 'minor': f'v{a}.{b + 1}.0', 'major': f'v{a + 1}.0.0'}
+
+
 # --- which fw works with which server ------------------------------------------------------------------
 # Every request of fw carries its interface level and every answer of the server carries the server's, in this
 # header. A side that sends none is level 1 (anything before the header existed). Raise API_LEVEL when the
@@ -220,10 +263,11 @@ OBJECTS_TYPE = 'application/x-fw-objects'
 #   2  fw dataset add / remove (POST /datasets/<name>/changes), accounts and events over HTTP, capabilities in /me
 #   3  labelling batches (fw batch ..., /batches); field accounts upload files
 #   4  pre-labelling a batch (fw batch prelabel, /batches/<name>/prelabel)
+#   5  version labels (fw label ..., <name>@v0.1.0 wherever a version is named)
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 4
+API_LEVEL = 5
 MIN_CLIENT_LEVEL = 1
-MIN_SERVER_LEVEL = 4
+MIN_SERVER_LEVEL = 5
 
 
 def peer_level(value: Optional[str]) -> int:

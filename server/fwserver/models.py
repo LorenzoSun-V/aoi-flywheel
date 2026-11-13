@@ -19,9 +19,9 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from fw.contract import ContractError, check_path, collisions, eval_dirs, manifest_bytes
+from fw.contract import ContractError, check_path, collisions, eval_dirs, is_label, manifest_bytes
 
-from . import datasets, events, trainsets
+from . import datasets, events, labels, trainsets
 from .datasets import NAME, DatasetError, check_digest
 from .store import Store, StoreError
 
@@ -88,7 +88,7 @@ def _name(value: str, what: str) -> str:
 
 def _pinned(name: str, number: str) -> str:
     """Registering on a model version needs its number: a retry must not land on a version made meanwhile."""
-    if not str(number).isdigit():
+    if not (str(number).isdigit() or is_label(number)):  # a label names one version for good, like a number
         raise DatasetError(400, f'登记评估或发布要写具体的模型版本，例如 {name}@3，不能用 latest')
     return number
 
@@ -292,6 +292,7 @@ def _tags(conn, ids: List[int]) -> Dict[int, List[str]]:
 
 def _model_versions(conn, rows: List[dict]) -> List[dict]:
     tags = _tags(conn, [r['id'] for r in rows])
+    named = labels.of(conn, 'model', [r['id'] for r in rows])
     return [{'id': r['id'], 'model': r['model'], 'number': r['number'], 'ref': f'{r["model"]}@{r["number"]}',
              'site': r['site'], 'line': r['line'], 'task': r['task'], 'fileset_id': r['fileset_id'],
              'onnx_sha256': r['onnx_sha256'], 'onnx_size': r['onnx_size'], 'manifest_sha256': r['manifest_sha256'],
@@ -300,6 +301,7 @@ def _model_versions(conn, rows: List[dict]) -> List[dict]:
                           'manifest_sha256': r['trainset_manifest']},
              'classes': r['classes'], 'code_repo': r['code_repo'], 'code_commit': r['code_commit'] or '',
              'code_dirty': r['code_dirty'], 'metrics': r['metrics'], 'note': r['note'], 'tags': tags[r['id']],
+             'labels': named[r['id']],
              'created_by': r['created_by'], 'created_at': _stamp(r['created_at'])} for r in rows]
 
 
@@ -310,17 +312,71 @@ def list_model_versions(conn, name: str) -> List[dict]:
 
 
 def get_model_version(conn, name: str, number: str) -> dict:
+    """number: a version number, a label (v0.1.0) or 'latest'."""
     model = get_model(conn, name)
+    number = str(number)
     if number == 'latest':
         if model['latest'] is None:
             raise DatasetError(404, f'{model["name"]} 还没有版本；用 fw model register 登记')
         number = model['latest'].rpartition('@')[2]
-    if not str(number).isdigit():
-        raise DatasetError(400, '版本序号应为正整数或 latest')
+    if is_label(number):
+        found = labels.find(conn, 'model', model['id'], number)
+        if found is None:
+            raise DatasetError(404, f'{model["name"]} 没有版本号 {number}')
+        if found['retired_at'] is not None:
+            raise DatasetError(404, f'{model["name"]} 的版本号 {number} 已撤销'
+                                    + (f'（{found["retired_note"]}）' if found['retired_note'] else ''))
+        return get_model_version_by_id(conn, found['version_id'])
+    if not (number.isascii() and number.isdigit()):
+        raise DatasetError(400, '版本应为序号（正整数）、版本号（v0.1.0）或 latest')
     rows = conn.execute(_MV + ' WHERE mv.model_id = %s AND mv.number = %s', (model['id'], int(number))).fetchall()
     if not rows:
         raise DatasetError(404, f'没有模型版本 {model["name"]}@{number}')
     return _model_versions(conn, rows)[0]
+
+
+def list_labels(conn, name: str) -> dict:
+    """Every label of a model (also the retired ones) and what the next could be."""
+    model = get_model(conn, name)
+    out = labels.listing(conn, 'model', model['id'])
+    for row in out['labels']:
+        row['ref'] = f'{model["name"]}@{row["number"]}'
+    return dict(out, model=model['name'])
+
+
+def add_label(conn, user_id: int, name: str, number: str, label: str, note: str = '') -> dict:
+    """Give a model version a label (v0.1.0). A label is written once: it names this version for good."""
+    label, note = datasets.check_label(label), _text(note, '备注')
+    mv = get_model_version(conn, name, number)
+    model = get_model(conn, name)
+    with conn.transaction():
+        if not labels.add(conn, 'model', model['id'], mv['id'], label, note, user_id):
+            was = labels.find(conn, 'model', model['id'], label)
+            if was['retired_at'] is None and was['version_id'] == mv['id']:
+                return mv  # asked twice
+            where = get_model_version_by_id(conn, was['version_id'])['ref']
+            raise DatasetError(409, f'{model["name"]} 的版本号 {label} 已经'
+                                    + (f'撤销（原来指 {where}），撤销的版本号不能再用' if was['retired_at'] is not None
+                                       else f'用在 {where} 上，版本号定了就不能挪到别的版本') + '；换一个')
+        events.record(conn, user_id, 'model_version.label', mv['ref'], label=label, note=note)
+    return get_model_version_by_id(conn, mv['id'])
+
+
+def retire_label(conn, user_id: int, name: str, label: str, note: str) -> dict:
+    """Take a label off its model version (it was put on the wrong one). The string stays taken."""
+    label, note = datasets.check_label(label), _text(note, '原因')
+    if not note:
+        raise DatasetError(400, '撤销版本号要写原因')
+    model = get_model(conn, name)
+    was = labels.find(conn, 'model', model['id'], label)
+    if was is None:
+        raise DatasetError(404, f'{model["name"]} 没有版本号 {label}')
+    with conn.transaction():
+        if not labels.retire(conn, 'model', model['id'], label, note, user_id):
+            raise DatasetError(409, f'{model["name"]} 的版本号 {label} 已经撤销过了')
+        mv = get_model_version_by_id(conn, was['version_id'])
+        events.record(conn, user_id, 'model_version.unlabel', mv['ref'], label=label, note=note)
+    return mv
 
 
 def get_model_version_by_id(conn, mv_id: int) -> dict:
@@ -651,8 +707,7 @@ def chain(conn, store: Store, ref: str, check: bool = False) -> dict:
     """From a release (SES-TX-r3) or a model version (SES-TX-detr@3) down to the pool versions the snapshot was
     made from. check: every file of every level is in the store with its size."""
     if '@' in ref:
-        name, _, number = ref.partition('@')
-        mv = get_model_version(conn, name, number or 'latest')
+        mv = get_model_version(conn, *datasets.parse_ref(ref, '模型版本'))
         release = None
     else:
         release = get_release(conn, ref)
