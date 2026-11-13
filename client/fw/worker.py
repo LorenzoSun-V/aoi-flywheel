@@ -8,6 +8,7 @@ went quiet), what runs is killed and this claim reports nothing more.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -328,6 +329,7 @@ class JobRun:
         self.check()
         kwargs = {'start_new_session': True} if os.name == 'posix' else {
             'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
+        env = dict(os.environ if env is None else env, **owner_mark())  # see sweep_processes
         try:
             proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE if on_err else subprocess.STDOUT, **kwargs)
@@ -493,6 +495,154 @@ def work_dir() -> Path:
         return Path(os.environ['FW_WORK_DIR']).expanduser().resolve()  # commands run with the job's folder as cwd
     from .config import cache_dir
     return (cache_dir() / 'jobs').resolve()
+
+
+# --- what a worker that was killed left behind ----------------------------------------------------------
+# A worker killed with -9 (or by the OOM killer) stops nothing and removes nothing: its command runs in a
+# session of its own and lives on, and its job folder stays. Under systemd the service's cgroup takes the
+# command down with it; a worker started by hand has no such thing. So every command carries the worker that
+# started it in its environment, every job folder is held with a lock that dies with the worker, and a worker
+# clears what dead workers left on this machine when it starts and each time it claims a job.
+OWNER_ENV = 'FW_WORKER_OWNER'
+JOB_FOLDER = re.compile(r'job-\d+-\d+')
+
+
+def _started(pid: int) -> Optional[str]:
+    """When a process started (clock ticks since boot, from /proc), None when it is not there (or no /proc).
+    With the pid it names one process for good: a pid is used again, a start time with it is not."""
+    try:
+        with open(f'/proc/{pid}/stat', 'rb') as f:
+            fields = f.read().rsplit(b') ', 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    if len(fields) < 20 or fields[0] == b'Z':
+        return None
+    return fields[19].decode('ascii', 'replace')
+
+
+def owner_mark() -> Dict[str, str]:
+    """What the commands of this worker carry in their environment: this process and when it started."""
+    return {OWNER_ENV: f'{os.getpid()}:{_started(os.getpid()) or ""}'}
+
+
+def _owner_gone(mark: str) -> bool:
+    pid, _, started = mark.partition(':')
+    if not pid.isdigit() or not started:
+        return False  # not a mark of ours we can read: leave it alone
+    return _started(int(pid)) != started
+
+
+def sweep_processes(wait: float = 10.0) -> int:
+    """Kill the commands whose worker is gone (Linux; elsewhere nothing is done). Only processes that carry a
+    worker's mark and whose worker no longer runs: what a second worker on this machine runs is not touched.
+    Returns how many were killed, after waiting for them to be gone (so the GPU memory is free again)."""
+    proc = Path('/proc')
+    if os.name != 'posix' or not proc.is_dir():
+        return 0
+    needle = OWNER_ENV.encode('ascii') + b'='
+    killed = []
+    for d in proc.iterdir():
+        if not d.name.isdigit() or int(d.name) == os.getpid():
+            continue
+        try:
+            env = (d / 'environ').read_bytes()  # other accounts' processes cannot be read: not ours
+        except OSError:
+            continue
+        mark = next((v[len(needle):] for v in env.split(b'\0') if v.startswith(needle)), None)
+        if mark is None or not _owner_gone(mark.decode('ascii', 'replace')) or _started(int(d.name)) is None:
+            continue
+        try:
+            os.kill(int(d.name), signal.SIGKILL)
+            killed.append(int(d.name))
+        except OSError:
+            pass
+    end = time.monotonic() + wait
+    while any(_started(pid) is not None for pid in killed) and time.monotonic() < end:
+        time.sleep(0.1)
+    return len(killed)
+
+
+def _lock_of(folder: Path) -> Path:
+    return folder.with_name(folder.name + '.lock')
+
+
+def _try_hold(lock: Path):
+    """Take the lock of a job folder without waiting: the open file while it is ours, None when a running
+    worker holds it. The lock goes when the process that holds it does, however it ends."""
+    import fcntl
+    while True:
+        f = open(lock, 'a+b')
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return None
+        try:  # the file may have been removed by whoever held it a moment ago: then this is a lock on nothing
+            if os.fstat(f.fileno()).st_ino == os.stat(lock).st_ino:
+                return f
+        except OSError:
+            pass
+        f.close()
+
+
+@contextlib.contextmanager
+def held_folder(folder: Path):
+    """A job folder for as long as the block runs: held with a lock next to it (<folder>.lock) so that another
+    worker on this machine knows it is in use, removed with it at the end (kept with FW_KEEP_WORK)."""
+    held = None
+    if os.name == 'posix':
+        held = _try_hold(_lock_of(folder))
+        if held is None:
+            raise WorkerError(f'任务目录 {folder} 正被这台机器上另一个 worker 用着（它连的多半是另一个平台）；'
+                              f'给每个 worker 设各自的 FW_WORK_DIR 再启动')
+    try:
+        yield folder
+    finally:
+        if not os.environ.get('FW_KEEP_WORK'):
+            shutil.rmtree(folder, ignore_errors=True)
+        if held is not None:
+            try:
+                os.unlink(_lock_of(folder))
+            except OSError:
+                pass
+            held.close()
+
+
+def sweep_folders(root: Path) -> int:
+    """Remove the job folders under root that no running worker holds (left by a worker that was killed or lost
+    power, or by one older than the locks). Only names like job-<id>-<attempt>. Returns how many folders."""
+    if os.name != 'posix' or not root.is_dir():
+        return 0
+    removed = 0
+    names = {p.name[:-5] if p.name.endswith('.lock') else p.name for p in root.iterdir()}
+    for name in sorted(n for n in names if JOB_FOLDER.fullmatch(n)):
+        folder = root / name
+        held = _try_hold(_lock_of(folder))
+        if held is None:
+            continue
+        try:
+            if folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+                removed += 0 if folder.exists() else 1
+            if not folder.exists():
+                os.unlink(_lock_of(folder))
+        except OSError:
+            pass
+        finally:
+            held.close()
+    return removed
+
+
+def sweep(echo: Echo) -> None:
+    """Clear what dead workers left on this machine: their commands first (they write into the folders)."""
+    try:
+        killed = sweep_processes()
+        removed = 0 if os.environ.get('FW_KEEP_WORK') else sweep_folders(work_dir())
+    except OSError as e:
+        echo(f'清理上一个 worker 留下的东西时出错（{e}），继续领任务')
+        return
+    if killed or removed:
+        echo(f'这台机器上有 worker 没来得及收场就没了：停掉了它留下的 {killed} 个进程，删掉了它留下的 {removed} 个任务目录')
 
 
 def conda_run(env: str, *argv: str) -> List[str]:
@@ -686,11 +836,8 @@ def eval_model(run: JobRun) -> dict:
     root = work_dir()
     root.mkdir(parents=True, exist_ok=True)
     folder = root / f'job-{run.id}-{run.job["attempt"]}'
-    try:
+    with held_folder(folder):
         return _eval_in(run, p, runner, folder)
-    finally:
-        if not os.environ.get('FW_KEEP_WORK'):
-            shutil.rmtree(folder, ignore_errors=True)
 
 
 def _predict(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str, sets: Path, name: str, nc: int,
@@ -791,11 +938,8 @@ def predict_model(run: JobRun) -> dict:
     root = work_dir()
     root.mkdir(parents=True, exist_ok=True)
     folder = root / f'job-{run.id}-{run.job["attempt"]}'
-    try:
+    with held_folder(folder):
         return _predict_in(run, p, runner, folder)
-    finally:
-        if not os.environ.get('FW_KEEP_WORK'):
-            shutil.rmtree(folder, ignore_errors=True)
 
 
 def _predict_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
@@ -884,6 +1028,7 @@ def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
     ran = 0
     idle_said = False
     down_said = False
+    sweep(echo)
     while True:
         claimed_at = time.monotonic()
         try:
@@ -909,6 +1054,7 @@ def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
             continue
         idle_said = False
         echo(f'领取任务 {job["id"]}（{job["kind_text"]}，第 {job["attempt"]} 次）')
+        sweep(echo)  # another worker of this machine may have died since: its command would share the GPU
         try:
             outcome = JobRun(api, job, echo, claimed_at).execute(handlers)
         except Exception as e:  # noqa: BLE001 - one job going wrong does not stop the worker
