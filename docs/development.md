@@ -60,7 +60,7 @@ server/fwserver/     fw-server：只支持 Linux
   settings.py        环境变量
   migrations/        0001_init.sql …，每次改表结构加一个新文件
 deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、restore.sh
-tools/               bench.py（规模测速）、deploy-drill.sh（部署和恢复演练）
+tools/               bench.py（规模测速）、bench_versions.py（一个池连加几百个版本的测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
 tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、accounts.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
