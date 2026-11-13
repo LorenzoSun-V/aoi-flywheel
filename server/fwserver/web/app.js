@@ -107,6 +107,8 @@ export const api = {
   dataset: (name) => call(`/datasets/${encodeURIComponent(name)}`),
   versions: (name) => call(`/datasets/${encodeURIComponent(name)}/versions`),
   version: (name, number) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
+  sites: () => call('/sites'),
+  addSite: (ref, name) => call('/sites', { method: 'POST', body: { ref, name } }),
   labels: (name) => call(`/datasets/${encodeURIComponent(name)}/labels`),
   addLabel: (name, number, label, note) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
   modelLabels: (name) => call(`/models/${encodeURIComponent(name)}/labels`),
@@ -311,7 +313,8 @@ async function datasetsPage() {
   show(el('h1', {}, '数据集'),
     rows.length ? el('table', {}, el('tr', {}, ['名称', '类型', '现场 / 产线', '版本数', '最新版本', '大小', '最新版本时间', '备注']
       .map((h) => el('th', {}, h))), body) : el('p', { class: 'muted' }, '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
-    el('div', { style: 'margin-top:16px' }, can('datasets.write') ? newDatasetForm() : null));
+    can('datasets.write') ? el('div', { style: 'margin-top:16px' }, newDatasetForm(await api.sites())) : null,
+    can('sites.write') ? el('div', { style: 'margin-top:8px' }, newPlaceForm(() => datasetsPage())) : null);
 }
 
 // A version's source: 'batch:NAME@N' (a labelling batch that was imported) links to the batch.
@@ -1912,22 +1915,57 @@ async function eventsPage(query) {
       r.next_before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q, before: r.next_before }) }, '更早的') : null));
 }
 
-function newDatasetForm() {
-  const name = el('input', { type: 'text', placeholder: '名称，例如 SES-TX' });
-  const site = el('input', { type: 'text', placeholder: '现场' });
-  const line = el('input', { type: 'text', placeholder: '产线' });
+// A site's or line's code with the name shown next to it.
+function placeText(p) {
+  return p.name ? `${p.code}（${p.name}）` : p.code;
+}
+
+// Two selects, the registered sites and the lines of the one chosen: a pool or model only takes those.
+function placePicker(tree) {
+  const site = el('select', { id: 'site' }, tree.sites.map((x) => el('option', { value: x.code }, placeText(x))));
+  const line = el('select', { id: 'line' });
+  const fill = () => {
+    const at = tree.sites.find((x) => x.code === site.value);
+    line.replaceChildren(...(at ? at.lines : []).map((x) => el('option', { value: x.code }, placeText(x))));
+  };
+  site.addEventListener('change', fill);
+  fill();
+  return { site, line };
+}
+
+// Registering a site or a line of it (codes are for good; the shown name can change later).
+function newPlaceForm(done) {
+  const ref = el('input', { id: 'place-ref', type: 'text', placeholder: '现场/产线，例如 SES/TX' });
+  const name = el('input', { id: 'place-name', type: 'text', placeholder: '产线的显示名（可不写），例如 贴片线' });
+  const msg = el('div');
+  const go = async (ev) => {
+    ev.preventDefault();
+    try { await api.addSite(ref.value.trim(), name.value.trim()); await done(); } catch (e) { msg.replaceChildren(errorBox(e)); }
+  };
+  return el('details', { class: 'panel' }, el('summary', {}, '登记现场 / 产线'),
+    el('form', { class: 'form', onsubmit: go }, msg,
+      el('p', { class: 'muted' }, '数据池和模型只能建在登记过的现场和产线下。代号只能用汉字、字母、数字、_ 和 .，登记后不能改（它在训练集快照的目录和发布编号里）；显示名以后能改。只写现场（SES）就只登记现场。'),
+      el('label', {}, '现场 / 产线', ref), el('label', {}, '显示名', name),
+      el('button', { id: 'place-go', class: 'primary', type: 'submit' }, '登记')));
+}
+
+function newDatasetForm(tree) {
+  const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX' });
+  const { site, line } = placePicker(tree);
   const note = el('input', { type: 'text', placeholder: '备注' });
   const msg = el('div');
   const go = async (ev) => {
     ev.preventDefault();
     try {
-      const d = await api.createDataset({ name: name.value.trim(), site: site.value.trim(), line: line.value.trim(), note: note.value.trim() });
+      const d = await api.createDataset({ name: name.value.trim(), site: site.value, line: line.value, note: note.value.trim() });
       location.hash = hrefOf(['upload', d.name]);
     } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
   return el('details', { class: 'panel' }, el('summary', {}, '新建数据池'),
-    el('form', { class: 'form', onsubmit: go }, msg, el('label', {}, '名称', name), el('label', {}, '现场', site),
-      el('label', {}, '产线', line), el('label', {}, '备注', note), el('button', { class: 'primary', type: 'submit' }, '建好后上传')));
+    el('form', { class: 'form', onsubmit: go }, msg,
+      tree.sites.some((x) => x.lines.length) ? null : el('p', { class: 'muted' }, '还没有登记产线：先在下面「登记现场 / 产线」里登记。'),
+      el('label', {}, '名称', name), el('label', {}, '现场', site),
+      el('label', {}, '产线', line), el('label', {}, '备注', note), el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '建好后上传')));
 }
 
 // --- frame and routing ------------------------------------------------------------------------------------

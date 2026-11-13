@@ -70,7 +70,7 @@ def _labels(v: dict) -> str:
 
 def cmd_dataset_list(args, api: Api) -> None:
     rows = []
-    for d in api.datasets():
+    for d in api.datasets(args.site, args.line, args.search):
         v = d.get('latest')
         rows.append([d['name'], KIND_NAMES.get(d['kind'], d['kind']), d['site'], d['line'],
                      f'@{v["number"]}' + _labels(v) if v else '-', v['file_count'] if v else 0,
@@ -137,7 +137,8 @@ def cmd_batch_update(args, api: Api) -> None:
 def cmd_batch_list(args, api: Api) -> None:
     rows = [[b['name'], f'第 {b["revision"]} 版', b['status_text'], f'{b["pool"]}/{b["dir"]}', b['file_count'],
              b['owner'], b['labeler'], b['reviewer'] or '-', _when(b['updated_at'])]
-            for b in api.batches(mine=args.mine, todo=args.todo, status=args.status, pool=args.pool)['batches']]
+            for b in api.batches(mine=args.mine, todo=args.todo, status=args.status, pool=args.pool, site=args.site,
+                                 line=args.line, q=args.search)['batches']]
     if not rows:
         print('没有待你复核的批次' if args.todo else '没有批次')
         return
@@ -167,6 +168,60 @@ def cmd_batch_show(args, api: Api) -> None:
         print(f'  {_when(s["at"])}  {s["actor"]}  {what}' + (f'：{s["comment"]}' if s['comment'] else ''))
         for image in s['images']:
             print(f'      问题图片 {image}')
+
+
+def _label_made(api: Api, ref: str, label: str, model: bool) -> None:
+    """--label of a command that has just made ref: when the label is refused now (someone took it meanwhile),
+    say that ref exists all the same."""
+    try:
+        ops.add_label(api, ref, label, model=model)
+    except (ApiError, ops.FwError) as e:
+        raise ops.FwError(f'{ref} 已经建好，但版本号 {label} 没起成：{getattr(e, "message", e)}。'
+                          f'另起一个：fw label add {ref} <版本号>' + (' --model' if model else ''))
+
+
+def _narrow(s) -> None:
+    """The options that narrow a list to a site, a line and text in the name."""
+    s.add_argument('--site', default='', help='只看这个现场的')
+    s.add_argument('--line', default='', help='只看这条产线的（和 --site 一起写）')
+    s.add_argument('-s', '--search', default='', metavar='文字', help='只看名称里有这段文字的')
+
+
+def _place(code: str, name: str) -> str:
+    return f'{code}（{name}）' if name else code
+
+
+def _show_sites(tree: dict) -> None:
+    rows = []
+    for site in tree['sites']:
+        if not site['lines']:
+            rows.append([_place(site['code'], site['name']), '（还没有产线）', '', '', '', '', ''])
+        for line in site['lines']:
+            rows.append([_place(site['code'], site['name']), _place(line['code'], line['name']), line['datasets'],
+                         line['trainsets'], line['models'], line['batches'], line['releases']])
+    if rows:
+        _table(['现场', '产线', '数据集', '训练集快照', '模型', '在办批次', '发布'], rows)
+    else:
+        print('还没有登记现场；用 fw site add <现场>/<产线> 登记')
+    other = tree['other']
+    if any(other.values()):
+        print(f'没有归到登记的现场产线下的：数据集 {other["datasets"]}，训练集快照 {other["trainsets"]}（跨产线的快照在这里），'
+              f'模型 {other["models"]}，在办批次 {other["batches"]}，发布 {other["releases"]}')
+
+
+def cmd_site_list(args, api: Api) -> None:
+    _show_sites(api.sites())
+
+
+def cmd_site_add(args, api: Api) -> None:
+    api.add_site(args.ref, args.name)
+    print(f'已登记 {args.ref}' + (f'（{args.name}）' if args.name else '')
+          + '；代号登记后不能改，显示名可以用 fw site name 改')
+
+
+def cmd_site_name(args, api: Api) -> None:
+    api.rename_site(args.ref, args.name)
+    print(f'{args.ref} 的显示名' + (f'改成了 {args.name}' if args.name else '去掉了'))
 
 
 def cmd_label_add(args, api: Api) -> None:
@@ -315,13 +370,13 @@ def cmd_trainset_create(args, api: Api) -> int:
                                  label_classes=label_classes, class_map=class_map,
                                  confirm=None if args.yes else _ask)
     if result is not None and args.label:
-        ops.add_label(api, result['ref'], args.label)
+        _label_made(api, result['ref'], args.label, False)
     return 0 if result is not None or args.dry_run else 1
 
 
 def cmd_trainset_list(args, api: Api) -> None:
     rows = []
-    for d in api.trainsets():
+    for d in api.trainsets(args.site, args.line, args.search):
         v = d.get('latest')
         rows.append([d['name'], d['site'], d['line'], f'@{v["number"]}' + _labels(v) if v else '-',
                      v['file_count'] if v else 0,
@@ -386,9 +441,9 @@ def cmd_model_create(args, api: Api) -> None:
 
 
 def cmd_model_list(args, api: Api) -> None:
-    rows = api.models()
+    rows = api.models(args.site, args.line, args.search)
     if not rows:
-        print('还没有模型；用 fw model create 建')
+        print('没有符合的模型' if args.site or args.line or args.search else '还没有模型；用 fw model create 建')
         return
     _table(['名称', '现场', '产线', '任务', '版本数', '最新', '备注'],
            [[m['name'], m['site'], m['line'], TASK_NAMES.get(m['task'], m['task']), m['version_count'],
@@ -436,7 +491,7 @@ def cmd_model_register(args, api: Api) -> None:
                             args.code_repo, args.note, workers=args.workers, weights=args.weights,
                             code_dir=args.code_dir)
     if args.label:
-        ops.add_label(api, mv['ref'], args.label, model=True)
+        _label_made(api, mv['ref'], args.label, True)
 
 
 def cmd_model_get(args, api: Api) -> None:
@@ -781,6 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
     ds = sub.add_parser('dataset', help='数据集：list、create、versions、import、add、remove、diff').add_subparsers(
         dest='action', required=True, metavar='操作')
     s = ds.add_parser('list', help='列出数据集')
+    _narrow(s)
     s.set_defaults(func=cmd_dataset_list)
     s = ds.add_parser('create', help='新建数据集')
     s.add_argument('name', help='名称：字母、数字、. _ -，例如 SES-TX')
@@ -828,6 +884,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('second', nargs='?', help='新版本，例如 SES-TX@3')
     s.add_argument('--list', action='store_true', help='列出全部变化的文件（制表符分隔）')
     s.set_defaults(func=cmd_dataset_diff)
+
+    st = sub.add_parser('site', help='现场和产线的登记：list、add、name').add_subparsers(dest='cmd', required=True)
+    s = st.add_parser('list', help='列出登记的现场和产线，每条产线有多少数据集、快照、模型、批次、发布')
+    s.set_defaults(func=cmd_site_list)
+    s = st.add_parser('add', help='登记一个现场，或现场下的一条产线（建数据池和模型前先登记；代号登记后不能改）')
+    s.add_argument('ref', metavar='现场[/产线]', help='例如 SES，或 SES/TX（现场还没登记就一起登记）')
+    s.add_argument('--name', default='', help='显示名，例如 苏州厂、贴片线；以后能改')
+    s.set_defaults(func=cmd_site_add)
+    s = st.add_parser('name', help='改现场或产线的显示名（代号不变）')
+    s.add_argument('ref', metavar='现场[/产线]')
+    s.add_argument('name', help="新的显示名；写 '' 就是去掉")
+    s.set_defaults(func=cmd_site_name)
 
     lb = sub.add_parser('label', help='版本号（v0.1.0 这样的名字）：add、list、retire').add_subparsers(
         dest='cmd', required=True)
@@ -885,6 +953,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--todo', action='store_true', help='只看待我复核的')
     s.add_argument('--status', default='', help='只看这个状态：open、review、rejected、approved、imported、closed')
     s.add_argument('--pool', default='', help='只看进这个数据池的')
+    _narrow(s)
     s.set_defaults(func=cmd_batch_list)
     s = bt.add_parser('show', help='看一个批次：各版、复核经过和意见')
     s.add_argument('name', help='批次名称')
@@ -971,6 +1040,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--yes', action='store_true', help='不问确认，直接建快照')
     s.set_defaults(func=cmd_trainset_create)
     s = ts.add_parser('list', help='列出训练集快照')
+    _narrow(s)
     s.set_defaults(func=cmd_trainset_list)
     s = ts.add_parser('show', help='看一个快照的来源、划分和每类框数')
     s.add_argument('ref', help='快照，例如 SES-TX-det@2；只写名称就是最新版')
@@ -986,6 +1056,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--note', default='', help='备注')
     s.set_defaults(func=cmd_model_create)
     s = md.add_parser('list', help='列出模型')
+    _narrow(s)
     s.set_defaults(func=cmd_model_list)
     s = md.add_parser('versions', help='列出一个模型的版本')
     s.add_argument('name')

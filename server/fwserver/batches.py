@@ -498,9 +498,14 @@ def import_(conn, store: Store, user: dict, name: str, expect_latest_id: Optiona
 
 # --- reading -----------------------------------------------------------------------------------------
 def list_batches(conn, user: Optional[dict] = None, mine: bool = False, todo: bool = False, status: str = '',
-                 pool: str = '') -> List[dict]:
-    """Newest change first. mine: the account's own; todo: those waiting for this account's review."""
-    where, args = ['true'], []
+                 pool: str = '', site: str = '', line: str = '', q: str = '') -> List[dict]:
+    """Newest change first. mine: the account's own; todo: those waiting for this account's review. site,
+    line: the batches for pools of that site or line; q: text in the batch's name."""
+    where, args = datasets.where_place(site, line, '', 'p')
+    where.append('true')
+    if q:
+        where.append('position(lower(%s) in lower(d.name)) > 0')
+        args.append(q)
     if status:
         if status not in STATUS:
             raise DatasetError(400, f'状态只能是 {"、".join(STATUS)}')

@@ -10,13 +10,14 @@ import time
 import uuid
 from pathlib import Path
 
+import helpers
 import psycopg
 import pytest
 import uvicorn
 
 from fw.api import Api
 from fw.cache import Cache
-from fwserver import auth, db
+from fwserver import auth, datasets, db
 from fwserver.app import create_app
 from fwserver.settings import Settings
 
@@ -97,8 +98,17 @@ def make_service(database, tmp_path):
 @pytest.fixture(scope='session')
 def tokens(database):
     """One account and token per role."""
+    def register(site, line):
+        with db.connect(database) as k:
+            try:
+                datasets.add_place(k, None, f'{site}/{line}')
+            except datasets.DatasetError:
+                pass  # there already, or not a code: the server says so where it matters
+    helpers._REGISTER = register
+
     out = {}
     with db.connect(database) as c:
+        datasets.add_place(c, None, 'SES/TX', '贴片线')  # the line most tests put their pools and models on
         # 'deploy': a second field account, the one that fetches models and registers releases in the tests
         for role in ('admin', 'algo', 'field', 'deploy', 'worker'):
             name = f'{role}-{uuid.uuid4().hex[:6]}'

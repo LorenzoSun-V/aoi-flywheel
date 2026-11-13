@@ -110,6 +110,7 @@ fw login --server http://<平台服务器>:8000             # 提示里输入凭
 
 | 命令 | 做什么 |
 |---|---|
+| `fw site add SES/TX --name 贴片线` | 登记现场和产线（数据池、模型只能建在登记过的现场产线下；代号登记后不能改） |
 | `fw dataset create SES-TX --site SES --line TX` | 建数据集（一条产线的数据池，`--kind test` 测试集、`regression` 回归集） |
 | `fw dataset import SES-TX /data/SES/TX_v2` | 检查目录，列出相比父版本的新增、修改、删除和改名，确认后只上传服务器上没有的文件，冻结成下一个版本。`--dry-run` 只检查；`--yes` 不问确认 |
 | `fw dataset add SES-TX /data/20261104` | 往数据集里加目录：新版本 = 最新版本 + 这个目录，只上传这个目录。池里已有同名目录时拒绝（`--replace` 整个换掉）；和池里重复的图、标注不一致的重复图只提醒 |

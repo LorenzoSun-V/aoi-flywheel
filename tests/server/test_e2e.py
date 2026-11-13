@@ -41,7 +41,7 @@ def test_roles(make_api, dataset, tmp_path):
     assert field.dataset(dataset)['latest']['id'] == v['id'] and field.versions(dataset)[0]['id'] == v['id']
     assert field.read_object(v['manifest_sha256'])
     assert field.diff(v['id'], v['id']) is not None
-    for change in (lambda: field.create_dataset(f'X-{uuid.uuid4().hex[:6]}', '', '', 'pool', ''),
+    for change in (lambda: field.create_dataset(f'X-{uuid.uuid4().hex[:6]}', 'SES', 'TX', 'pool', ''),
                    lambda: field.create_version(dataset, v['manifest_sha256'], None, v['id'], '', ''),
                    lambda: field.preview_change(dataset, {'remove': ['x']})):
         assert status_of(change) == 403
@@ -99,9 +99,9 @@ def test_damaged_object_on_the_server_is_repaired_by_upload(api, service):
 
 
 def test_dataset_rules(api, dataset):
-    assert status_of(lambda: api.create_dataset(dataset.lower(), '', '', 'pool', '')) == 409
-    assert status_of(lambda: api.create_dataset('bad name', '', '', 'pool', '')) == 400
-    assert status_of(lambda: api.create_dataset('x@1', '', '', 'pool', '')) == 400
+    assert status_of(lambda: api.create_dataset(dataset.lower(), 'SES', 'TX', 'pool', '')) == 409
+    assert status_of(lambda: api.create_dataset('bad name', 'SES', 'TX', 'pool', '')) == 400
+    assert status_of(lambda: api.create_dataset('x@1', 'SES', 'TX', 'pool', '')) == 400
     assert status_of(lambda: api.create_dataset('ok-name', '', '', 'nope', '')) == 400
     assert status_of(lambda: api.version(dataset, 'latest')) == 404
     assert status_of(lambda: api.dataset('does-not-exist')) == 404

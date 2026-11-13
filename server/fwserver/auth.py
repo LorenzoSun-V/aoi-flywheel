@@ -32,6 +32,8 @@ CAPS = {
     'jobs.read': (('admin', 'algo', 'worker'), '查看任务'),
     'jobs.write': (('admin', 'algo'), '提交或取消任务'),
     'jobs.run': (('worker',), '登记推理环境、领取和交回任务；只有 worker 账号（GPU 机）能做'),
+    'sites.read': (('admin', 'algo', 'field'), '查看登记的现场和产线'),
+    'sites.write': (('admin', 'algo'), '登记现场和产线'),
     'labels.retire': (('admin',), '撤销版本号；只有管理员能做'),
     'events.read': (('admin', 'algo'), '查看操作记录'),
     'users.manage': (('admin',), '管理账号'),

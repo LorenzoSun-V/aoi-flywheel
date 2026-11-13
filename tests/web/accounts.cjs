@@ -40,7 +40,7 @@ const { chromium } = require('playwright');
   seen.refused = await page.textContent('main .error');
 
   await page.goto(`${url}#/events?q=${name}`);
-  await page.waitForSelector('table');
+  await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '操作记录' && document.querySelector('table'));  // not the accounts page's table
   seen.events = await page.$$eval('table tr', (rows) => rows.slice(1).map((r) => [...r.children].map((c) => c.textContent)));
   await page.screenshot({ path: `${out}/events.png`, fullPage: true });
 

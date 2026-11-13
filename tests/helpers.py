@@ -53,3 +53,13 @@ LOCATION = ld(13, ld(1, b'location') + ld(2, b'../../home/fw/.config/fw/token'))
 
 def onnx_model(graph):
     return vi(1, 8) + ld(2, b'pytorch') + ld(7, graph)
+
+
+def register_place(site: str, line: str) -> None:
+    """Register a site and line for a test that makes up its own (set by the server tests' conftest; codes
+    the register refuses are left for the server to refuse)."""
+    if _REGISTER is not None and site and line:
+        _REGISTER(site, line)
+
+
+_REGISTER = None

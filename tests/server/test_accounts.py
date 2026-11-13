@@ -38,9 +38,10 @@ def test_the_table_of_capabilities():
     # labelling batches (its own), which needs the upload of files
     assert auth.caps_of('algo') == sorted(['datasets.read', 'datasets.write', 'objects.upload', 'objects.download',
                                            'models.read', 'models.write', 'jobs.read', 'jobs.write', 'events.read',
-                                           'batches.read', 'batches.write', 'batches.review'])
+                                           'batches.read', 'batches.write', 'batches.review', 'sites.read',
+                                           'sites.write'])
     assert auth.caps_of('field') == sorted(['datasets.read', 'objects.download', 'objects.upload', 'models.read',
-                                            'releases.write', 'batches.read', 'batches.write'])
+                                            'releases.write', 'batches.read', 'batches.write', 'sites.read'])
     assert auth.caps_of('worker') == sorted(['objects.upload', 'objects.download', 'jobs.read', 'jobs.run'])
     assert set(auth.caps_of('admin')) == set(auth.CAPS) - {'jobs.run'}
 
@@ -76,7 +77,7 @@ def test_accounts_are_managed_over_http_by_administrators_only(make_api, service
     made = admin.post(f'/users/{name}/tokens', {'label': '笔记本'})
     person = Api(service.url, made['token'])
     try:
-        assert person.me()['role'] == 'field' and status_of(lambda: person.create_dataset(new_name('D'), '', '', 'pool', '')) == 403
+        assert person.me()['role'] == 'field' and status_of(lambda: person.create_dataset(new_name('D'), 'SES', 'TX', 'pool', '')) == 403
         # a role change counts from the next request; the token stays
         assert admin.post(f'/users/{name}/role', {'role': 'algo'})['role'] == 'algo'
         assert person.me()['role'] == 'algo' and 'datasets.write' in person.me()['caps']
@@ -183,7 +184,7 @@ def test_changes_are_recorded_with_who_made_them(api, make_api, tokens, dataset,
 def test_a_refused_change_leaves_no_record(api, make_api, dataset):
     admin = make_api('admin')
     before = admin.events(limit=1)['events'][0]['id']
-    assert status_of(lambda: api.create_dataset(dataset, '', '', 'pool', '')) == 409
+    assert status_of(lambda: api.create_dataset(dataset, 'SES', 'TX', 'pool', '')) == 409
     assert status_of(lambda: admin.post('/users', {'name': 'bad name', 'role': 'algo'})) == 400
     assert status_of(lambda: api.cancel_job(10 ** 9)) == 404
     assert admin.events(limit=1)['events'][0]['id'] == before

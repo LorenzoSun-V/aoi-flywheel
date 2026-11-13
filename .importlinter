@@ -4,7 +4,7 @@ root_packages =
     fwserver
 
 [importlinter:contract:server-layers]
-name = Server modules only call downwards (cli, app -> evals -> predictions -> jobs, models -> trainsets, batches -> changes -> datasets, auth -> store, db, settings, events, formats, labels)
+name = Server modules only call downwards (cli, app -> evals -> predictions -> jobs, models -> trainsets, batches -> changes -> datasets, auth -> store, db, settings, events, formats, labels, sites)
 type = layers
 layers =
     fwserver.cli
@@ -15,7 +15,7 @@ layers =
     fwserver.trainsets | fwserver.batches
     fwserver.changes
     fwserver.datasets | fwserver.auth
-    fwserver.store | fwserver.db | fwserver.settings | fwserver.formats | fwserver.events | fwserver.labels
+    fwserver.store | fwserver.db | fwserver.settings | fwserver.formats | fwserver.events | fwserver.labels | fwserver.sites
 
 [importlinter:contract:client-standalone]
 name = The fw client never imports the server

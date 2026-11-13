@@ -78,7 +78,7 @@ def main():
         return echo
 
     try:
-        api.create_dataset(name, 'bench', '', 'other', 'tools/bench.py')
+        api.create_dataset(name, '', '', 'other', 'tools/bench.py')
         _, out['generate_s'] = timed(lambda: [make_pair(src, rng, i, a.img_kb * 1024) for i in range(a.pairs)])
         v1, out['v1_import_s'] = timed(lambda: ops.import_folder(api, name, src, workers=a.workers,
                                                                  echo=keep('v1_import')))

@@ -264,10 +264,11 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
 #   3  labelling batches (fw batch ..., /batches); field accounts upload files
 #   4  pre-labelling a batch (fw batch prelabel, /batches/<name>/prelabel)
 #   5  version labels (fw label ..., <name>@v0.1.0 wherever a version is named)
+#   6  the register of sites and lines (fw site ..., /sites); lists narrowed by site, line and text
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 5
+API_LEVEL = 6
 MIN_CLIENT_LEVEL = 1
-MIN_SERVER_LEVEL = 5
+MIN_SERVER_LEVEL = 6
 
 
 def peer_level(value: Optional[str]) -> int:
