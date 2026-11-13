@@ -25,7 +25,7 @@
 |---|---|
 | 给一个列表加筛选条件或加一列 | 加表、改表 |
 | 给一条命令加选项，改输出或报错的措辞 | 新的一类权限，或改已有权限给哪些角色 |
-| 网页上加一列、加一个链接、改一处文字或样式 | 改冻结的数据的任何东西（版本、模型版本、评估报告、发布） |
+| 网页上加一列、加一个链接、改一处文字或样式 | 改任何由触发器守着的数据（版本、模型版本、评估报告、发布、预测集、操作记录、版本号、现场产线代号等） |
 | 给已有接口的回答加字段 | 改清单、快照、`fw-objects` 的格式，改已有字段的含义，改路径规则 |
 | 补测试、补文档、修一个有复现步骤的小问题 | 动 `store.py` 的落盘、`jobs.py` 的租约、`deploy/` 的脚本 |
 
@@ -37,7 +37,7 @@
 2. 逻辑不止「调接口再打印」时（读本机文件、多步、训练脚本也要用），写在 `client/fw/ops.py`，并让它抛 `ops.FwError`，话写成用户能照着做的。
 3. `client/fw/cli.py`：写 `cmd_<组>_<动作>(args, api)`，只解析参数和打印；在 `main` 里用 `add_parser` 挂上，`help` 写中文。表格用文件里现成的打印函数，和别的命令对齐。
 4. 新选项的默认值必须保持原来的行为。
-5. 测试：只动客户端的，在 `tests/client/` 用 `tests/fakeapi.py` 里的假服务测，假服务里没有这个接口就加上；经过真实服务的，在 `tests/server/` 里调 `fw_cli.main([...])`（`test_sites.py` 里有例子）。
+5. 测试：只动客户端的，在 `tests/client/` 用 `tests/fakeapi.py` 里的假服务测，假服务里没有这个接口就加上；经过真实服务的，在 `tests/server/` 里调 `fw_cli.main([...])`，调之前先让命令行用测试的连接，不然它会去读本机的设置文件：`monkeypatch.setattr(ops, 'connect', lambda: api)` 和 `monkeypatch.setattr(api, 'close', lambda: None)`，输出用 `capsys` 读（`test_sites.py` 里有例子）。
 6. `docs/commands.md` 加用途、例子、常见问题；`CHANGELOG.md` 记一段。
 
 容易错的地方：
@@ -51,8 +51,8 @@
 样板：`POST /api/v1/sites`。
 
 1. 逻辑写在所属的服务端模块里，函数第一个参数是数据库连接 `conn`，出错抛 `DatasetError(状态码, 消息)`（已有一个统一的处理把它变成 `{"detail": …}`）。常用的状态码：400 写法不对，403 没权限，404 没有，409 和已有的冲突。
-2. 改了东西就在**同一个事务里**写操作记录：`events.record(conn, actor_id, '<对象>.<动作>', '<对什么>', 细节=…)`。新的动作先加进 `events.ACTIONS`，带上中文名字。
-3. `app.py` 加路由。它只做三件事：用 `Depends(need('<能力>'))` 定谁能调，`with conn() as c:` 开事务（正常离开时提交，抛异常时回滚），调模块里的函数。请求体用 pydantic 的 `…Body` 类。
+2. **数据库连接是 autocommit 的**（`db.make_pool`）：不开事务的话每条语句各自提交。模块里凡是改东西的函数，把全部改动和操作记录一起放进 `with conn.transaction():`，中途出错才会一起撤回。照 `datasets.add_place` 写。操作记录是 `events.record(conn, actor_id, '<对象>.<动作>', '<对什么>', 细节=…)`，新的动作先加进 `events.ACTIONS`，带上中文名字。
+3. `app.py` 加路由。它只做三件事：用 `Depends(need('<能力>'))` 定谁能调，`with conn() as c:` 从连接池借一个连接（**它不开事务**），调模块里的函数。请求体用 pydantic 的 `…Body` 类。
 4. 能力在 `auth.CAPS`：已有的能表达就用已有的；确实是新的一类操作才加一行，并且先问（见第 0 节）。加了要同时改 `tests/server/test_accounts.py` 的 `test_the_table_of_capabilities`，它逐个角色列出全部能力。没写 `need(...)` 的路由会被 `test_every_endpoint_asks_for_a_capability` 拦下。
 5. `client/fw/contract.py` 的 `API_LEVEL` 加一。`fw` 的新命令离不开这个接口时，把 `MIN_SERVER_LEVEL` 提到同一个数，这样连到旧服务器时用户看到的是「请升级服务器」而不是 404。
 6. 测试写在 `tests/server/`，至少三种：正常的；没权限的（`make_api('field')` 换一个角色，`status_of(lambda: …) == 403`）；出错的（写法不对、重名、对象不存在）。再用 `api.events(...)` 或已有测试里的写法核对操作记录写上了。
@@ -62,7 +62,7 @@
 
 - `/api/v1` **只加不改**：可以加接口、给回答加字段、加可选的查询参数；不能删字段、改字段的含义或类型。
 - 列表的筛选在服务器上做（SQL 的 `WHERE`），不要让网页或命令行取回全部再筛。`datasets.where_place` 是现成的例子，注意它用参数绑定，不拼字符串。
-- 一个请求里的多步改动要在一个事务里，不要在路由里开两次 `conn()`。
+- 一个请求里的多步改动要在模块函数的同一个 `with conn.transaction():` 里。不要指望路由替你回滚：连写两条 `INSERT` 再加一条 `events.record` 而不开事务，中途出错会留下半截数据。也不要在路由里借两次 `conn()` 分两步做。
 - 新模块要在 `.importlinter` 里排进某一层。要 import 的模块在你上面或和你同一层时，说明函数放错了地方：把它挪到下层，或者让上层把需要的东西传进来。**不要改分层规则来通过检查。**
 
 ## 3. 加表或改表
