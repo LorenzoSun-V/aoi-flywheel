@@ -1290,7 +1290,9 @@ def _on_sigint(signum, frame) -> None:
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors='replace')  # a path the console cannot show must not stop the command
+            # a path the console cannot show must not stop the command; each line is written as it is said, also
+            # into a pipe or the journal (a worker under systemd would else seem silent for hours)
+            stream.reconfigure(errors='replace', line_buffering=True)
         except AttributeError:
             pass
     args = build_parser().parse_args(argv)
