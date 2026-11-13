@@ -100,12 +100,12 @@ GPU worker 被杀掉、死机、断网时任务怎么收场，自动测试里是
 - **远程（SSH 连着 GPU 机）**：网卡一关 SSH 就断了，手工敲不了恢复的命令，所以**必须用一条到时间自己恢复的命令**，并且先把要看的东西记到文件里，事后看：
 
   ```
-  nvidia-smi -l 1 > /tmp/smi.log &                                   # 先开着，留下 GPU 的记录
-  sudo systemd-run --on-active=180 ip link set <网卡> up              # 先定好 180 秒后恢复
+  sudo systemd-run --unit=smi-log sh -c 'nvidia-smi -l 1 > /tmp/smi.log'   # 留下 GPU 的记录；不挂在 SSH 上，断线了也接着记
+  sudo systemd-run --on-active=180 /usr/sbin/ip link set <网卡> up          # 先定好 180 秒后恢复（ip 的路径用 command -v ip 查）
   sudo ip link set <网卡> down                                        # 再断
   ```
 
-  SSH 会卡住或断开，等时间到了重新连上，用 `journalctl -u fw-worker --since "<断网的时间>"` 看这期间 worker 说了什么，用 `/tmp/smi.log` 看 GPU 上的进程是什么时候消失的；看完 `kill %1` 停掉记录。5a 把 180 换成 20，5c 换成 60。
+  SSH 会卡住或断开，等时间到了重新连上，用 `journalctl -u fw-worker --since "<断网的时间>"` 看这期间 worker 说了什么，用 `/tmp/smi.log` 看 GPU 上的进程是什么时候消失的；看完 `sudo systemctl stop smi-log` 停掉记录。5a 把 180 换成 20，5c 换成 60。
 - **不要用这个办法的情况**：平台服务器和 GPU 机是同一台；或者你不确定 `<网卡>` 是哪一块（`ip route get <平台服务器的地址>` 会告诉你走的是哪块网卡）。恢复的那条命令没有先成功就不要断。
 
 5a，短断（20 秒）：
