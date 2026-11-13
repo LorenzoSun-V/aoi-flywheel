@@ -2,6 +2,11 @@
 
 ## 0.3.0（未发布）
 
+worker 在 systemd 下的输出（2026-11-13）：
+
+- 修复：`fw worker` 用 systemd 常驻时，「开始领任务」「领取任务 N」这些输出要攒够一大块才出现在 `journalctl` 里，看上去像没有反应。现在 `fw` 的每一行输出都立刻写出去（输出到管道、文件时也一样）。还没升级的机器在服务文件里加 `Environment=PYTHONUNBUFFERED=1`。
+- 命令手册里 systemd 服务文件的示例写清楚：`User=` 是 Linux 账号、要写哪些 `Environment=`（`FW_CONDA`、`FW_CONFIG`、`FW_CACHE`）、怎么算起来了、`status=217/USER` 是什么。
+
 - `docs/worker-fault-tests.md` 补上平台和 worker 在同一台机器上时怎么测（2026-11-13）：断网改成用 iptables 只拦 worker 账号到平台端口的连接，断电那一步的预期（平台也一起重启，可能要跑 `fw-server verify --rehash`）。
 
 真机上测 worker 故障的步骤（2026-11-13）：

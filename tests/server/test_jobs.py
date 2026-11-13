@@ -4,6 +4,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -768,3 +769,23 @@ def test_the_worker_says_cancelled_when_the_cancel_won(api, make_worker, fake_co
     worker.run_worker(w, said.append, once=True, handlers={'check': cancelled_meanwhile})
     assert api.job(job['id'])['status'] == 'cancelled'
     assert said[-1] == f'任务 {job["id"]}：已取消'
+
+
+def test_what_the_worker_says_is_seen_at_once_when_it_is_not_on_a_terminal(service, sql, tmp_path):
+    """Under systemd the output is a pipe: a line held back in a buffer is a worker that seems to say nothing."""
+    import select
+    name = f'gpu-{uuid.uuid4().hex[:6]}'  # a worker of its own: it must not claim a job another test queued
+    auth.add_user(sql, name, 'worker')
+    env = dict(os.environ, FW_SERVER=service.url, FW_TOKEN=auth.create_token(sql, name, 'journal')[0], FW_CONFIG=str(tmp_path / 'none.json'),
+               FW_CACHE=str(tmp_path / 'cache'))
+    env.pop('PYTHONUNBUFFERED', None)
+    p = subprocess.Popen([sys.executable, '-c', 'import sys; from fw.cli import main; sys.exit(main())', 'worker'],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+    try:
+        ready, _, _ = select.select([p.stdout], [], [], 20)
+        assert ready, 'nothing was written while the worker runs'
+        assert '开始领任务' in os.read(p.stdout.fileno(), 4096).decode('utf-8')
+        assert p.poll() is None  # said while it runs, not flushed as it ended
+    finally:
+        p.kill()
+        p.wait(10)
