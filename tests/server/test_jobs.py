@@ -771,10 +771,12 @@ def test_the_worker_says_cancelled_when_the_cancel_won(api, make_worker, fake_co
     assert said[-1] == f'任务 {job["id"]}：已取消'
 
 
-def test_what_the_worker_says_is_seen_at_once_when_it_is_not_on_a_terminal(service, tokens, tmp_path):
+def test_what_the_worker_says_is_seen_at_once_when_it_is_not_on_a_terminal(service, sql, tmp_path):
     """Under systemd the output is a pipe: a line held back in a buffer is a worker that seems to say nothing."""
     import select
-    env = dict(os.environ, FW_SERVER=service.url, FW_TOKEN=tokens['worker'], FW_CONFIG=str(tmp_path / 'none.json'),
+    name = f'gpu-{uuid.uuid4().hex[:6]}'  # a worker of its own: it must not claim a job another test queued
+    auth.add_user(sql, name, 'worker')
+    env = dict(os.environ, FW_SERVER=service.url, FW_TOKEN=auth.create_token(sql, name, 'journal')[0], FW_CONFIG=str(tmp_path / 'none.json'),
                FW_CACHE=str(tmp_path / 'cache'))
     env.pop('PYTHONUNBUFFERED', None)
     p = subprocess.Popen([sys.executable, '-c', 'import sys; from fw.cli import main; sys.exit(main())', 'worker'],

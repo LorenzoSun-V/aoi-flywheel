@@ -693,6 +693,7 @@ WantedBy=multi-user.target
   - `FW_CONDA`：conda 可执行文件的路径（`which conda` 或 `echo $CONDA_EXE`）。systemd 的 PATH 里一般没有 conda，不写会找不到。
   - `FW_CONFIG`：这个 Linux 账号平时还用别的平台账号（比如管理员）登录 `fw` 时，worker 的凭据要放在单独的设置文件里，在这里指给它；不写就用默认的设置文件。
   - `FW_CACHE`：手工跑时设过缓存目录的话写成同一个，不然建好的引擎和下好的图片要重来一遍。
+  - CUDA、TensorRT 的库路径：`.bashrc` 里设过 `LD_LIBRARY_PATH` 或往 `PATH` 里加过 CUDA 目录的话，也要写成 `Environment=`，或者放进推理环境里（`conda env config vars set`）。不然 worker 能起来，一建引擎或推理就报找不到 `libnvinfer` 之类的库。配好后跑一次评估或推理任务确认。
 - 怎么算起来了：`systemctl status fw-worker` 是 `active (running)`，过半分钟再看 `since` 的时间没有变；`journalctl -u fw-worker -n 5` 里有「worker … 开始领任务」和「没有任务，每 5 秒问一次」。再提交一个 `fw runner check <环境名>`，日志里出现「领取任务」并且任务完成。
 - `status=217/USER`、`Failed to determine user credentials`：`User=` 写的 Linux 账号不存在。
 - 状态是 running，日志里却一直没有 worker 的输出：2026-11-13 之前的 `fw` 在 systemd 下会把输出攒着不写。升级 `fw`，或者加一行 `Environment=PYTHONUNBUFFERED=1`。
