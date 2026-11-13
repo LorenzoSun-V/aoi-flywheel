@@ -20,7 +20,9 @@ from . import events
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
-KINDS = ('pool', 'test', 'regression', 'other')  # what people create; 'trainset' is made by trainsets.py
+KINDS = ('pool', 'test', 'regression', 'other')  # what people create
+MADE = {'trainset': ('训练集快照', 'fw trainset create'),  # made only by trainsets.py
+        'batch': ('标注批次', 'fw batch update')}           # made only by batches.py: a batch's revisions
 
 
 class DatasetError(Exception):
@@ -84,7 +86,8 @@ def _datasets(conn, rows: List[dict]) -> List[dict]:
 
 
 def list_datasets(conn) -> List[dict]:
-    return _datasets(conn, conn.execute(_DATASET + ' ORDER BY lower(d.name)').fetchall())
+    """Without the datasets that hold the revisions of labelling batches: those are listed as batches."""
+    return _datasets(conn, conn.execute(_DATASET + " WHERE d.kind <> 'batch' ORDER BY lower(d.name)").fetchall())
 
 
 def get_dataset(conn, name: str) -> dict:
@@ -103,7 +106,7 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
         raise DatasetError(400, f'类型只能是 {"、".join(KINDS)}')
     with conn.transaction():
         if not _insert_dataset(conn, user_id, name, site, line, kind, note):
-            raise DatasetError(409, f'{name} 已经存在（数据集和训练集快照共用名称，不分大小写）')
+            raise DatasetError(409, f'{name} 已经存在（数据集、训练集快照和标注批次共用名称，不分大小写）')
         events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line)
     return get_dataset(conn, name)
 
@@ -154,8 +157,9 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
                    expect_latest_id: Optional[int], source: str = '', note: str = '',
                    before_freeze: Optional[Callable[[], None]] = None, trainset: bool = False,
                    record: Optional[Callable[[Any, int], None]] = None, new_dataset: Optional[dict] = None,
-                   inherited: Optional[Set[Tuple[str, str, int]]] = None) -> dict:
-    """trainset: the dataset must be a trainset (and only then may it be one); record(conn, version_id) writes
+                   inherited: Optional[Set[Tuple[str, str, int]]] = None, batch: bool = False) -> dict:
+    """trainset: the dataset must be a trainset (and only then may it be one); batch: the same for a labelling
+    batch (batches.py); record(conn, version_id) writes
     the caller's own rows (a trainset's, or how the version was changed from its parent) inside the transaction,
     before the version is frozen. new_dataset (site, line,
     kind, note): create the dataset in the same transaction, so a failed first version leaves no name behind;
@@ -186,20 +190,24 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
         if new_dataset is not None and not _insert_dataset(conn, user_id, name, new_dataset['site'],
                                                            new_dataset['line'], new_dataset['kind'],
                                                            new_dataset['note']):
-            again = '请重新运行 fw trainset create' if trainset else '请重新运行导入'
+            again = '请重新运行 fw trainset create' if trainset else '换一个批次名称' if batch else '请重新运行导入'
             raise DatasetError(409, f'{name} 在这期间被别人建了；{again}')
         dataset = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
                                (name,)).fetchone()
         if dataset is None:
             raise DatasetError(404, f'没有数据集 {name}')
-        if (dataset['kind'] == 'trainset') != trainset:
-            raise DatasetError(400, f'{dataset["name"]} 是训练集快照，只能用 fw trainset create 建新版本'
-                               if dataset['kind'] == 'trainset' else f'{dataset["name"]} 不是训练集快照')
+        made = 'trainset' if trainset else 'batch' if batch else None
+        if dataset['kind'] != made and (dataset['kind'] in MADE or made is not None):
+            if dataset['kind'] in MADE:
+                what, how = MADE[dataset['kind']]
+                raise DatasetError(400, f'{dataset["name"]} 是{what}，只能用 {how} 建新版本')
+            raise DatasetError(400, f'{dataset["name"]} 不是{MADE[made][0]}')
         latest = conn.execute('SELECT id, number FROM versions WHERE dataset_id = %s ORDER BY number DESC LIMIT 1',
                               (dataset['id'],)).fetchone()
         if (latest['id'] if latest else None) != expect_latest_id:
             now = f'@{latest["number"]}' if latest else '没有版本'
-            again = '请重新运行 fw trainset create' if trainset else '请重新运行导入，以最新版本为父版本'
+            again = ('请重新运行 fw trainset create' if trainset else '请重新运行 fw batch update' if batch
+                     else '请重新运行导入，以最新版本为父版本')
             raise DatasetError(409, f'{dataset["name"]} 在这期间有了变化（最新是 {now}）；{again}')
         if parent_id is not None:
             parent = conn.execute("SELECT encode(manifest_sha256, 'hex') AS m FROM versions WHERE id = %s",

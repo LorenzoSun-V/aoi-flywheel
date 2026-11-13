@@ -42,11 +42,12 @@ def test_roles(make_api, dataset, tmp_path):
     assert field.read_object(v['manifest_sha256'])
     assert field.diff(v['id'], v['id']) is not None
     for change in (lambda: field.create_dataset(f'X-{uuid.uuid4().hex[:6]}', '', '', 'pool', ''),
-                   lambda: field.missing([('0' * 64, 1)]), lambda: field.put_bytes(b'data'),
                    lambda: field.create_version(dataset, v['manifest_sha256'], None, v['id'], '', ''),
-                   lambda: field.preview_change(dataset, {'remove': ['x']}),
-                   lambda: field.post('/folder-check', {'paths': ['a.png']})):
+                   lambda: field.preview_change(dataset, {'remove': ['x']})):
         assert status_of(change) == 403
+    # it uploads files (for its labelling batches), which by themselves change no dataset
+    assert field.missing([('0' * 64, 1)]) == ['0' * 64] and field.put_bytes(b'data')
+    assert field.post('/folder-check', {'paths': ['a.png']})['files'] == 1
     # a worker (a GPU machine) fetches what its jobs need and sees no lists
     worker = make_api('worker')
     assert status_of(worker.datasets) == 403 and worker.read_object(v['manifest_sha256'])

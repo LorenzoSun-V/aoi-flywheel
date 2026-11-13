@@ -6,9 +6,11 @@ import datetime
 import getpass
 import os
 import signal
+import socket
 import sys
 import time
 import unicodedata
+from pathlib import Path
 
 import httpx
 
@@ -112,6 +114,104 @@ def cmd_dataset_remove(args, api: Api) -> int:
     result = ops.remove_dirs(api, args.name, args.dirs, note=args.note, dry_run=args.dry_run,
                              confirm=None if args.yes else _ask)
     return 0 if result is not None or args.dry_run else 1
+
+
+def cmd_batch_upload(args, api: Api) -> None:
+    ops.upload_batch(api, args.folder, args.pool, args.labeler, name=args.name, to=args.to, reviewer=args.reviewer,
+                     note=args.note, allow_other_files=args.allow_other_files, force=args.force,
+                     workers=args.workers)
+
+
+def cmd_batch_update(args, api: Api) -> None:
+    ops.update_batch(api, args.name, args.folder, args.labeler, reviewer=args.reviewer, note=args.note,
+                     allow_other_files=args.allow_other_files, force=args.force, workers=args.workers)
+
+
+def cmd_batch_list(args, api: Api) -> None:
+    rows = [[b['name'], f'第 {b["revision"]} 版', b['status_text'], f'{b["pool"]}/{b["dir"]}', b['file_count'],
+             b['owner'], b['labeler'], b['reviewer'] or '-', _when(b['updated_at'])]
+            for b in api.batches(mine=args.mine, todo=args.todo, status=args.status, pool=args.pool)['batches']]
+    if not rows:
+        print('没有待你复核的批次' if args.todo else '没有批次')
+        return
+    _table(['批次', '版次', '状态', '入库到', '文件数', '上传账号', '标注人', '复核人', '最近变化'], rows)
+
+
+def cmd_batch_show(args, api: Api) -> None:
+    b = api.batch(args.name)
+    print(f'{b["name"]}：{b["status_text"]}；入库后是 {b["pool"]} 的 {b["dir"]}/'
+          + (f'（已入库为 {b["imported"]}）' if b['imported'] else ''))
+    print(f'上传账号 {b["owner"]}，复核人 {b["reviewer"] or "还没有指定"}')
+    _table(['版次', '文件数', '大小', '标注人', '上传账号', '时间', '说明'],
+           [[f'第 {r["number"]} 版', r['file_count'], ops.size_text(r['total_bytes']),
+             r['labeler'] + ('（复核人修改）' if r['by_reviewer'] else ''), r['created_by'], _when(r['created_at']),
+             r['note']] for r in b['revisions']])
+    print('经过：')
+    for s in b['steps']:
+        what = s['step_text'] + (f'第 {s["revision"]} 版' if s['revision'] else '')
+        if s['step'] == 'submit':
+            what += f'，复核人 {s["reviewer"]}' + ('（自审）' if s['self_review'] else '')
+        if s['pool_version']:
+            what += f'，成为 {s["pool_version"]}'
+        print(f'  {_when(s["at"])}  {s["actor"]}  {what}' + (f'：{s["comment"]}' if s['comment'] else ''))
+        for image in s['images']:
+            print(f'      问题图片 {image}')
+
+
+def cmd_batch_get(args, api: Api) -> None:
+    name, _, number = args.ref.partition('@')
+    b = api.batch(name)
+    cache = Cache()
+    try:
+        ops.get(api, cache, f'{b["name"]}@{number or b["revision"]}', args.to or b['dir'].rpartition('/')[2],
+                link='copy', workers=args.workers)
+    finally:
+        cache.close()
+
+
+def cmd_batch_diff(args, api: Api) -> None:
+    ops.show_batch_compare(print, api.compare_batch(args.name, args.old, args.new), limit=args.limit)
+
+
+def cmd_batch_submit(args, api: Api) -> None:
+    b = api.batch_step(args.name, 'submit', {'reviewer': args.reviewer})
+    print(f'已提交复核：{b["name"]} 第 {b["revision"]} 版，复核人 {b["reviewer"]}')
+
+
+def cmd_batch_reject(args, api: Api) -> None:
+    b = api.batch_step(args.name, 'reject', {'comment': args.comment, 'images': args.image or [],
+                                             'revision': args.revision})
+    print(f'已退回 {b["name"]} 第 {b["revision"]} 版；{b["owner"]} 改好后上传新的一版再提交')
+
+
+def cmd_batch_approve(args, api: Api) -> None:
+    body = {'comment': args.comment, 'revision': args.revision}
+    if args.with_folder:
+        if not (args.labeler or '').strip():
+            raise ops.FwError('带上修改后的目录时要写是谁改的（--labeler）')
+        before = api.batch(args.name)
+        if 'approve' not in before['actions']:
+            raise ops.FwError(f'{before["name"]} 现在是「{before["status_text"]}」，或者复核人不是你，不能通过')
+        digest, _, _ = ops._send_folder(api, args.with_folder, args.allow_other_files, args.force, args.workers,
+                                        print)
+        body.update(manifest_sha256=digest, labeler=args.labeler, revision=before['revision'],
+                    allow_other_files=args.allow_other_files, force=args.force,
+                    source=f'fw batch approve {socket.gethostname()}:{Path(args.with_folder).resolve()}')
+    b = api.batch_step(args.name, 'approve', body)
+    print(f'已通过 {b["name"]} 第 {b["revision"]} 版' + ('（含你修改后的内容）' if args.with_folder else '')
+          + f'；入库：fw batch import {b["name"]}')
+
+
+def cmd_batch_import(args, api: Api) -> int:
+    result = ops.import_batch(api, args.name, replace=args.replace, allow_other_files=args.allow_other_files,
+                              force=args.force, note=args.note, dry_run=args.dry_run,
+                              confirm=None if args.yes else _ask)
+    return 0 if result is not None or args.dry_run else 1
+
+
+def cmd_batch_close(args, api: Api) -> None:
+    b = api.batch_step(args.name, 'close', {'comment': args.comment})
+    print(f'已关闭 {b["name"]}；它的各版内容仍然保留，可以取回')
 
 
 def cmd_dataset_diff(args, api: Api) -> None:
@@ -675,6 +775,85 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('second', nargs='?', help='新版本，例如 SES-TX@3')
     s.add_argument('--list', action='store_true', help='列出全部变化的文件（制表符分隔）')
     s.set_defaults(func=cmd_dataset_diff)
+
+    bt = sub.add_parser('batch', help='标注批次：上传、复核、入库（upload、update、submit、list、show、get、diff、'
+                                      'reject、approve、import、close）').add_subparsers(
+        dest='action', required=True, metavar='操作')
+
+    def content_flags(s):
+        s.add_argument('--allow-other-files', action='store_true', help='图片和标注以外的文件也一起上传')
+        s.add_argument('--force', action='store_true', help='有同名不同扩展名的图片也上传')
+        s.add_argument('--workers', type=int, default=8, help='并行数（默认 8）')
+
+    s = bt.add_parser('upload', help='把一个目录上传成新批次（原始图片或已标注的都行）；冻结为第 1 版，不进数据池')
+    s.add_argument('folder', metavar='目录', help='要上传的目录')
+    s.add_argument('--pool', required=True, help='复核通过后进哪个数据池，例如 SES-TX')
+    s.add_argument('--labeler', required=True, help='标注人姓名（必填，记在这一版上）')
+    s.add_argument('--name', help='批次名称（默认 <数据池>-<目录名>）；只能用字母、数字和 . _ -')
+    s.add_argument('--to', help='入库后在池里的目录名（默认用目录自己的名称）')
+    s.add_argument('--reviewer', help='同时提交复核：复核人的账号名')
+    s.add_argument('--note', default='', help='说明')
+    content_flags(s)
+    s.set_defaults(func=cmd_batch_upload)
+    s = bt.add_parser('update', help='给批次上传新的一版（整个目录现在的样子）；退回后改好了也用它')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('folder', metavar='目录', help='批次的目录')
+    s.add_argument('--labeler', required=True, help='这一版的标注人姓名（必填）')
+    s.add_argument('--reviewer', help='同时提交复核：复核人的账号名；写 - 表示上次的复核人')
+    s.add_argument('--note', default='', help='说明，例如改了什么')
+    content_flags(s)
+    s.set_defaults(func=cmd_batch_update)
+    s = bt.add_parser('submit', help='把批次最新的一版提交复核')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('--reviewer', help='复核人的账号名（算法工程师账号；不写就是上次的复核人）')
+    s.set_defaults(func=cmd_batch_submit)
+    s = bt.add_parser('list', help='列出批次')
+    s.add_argument('--mine', action='store_true', help='只看我上传的')
+    s.add_argument('--todo', action='store_true', help='只看待我复核的')
+    s.add_argument('--status', default='', help='只看这个状态：open、review、rejected、approved、imported、closed')
+    s.add_argument('--pool', default='', help='只看进这个数据池的')
+    s.set_defaults(func=cmd_batch_list)
+    s = bt.add_parser('show', help='看一个批次：各版、复核经过和意见')
+    s.add_argument('name', help='批次名称')
+    s.set_defaults(func=cmd_batch_show)
+    s = bt.add_parser('get', help='把批次的一版取到本地目录（用 LiteAnno 打开标注或复核）')
+    s.add_argument('ref', metavar='批次', help='批次名称，或 名称@版次；不写版次取最新的一版')
+    s.add_argument('--to', help='放到哪个目录（默认当前目录下、批次的目录名）；必须不存在或是空的')
+    s.add_argument('--workers', type=int, default=8, help='并行数（默认 8）')
+    s.set_defaults(func=cmd_batch_get)
+    s = bt.add_parser('diff', help='比较批次的两版：哪些图片的标注变了，加、删、挪、改类别各多少框')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('--old', type=int, help='旧的版次（默认新版次的前一版）')
+    s.add_argument('--new', type=int, help='新的版次（默认最新的一版）')
+    s.add_argument('--limit', type=int, default=20, help='最多列多少张图片（默认 20）')
+    s.set_defaults(func=cmd_batch_diff)
+    s = bt.add_parser('reject', help='复核人退回批次（要写意见）')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('-m', '--comment', required=True, help='退回意见')
+    s.add_argument('--image', action='append', metavar='路径', help='有问题的图片（批次目录里的相对路径），可以写多次')
+    s.add_argument('--revision', type=int, help='你看的是第几版；这期间有了新的一版就不退回')
+    s.set_defaults(func=cmd_batch_reject)
+    s = bt.add_parser('approve', help='复核人通过批次；自己改过就用 --with 带上改好的目录')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('-m', '--comment', default='', help='复核意见')
+    s.add_argument('--with', dest='with_folder', metavar='目录', help='你修改后的整个目录：成为新的一版并通过')
+    s.add_argument('--labeler', help='用 --with 时必填：修改的人的姓名')
+    s.add_argument('--revision', type=int, help='你看的是第几版；这期间有了新的一版就不通过')
+    content_flags(s)
+    s.set_defaults(func=cmd_batch_approve)
+    s = bt.add_parser('import', help='把复核通过的批次加进它的数据池（和 fw dataset add 一样的检查，不用再上传）')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('--replace', action='store_true', help='池里已有同名目录时，整个换成这一份（默认拒绝）')
+    s.add_argument('--note', default='', help='备注')
+    s.add_argument('--allow-other-files', action='store_true', help='图片和标注以外的文件也一起入库')
+    s.add_argument('--force', action='store_true', help='有同名不同扩展名的图片也入库')
+    s.add_argument('--dry-run', action='store_true', help='只预览，不建版本')
+    s.add_argument('--yes', action='store_true', help='不问确认，直接建版本')
+    s.set_defaults(func=cmd_batch_import)
+    s = bt.add_parser('close', help='关闭一个不再继续的批次（内容保留，不会删除）')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('-m', '--comment', default='', help='原因')
+    s.set_defaults(func=cmd_batch_close)
 
     ts = sub.add_parser('trainset', help='训练集快照：create、list、show').add_subparsers(
         dest='action', required=True, metavar='操作')

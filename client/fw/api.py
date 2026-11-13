@@ -245,6 +245,30 @@ class Api:
     def create_change(self, name: str, body: dict):
         return self.post(f'/datasets/{name}/changes', body)
 
+    # --- labelling batches ---------------------------------------------------------------------
+    def batches(self, **params):
+        """mine, todo (waiting for this account's review), status, pool."""
+        return self.get('/batches', **{k: v for k, v in params.items() if v})
+
+    def batch(self, name: str):
+        return self.get(f'/batches/{name}')
+
+    def reviewers(self):
+        return self.get('/reviewers')['reviewers']
+
+    def create_batch(self, body: dict):
+        return self.post('/batches', body)
+
+    def revise_batch(self, name: str, body: dict):
+        return self.post(f'/batches/{name}/revisions', body)
+
+    def batch_step(self, name: str, step: str, body: dict):
+        """step: submit, reject, approve, close, import/preview, import."""
+        return self.post(f'/batches/{name}/{step}', body)
+
+    def compare_batch(self, name: str, old: Optional[int] = None, new: Optional[int] = None):
+        return self.get(f'/batches/{name}/compare', **{k: v for k, v in (('old', old), ('new', new)) if v is not None})
+
     def diff(self, old_id: int, new_id: int):
         return self.get('/diff', old=old_id, new=new_id)
 

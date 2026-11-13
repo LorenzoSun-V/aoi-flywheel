@@ -17,7 +17,7 @@ from fw.contract import (API_HEADER, API_LEVEL, MIN_CLIENT_LEVEL, peer_level)
 from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, MAX_PATH_BYTES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError,
                          FrameParser, ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
 
-from . import __version__, auth, changes, datasets, db, evals, events, jobs, models, predictions, trainsets
+from . import __version__, auth, batches, changes, datasets, db, evals, events, jobs, models, predictions, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -162,6 +162,63 @@ class ChangeBody(BaseModel):
     force: bool = False
     source: str = ''
     note: str = ''
+
+
+class BatchBody(BaseModel):
+    name: str
+    pool: str
+    dir: str
+    manifest_sha256: str          # the folder's own file list (paths inside the folder), already in the store
+    labeler: str
+    note: str = ''
+    source: str = ''
+    reviewer: Optional[str] = None   # also send it to review
+    allow_other_files: bool = False
+    force: bool = False
+
+
+class RevisionBody(BaseModel):
+    manifest_sha256: str
+    labeler: str
+    expect_latest_id: Optional[int] = None
+    note: str = ''
+    source: str = ''
+    reviewer: Optional[str] = None   # also send it to review; '-': the reviewer asked last time
+    allow_other_files: bool = False
+    force: bool = False
+
+
+class SubmitBody(BaseModel):
+    reviewer: Optional[str] = None   # nothing: the reviewer asked last time
+    revision: Optional[int] = None   # the revision the caller looked at
+
+
+class RejectBody(BaseModel):
+    comment: str
+    images: List[Annotated[str, Field(max_length=MAX_PATH_BYTES)]] = Field(default=[], max_length=500)
+    revision: Optional[int] = None
+
+
+class ApproveBody(BaseModel):
+    comment: str = ''
+    revision: Optional[int] = None
+    manifest_sha256: Optional[str] = None   # the reviewer's own corrected folder
+    labeler: Optional[str] = None
+    source: str = ''
+    allow_other_files: bool = False
+    force: bool = False
+
+
+class BatchImportBody(BaseModel):
+    replace: bool = False
+    allow_other_files: bool = False
+    force: bool = False
+    expect_latest_id: Optional[int] = None   # the pool's newest version, from the preview
+    note: str = ''
+
+
+class CloseBody(BaseModel):
+    comment: str = ''
 
 
 class UserBody(BaseModel):
@@ -328,6 +385,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     job_reader = need('jobs.read')
     job_writer = need('jobs.write')
     worker = need('jobs.run')
+    batch_reader = need('batches.read')
+    batch_writer = need('batches.write')
+    batch_reviewer = need('batches.review')
     model_reader = need('models.read')
     model_writer = need('models.write')
     release_writer = need('releases.write')
@@ -424,7 +484,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         return {'missing': [check_digest(d) for d, size in body.objects if store.size(check_digest(d)) != size]}
 
     @app.post('/api/v1/folder-check')
-    def folder_check(body: FolderCheckBody, user: dict = Depends(data_user)):
+    def folder_check(body: FolderCheckBody, user: dict = Depends(uploader)):
         """The checks of fw dataset import on a folder the web page picked (only its paths: the browser does
         the hashing). junk: system files to leave out; reasons: why it must not be imported as it stands."""
         junk = [p for p in body.paths if p.rpartition('/')[2].lower() in JUNK_NAMES]
@@ -615,6 +675,86 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def get_version_by_id(version_id: int, user: dict = Depends(data_reader)):
         with conn() as c:
             return datasets.get_version_by_id(c, version_id)
+
+    # --- labelling batches -------------------------------------------------------------------------
+    @app.get('/api/v1/batches')
+    def list_batches(mine: bool = False, todo: bool = False, status: str = '', pool: str = '',
+                     user: dict = Depends(batch_reader)):
+        """mine: the account's own; todo: those waiting for this account's review."""
+        with conn() as c:
+            return {'statuses': batches.STATUS, 'batches': batches.list_batches(c, user, mine, todo, status, pool)}
+
+    @app.get('/api/v1/reviewers')
+    def list_reviewers(user: dict = Depends(batch_writer)):
+        """The accounts a batch can be sent to for review."""
+        with conn() as c:
+            return {'reviewers': auth.names_with(c, 'batches.review')}
+
+    @app.post('/api/v1/batches', status_code=201)
+    def create_batch(body: BatchBody, user: dict = Depends(batch_writer)):
+        with conn() as c:
+            b = batches.create(c, store, user, body.name, body.pool, body.dir, body.manifest_sha256, body.labeler,
+                               body.note, body.source, body.reviewer, body.allow_other_files, body.force,
+                               before_freeze=hooks.get('before_freeze'))
+        log.info('batch %s uploaded by %s for %s/%s: %s files', b['name'], user['name'], b['pool'], b['dir'],
+                 b['file_count'])
+        return b
+
+    @app.get('/api/v1/batches/{name}')
+    def get_batch(name: str, user: dict = Depends(batch_reader)):
+        with conn() as c:
+            return batches.get(c, name, user)
+
+    @app.post('/api/v1/batches/{name}/revisions', status_code=201)
+    def revise_batch(name: str, body: RevisionBody, user: dict = Depends(batch_writer)):
+        with conn() as c:
+            b = batches.revise(c, store, user, name, body.manifest_sha256, body.labeler, body.expect_latest_id,
+                               body.note, body.source, body.reviewer, body.allow_other_files, body.force,
+                               before_freeze=hooks.get('before_freeze'))
+        log.info('batch %s: revision %s uploaded by %s', b['name'], b['revision'], user['name'])
+        return b
+
+    @app.post('/api/v1/batches/{name}/submit')
+    def submit_batch(name: str, body: SubmitBody, user: dict = Depends(batch_writer)):
+        with conn() as c:
+            return batches.submit(c, user, name, body.reviewer, body.revision)
+
+    @app.post('/api/v1/batches/{name}/reject')
+    def reject_batch(name: str, body: RejectBody, user: dict = Depends(batch_reviewer)):
+        with conn() as c:
+            return batches.reject(c, user, name, body.comment, body.images, body.revision)
+
+    @app.post('/api/v1/batches/{name}/approve')
+    def approve_batch(name: str, body: ApproveBody, user: dict = Depends(batch_reviewer)):
+        with conn() as c:
+            return batches.approve(c, store, user, name, body.comment, body.revision, body.manifest_sha256,
+                                   body.labeler, body.source, body.allow_other_files, body.force,
+                                   before_freeze=hooks.get('before_freeze'))
+
+    @app.post('/api/v1/batches/{name}/close')
+    def close_batch(name: str, body: CloseBody, user: dict = Depends(batch_writer)):
+        with conn() as c:
+            return batches.close(c, user, name, body.comment)
+
+    @app.get('/api/v1/batches/{name}/compare')
+    def compare_batch(name: str, old: Optional[int] = None, new: Optional[int] = None,
+                      user: dict = Depends(batch_reader)):
+        """What changed between two revisions: files, and per image the boxes added, removed or changed."""
+        with conn() as c:
+            return batches.compare(c, store, name, old, new)
+
+    @app.post('/api/v1/batches/{name}/import/preview')
+    def preview_batch_import(name: str, body: BatchImportBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            return batches.import_plan(c, store, name, body.replace, body.allow_other_files, body.force)
+
+    @app.post('/api/v1/batches/{name}/import', status_code=201)
+    def import_batch(name: str, body: BatchImportBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            out = batches.import_(c, store, user, name, body.expect_latest_id, body.replace, body.allow_other_files,
+                                  body.force, body.note, before_freeze=hooks.get('before_freeze'))
+        log.info('batch %s imported by %s as %s', out['batch']['ref'], user['name'], out['version']['ref'])
+        return out
 
     # --- training-set snapshots ------------------------------------------------------------------
     @app.get('/api/v1/trainsets')

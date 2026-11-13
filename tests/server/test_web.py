@@ -148,7 +148,7 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
         return json.loads(p.stdout.strip().splitlines()[-1])
 
     seen = walk('submit', data, r['ref'])  # other tests' runners are listed too
-    assert seen['nav'] == ['数据集', '模型', '任务', '预测集', '操作记录']
+    assert seen['nav'] == ['数据集', '标注批次', '模型', '任务', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
     assert 'nope' in seen['refused']
@@ -222,7 +222,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
-    assert seen['nav'] == ['数据集', '模型', '任务', '预测集', '操作记录', '账号']
+    assert seen['nav'] == ['数据集', '标注批次', '模型', '任务', '预测集', '操作记录', '账号']
     assert seen['token'].startswith('fw_') and '只显示这一次' in seen['tokens'] and '现场笔记本' in seen['tokens']
     assert '账号名只能用' in seen['refused']
     admin = tokens['admin_name']
@@ -231,7 +231,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert 'from=algo' in seen['events'][1][4] and 'to=field' in seen['events'][1][4]
     assert seen['token'] not in json.dumps(seen['events'])
     # the account it made works, as a field account: it reads, and is offered nothing it may not do
-    assert seen['fieldNav'] == ['数据集', '模型', '预测集'] and seen['fieldWho'] == f'{name}（现场实施）'
+    assert seen['fieldNav'] == ['数据集', '标注批次', '模型', '预测集'] and seen['fieldWho'] == f'{name}（现场实施）'
     assert seen['fieldButtons'] == [] and '现场实施账号不能管理账号' in seen['fieldUsers']
     assert '现场笔记本' in seen['mine'] and '有效' in seen['mine']
     me = make_api(token=seen['token']).me()
@@ -329,3 +329,39 @@ def test_an_older_folder_check_answer_is_not_used(service, tokens, api, tmp_path
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert not seen['go'] and seen['puts'] == 0
     assert '图片和标注以外的文件' in seen['shown'] and '2 个文件' in seen['shown']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tmp_path):
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    a, b = real_png(64, 32, seed), real_png(64, 32, seed + 1)
+    base = write_tree(tmp_path / 'base', {'20261101/x.png': real_png(64, 32, seed + 2)})
+    day = write_tree(tmp_path / 'one' / '20261104', {'a.png': a, 'a.json': label('scratch'), 'b.png': b})
+    fixed = write_tree(tmp_path / 'two' / '20261104', {'a.png': a, 'a.json': label('scratch'), 'b.png': b,
+                                                       'b.json': label('dent')})
+    pool = f'W-{os.urandom(4).hex()}'
+    name = f'B-{os.urandom(4).hex()}'
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '')
+    ops.import_folder(api, pool, base, echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'batch.cjs'), service.url + '/', tokens['field'], tokens['algo'],
+                        tokens['algo_name'], pool, name, str(shots), str(day), str(fixed)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert '标注批次' in seen['fieldNav'] and '操作记录' not in seen['fieldNav']
+    assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
+    assert seen['uploaded'] == '待复核' and name in seen['todo']
+    assert '退回意见' in seen['noComment']
+    assert 'b.png 漏标' in seen['rejected'] and seen['sameReviewer'] == tokens['algo_name']
+    assert '标注有变化的图片 1 张：加框 1' in seen['changes'] and seen['resubmitted'] == '待复核'
+    assert '新增 20261104/：4 个文件' in seen['plan'] and f'建 {pool}@2' in seen['plan']
+    assert f'已入库为 {pool}@2' in seen['done'] and seen['buttons'] == 0
+    b = api.batch(name)
+    assert b['status'] == 'imported' and [r['labeler'] for r in b['revisions']] == ['张三', '李四']
+    assert [s['step'] for s in b['steps']] == ['upload', 'submit', 'reject', 'upload', 'submit', 'approve', 'import']
+    assert api.version(pool, 2)['source'] == f'batch:{name}@2'
