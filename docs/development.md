@@ -10,6 +10,8 @@
 | `docs/commands.md` | 每条命令、选项、环境变量、常见问题 | 加命令、加选项、改输出或报错 |
 | `docs/architecture.md` | 设计和取舍（在线设计文档的副本） | 设计变了 |
 | `docs/manifest-format.md` | 清单格式 1 | 格式变了（只能出新版本，见下文） |
+| `docs/dev-guide.md` | 常见任务一步一步怎么做（加命令、加接口、加表、改网页）、测试里踩过的坑、提交前的核对清单 | 做法或约定变了，或者又踩了一个值得记下的坑 |
+| `CLAUDE.md`（仓库根目录） | 给 Claude 的工作说明：检查命令、绝对不要做的事、每个改动要带上什么 | 检查命令或硬规则变了 |
 | `docs/trainset-format.md` | 训练集快照的目录、`classes.txt`、`trainset.json`、划分规则 | 快照格式或划分规则变了 |
 | `docs/development.md` | 本文 | 分层、规则、测试方式变了 |
 | `CHANGELOG.md` | 每个 PR 用户能看到的变化 | 每个 PR |
@@ -66,7 +68,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 
 ### 分层（`lint-imports` 检查）
 
-- 服务端只能往下调：`cli`、`app` → `evals` → `jobs`、`models` → `trainsets` → `changes` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`。
+- 服务端只能往下调：`cli`、`app` → `evals` → `predictions` → `jobs`、`models` → `trainsets`、`batches` → `changes` → `datasets`、`auth` → `store`、`db`、`settings`、`formats`、`events`、`labels`、`sites`。写在同一层的模块（例如 `trainsets` 和 `batches`）不能互相 import。
 - 客户端永远不 import 服务端。
 - `fw.contract` 不依赖 `fw` 里的任何其他模块：服务端也 import 它，它必须保持纯粹。
 
@@ -254,7 +256,7 @@ CI（`.github/workflows/ci.yml`）有五个作业：服务端和全部测试（L
 
 **加导入检查**：写在 `checks.py`，分清「拒绝」（放进 `blocking()`）和「只提醒」；拒绝的要给出能照着做的办法和放行的选项。
 
-**下一步（第二步其余部分）**：模型版本、引擎、评估报告、发布和追溯链，会是 `server/fwserver/` 里在 `trainsets.py` 之上的新模块和新的迁移，客户端加 `fw model …` 一组命令。模型版本引用训练集快照的版本 id 和它的类别表。
+每种任务一步一步怎么做、照着哪段现成的代码写、测试里容易错在哪，见 [开发指南](dev-guide.md)。
 
 ## 约定
 
