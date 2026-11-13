@@ -1,0 +1,56 @@
+# aoi-flywheel：给 Claude 的工作说明
+
+这是工业质检（AOI）的数据飞轮平台：存数据集的版本、标注批次、训练集快照、模型和评估报告，保证每个发布出去的模型都能追到它用过的每一张图。两个 Python 包：`client/fw`（命令行 `fw`，Python 3.8 起，Windows 和 Linux）和 `server/fwserver`（服务 `fw-server`，FastAPI + PostgreSQL 16 + 按哈希存文件的文件库，只在 Linux 上跑）。网页在 `server/fwserver/web/`，原生 ES 模块，不用构建。
+
+动手之前先读：
+
+- `docs/dev-guide.md`：常见任务一步一步怎么做（加命令、加接口、加表、改网页），以及踩过的坑。**大多数任务照它做就行。**
+- `docs/development.md`：代码怎么分层、哪些规则绝不能破（每条有对应的测试）。
+- `docs/architecture.md`：为什么这样设计。拿不准一个改动合不合设计时读它。
+- `docs/commands.md`：每条命令和网页每一页现在的行为。
+
+## 检查
+
+```
+pip install -c deploy/constraints.txt -e ./client -e ./server pytest import-linter pillow
+lint-imports                                   # 模块分层
+node --check server/fwserver/web/app.js        # 改了网页
+node --test tests/web/helpers.test.mjs         # 网页里的纯函数
+pytest -q tests/client                         # 不需要数据库
+FW_TEST_ADMIN_DSN=postgresql://fw@127.0.0.1:5432/postgres pytest -q tests    # 全部，约 3 分钟
+```
+
+- 服务端测试要一个能建库的 PostgreSQL 16（`FW_TEST_ADMIN_DSN`）。没有就先装一个起来，不要因为没有数据库就不跑服务端测试。
+- 改的过程中只跑相关的测试文件，提交前把全部测试跑一遍。
+- 网页的浏览器测试要 node 的 Playwright；没装时这些测试会跳过，这种情况要在 PR 里写明「浏览器测试没跑」。
+
+## 绝对不要做
+
+1. **不要改已经合并的迁移文件**（`server/fwserver/migrations/0001…`）。改表结构只能加下一个编号的新文件。
+2. **不要绕开冻结**：版本、模型版本、评估报告、发布建好后内容不变；操作记录只增不改；版本号只能撤销不能改；现场和产线的代号、推理环境的版本、预测集、标注批次的经过也都不能改。这些以及**所有带 guard 或冻结触发器的表**，都由数据库触发器守着（在 `migrations/` 里找 `CREATE TRIGGER`）。没列在这里不等于能改。不要加能改、能删它们的代码，也不要为了让测试过去而放宽触发器。
+3. **不要改 `.importlinter` 来让分层检查通过**。下层模块不能 import 上层，同一层用 `|` 并列的模块不能互相 import。
+4. **不要跳过、删掉或放宽测试来让 CI 变绿**。测试失败先找原因。
+5. **不要悄悄改格式和接口**：清单格式 1、训练集快照格式 1、`fw-objects 1`、`/api/v1` 已有字段的含义、路径规则、现场和产线的代号。这些有别的机器和已经冻结的数据在用。接口只加不改。
+6. **不要把真实的现场数据（图片、标注、模型）提交进仓库**。测试数据都是测试里生成的。
+7. **预标注的结果不自动写回成批次的新版本**，由人取回、改好、再上传。
+8. **平台只做 TensorRT 推理，版本里管的是 ONNX**。永远不加载 `.pt` / `.pth`；本机用 ONNX 建出来的引擎只是缓存，不上传，也不随发布出去，现场自己用 ONNX 建。不要加别的推理后端或别的硬件。
+9. 不要引入 ORM、前端框架、构建步骤或新的重依赖。`fw` 客户端要能在 Python 3.8 和 Windows 上装，依赖只有 httpx。
+
+碰到下面这些，先停下来问人，不要自己定：要改上面第 5 条里的任何一项；要改权限表里已有的一行（谁能做什么）；要动 `store.py` 的落盘和停写逻辑、`deploy/` 的备份恢复脚本；一个需求有两种读法而且做出来的数据不一样。
+
+## 每个改动都要带上
+
+- 测试：新功能测正常、没权限、出错三种情况；修问题先写一个在旧代码上失败的测试。
+- `CHANGELOG.md`：在最上面「未发布」那一节加一段，写给用的人看，说用起来有什么不一样。
+- 文档：命令、选项、网页变了改 `docs/commands.md`；设计变了改 `docs/architecture.md`；多了一条要守的规则，在 `docs/development.md` 的规则表里加一行，写上守它的测试。
+- 接口多了东西：`client/fw/contract.py` 的 `API_LEVEL` 加一；`fw` 用了旧服务器没有的东西，把 `MIN_SERVER_LEVEL` 提到这一版。
+
+## 写法
+
+- 给人看的字（命令输出、报错、帮助、网页）用中文，写成能照着做的话：发生了什么，下一步怎么办。不打印 Python 堆栈。
+- 用户看到的词要和现有的一致：「版本号」（`v0.1.0` 这种，不叫标签）、「现场 / 产线」、「数据池」、「训练集快照」、「标注批次」、「凭据」（不叫 token）。
+- 代码里的注释和提交说明用英文。测试名写成一句话，说它保证什么（`test_the_lists_are_browsed_by_site_and_line`）。
+- SQL 直接写在所属的模块里，用参数绑定，不拼字符串。每张表只有管它的那个模块写。
+- 数据库连接是 autocommit 的：改东西的函数把全部改动和 `events.record` 放进同一个 `with conn.transaction():`（照 `datasets.add_place` 写）。
+- 服务端的业务逻辑不写在 `app.py`（它只管路由、权限、借连接，不开事务），客户端的不写在 `cli.py`（它只管参数和打印）。
+- 一个 PR 做一件事。分支和合并：PR 开到 `main`，等人说可以再合并，审查通过不等于可以合并。
