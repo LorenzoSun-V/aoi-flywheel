@@ -582,7 +582,7 @@ def get_batch_prelabels(api: Api, cache: Cache, name: str, dest, threshold: Opti
     r = done[0]
     echo(f'{b["name"]} 第 {b["revision"]} 版的预标注：{r["model"]}，预测集 #{r["prediction_set"]}')
     return get_predictions(api, cache, r['prediction_set'], dest, threshold=threshold, replace=replace, link='copy',
-                           workers=workers, echo=echo)
+                           workers=workers, echo=echo, at=f'{b["name"]}@{b["revision"]}')
 
 
 def import_batch(api: Api, name: str, replace: bool = False, allow_other_files: bool = False, force: bool = False,
@@ -1533,8 +1533,11 @@ def prelabel_json(image_name: str, size: List[int], boxes: list, classes: List[s
 
 
 def get_predictions(api: Api, cache: Cache, set_id: int, dest, threshold: Optional[float] = None,
-                    replace: bool = False, link: str = 'auto', workers: int = 8, echo: Echo = print) -> dict:
-    """Lay out the images of a prediction set in an empty folder, with a LiteAnno label next to each image that
+                    replace: bool = False, link: str = 'auto', workers: int = 8, echo: Echo = print,
+                    at: Optional[str] = None) -> dict:
+    """at: lay the images and existing labels out from this version instead of the one the set was made on (a
+    later revision of a batch with the same images).
+    Lay out the images of a prediction set in an empty folder, with a LiteAnno label next to each image that
     has boxes scoring at least threshold (default 0.3; not below the set's conf, which is what was kept). An
     image that already has a JSON label in the version keeps it (laid out as it is) unless replace; with replace,
     its label still stays when the model has no box above the threshold for it. classes.txt
@@ -1548,7 +1551,7 @@ def get_predictions(api: Api, cache: Cache, set_id: int, dest, threshold: Option
     files = {f['path']: f for f in s['files']}
     doc = json.loads(api.read_object(files['predictions.json']['sha256']).decode('utf-8'))
     classes = doc['classes']
-    name, number = parse_ref(s['data']['ref'])
+    name, number = parse_ref(at or s['data']['ref'])
     version = api.version(name, number)
     entries = parse_manifest(api.read_object(version['manifest_sha256']))
     by_path = {e[0]: e for e in entries}

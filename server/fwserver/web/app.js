@@ -1632,9 +1632,13 @@ async function batchPage(name, query) {
         el('span', { class: 'muted' }, `或者：fw batch get ${b.name}，用 LiteAnno 改好后 fw batch update ${b.name} <目录> --labeler <姓名>`)));
     }
     const pre = await api.batchPrelabels(b.name);
-    if (pre.prelabels.some((r) => ['queued', 'running'].includes(r.status))) refreshLater(async () => {  // not while something is being typed
-      if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) await draw();
-    }, 10000);
+    if (pre.prelabels.some((r) => ['queued', 'running'].includes(r.status))) {
+      const tick = async () => {  // while something is being typed: not now, but ask again
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) refreshLater(tick, 10000);
+        else await draw();
+      };
+      refreshLater(tick, 10000);
+    }
     if (has('prelabel')) {
       const d = pre.defaults;
       const model = el('input', { type: 'text', id: 'prelabel-model', value: d.model ? d.model.ref : '',

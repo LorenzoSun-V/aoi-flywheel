@@ -428,8 +428,10 @@ def prelabel_target(conn, user: dict, name: str, revision: Optional[int] = None,
 
 
 def note_prelabel(conn, user: dict, b: dict, job_id: int, what: str) -> None:
-    """Inside the transaction that queued (or found) the job, with the batch locked: one step per job."""
-    if conn.execute('SELECT 1 FROM batch_steps WHERE batch_id = %s AND job_id = %s', (b['id'], job_id)).fetchone():
+    """Inside the transaction that queued (or found) the job, with the batch locked: one step per job and
+    revision (a later revision with the same images is answered by the same job)."""
+    if conn.execute('SELECT 1 FROM batch_steps WHERE batch_id = %s AND job_id = %s AND version_id = %s',
+                    (b['id'], job_id, b['latest_id'])).fetchone():
         return
     _step(conn, b['id'], user['user_id'], 'prelabel', b['latest_id'], comment=what, job_id=job_id)
     conn.execute('UPDATE batches SET updated_at = now() WHERE id = %s', (b['id'],))

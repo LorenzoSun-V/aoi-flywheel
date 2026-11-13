@@ -306,6 +306,25 @@ def test_a_batch_is_pre_labelled_by_its_owner(api, make_api, gpu, setup, tmp_pat
         assert status_of(lambda: field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner']})) == 409
         with pytest.raises(ops.FwError, match='还没有预标注'):
             ops.get_batch_prelabels(field, cache, name, tmp_path / 'none', echo=quiet)
+        # rejected: revision 2 has the same images as revision 1, so the same job answers, noted for revision 2
+        api.batch_step(name, 'reject', {'comment': '再看看'})
+        second = field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner']})
+        assert second['reused'] and second['id'] == row['job_id']
+        assert field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner']})['id'] == row['job_id']
+        assert [(x['revision'], x['status'], x['job_id']) for x in field.batch_prelabels(name)['prelabels']] \
+            == [(2, 'done', row['job_id']), (1, 'done', row['job_id'])]
+        got = ops.get_batch_prelabels(field, cache, name, tmp_path / 'two', echo=quiet)
+        assert got['images'] == 3 and got['kept'] == 3  # laid out from revision 2, whose images all have labels
+        assert json.loads((tmp_path / 'two' / 'raw0.json').read_text(encoding='utf-8'))['checked'] is True
+        # one unfinished pre-label per batch
+        more = field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner'], 'conf': 0.2})
+        assert not more['reused']
+        assert status_of(lambda: field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner'],
+                                                            'conf': 0.3})) == 409
+        assert field.prelabel_batch(name, {'model': mv['ref'], 'runner': r['runner'], 'conf': 0.2})['id'] == more['id']
+        assert not [j for j in api.jobs(status='queued') if j['params'].get('conf') == 0.3
+                    and j['params'].get('data', {}).get('ref') == f'{name}@2']
+        api.cancel_job(more['id'])
     finally:
         cache.close()
     # the command line

@@ -163,7 +163,10 @@ def submit_for_batch(conn, store: Store, user: dict, name: str, model: Optional[
                      runner: Optional[str] = None, conf: Optional[float] = None,
                      revision: Optional[int] = None) -> dict:
     """Queue the pre-labelling of the newest revision of a batch, for its owner. Returns the job (reused: as
-    for submit). The job and the batch's note of it are written together."""
+    for submit). The job and the batch's note of it are written together. A revision with the same images as
+    an earlier one (only labels changed) reuses that revision's job, since the model would answer the same,
+    and the batch notes the job for this revision too. One unfinished pre-label per batch: the GPU queue is
+    shared by everyone."""
     b = batches.prelabel_target(conn, user, name, revision)
     defaults = batch_defaults(conn, name)
     if not model:
@@ -181,15 +184,20 @@ def submit_for_batch(conn, store: Store, user: dict, name: str, model: Optional[
         params['conf'] = conf
     with conn.transaction():
         now = batches.prelabel_target(conn, user, name, b['revision'], lock=True)
+        busy = [j for j, _ in batches.prelabel_jobs(conn, name)
+                if conn.execute("SELECT 1 FROM jobs WHERE id = %s AND status IN ('queued', 'running')", (j,)).fetchone()]
         job = submit(conn, store, user, runner, params)
+        if busy and job['id'] not in busy:  # raising takes the new job back
+            raise DatasetError(409, f'{b["name"]} 的预标注任务 {busy[0]} 还没跑完；等它跑完再换模型或分数重跑')
         batches.note_prelabel(conn, user, now, job['id'],
                               f'{job["params"]["model"]["ref"]}，推理环境 {job["runner"]}，最低分数 {job["params"]["conf"]:g}')
     return job
 
 
-def for_batch(conn, name: str) -> List[dict]:
+def for_batch(conn, name: str, detail: bool = True) -> List[dict]:
     """The pre-labels asked for a batch, newest first: the job's state and, once done, its prediction set.
-    For accounts that see batches but not the job queue."""
+    For accounts that see batches but not the job queue; detail false: without the worker's error text (it can
+    name paths on the GPU machine), for accounts that may not read jobs."""
     out = []
     for job_id, revision in reversed(batches.prelabel_jobs(conn, name)):
         j = jobs.get_job(conn, job_id)
@@ -198,7 +206,8 @@ def for_batch(conn, name: str) -> List[dict]:
                     'queued_ahead': j['queued_ahead'], 'model': j['params']['model']['ref'], 'runner': j['runner'],
                     'conf': j['params']['conf'], 'images': j['params']['data']['images'],
                     'prediction_set': result.get('prediction_set'), 'boxes': result.get('boxes'),
-                    'error': j['error'], 'submitted_by': j['submitted_by'], 'created_at': j['created_at'],
+                    'error': j['error'] if detail or not j['error'] else '失败原因请算法工程师在任务页看',
+                    'submitted_by': j['submitted_by'], 'created_at': j['created_at'],
                     'finished_at': j['finished_at']})
     return out
 

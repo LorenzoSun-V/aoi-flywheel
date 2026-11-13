@@ -747,7 +747,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def batch_prelabels(name: str, user: dict = Depends(batch_reader)):
         """The pre-labels asked for this batch and their state, and what one runs with by default."""
         with conn() as c:
-            return {'prelabels': predictions.for_batch(c, name), 'defaults': predictions.batch_defaults(c, name)}
+            return {'prelabels': predictions.for_batch(c, name, auth.allowed(user['role'], 'jobs.read')),
+                    'defaults': predictions.batch_defaults(c, name)}
 
     @app.post('/api/v1/batches/{name}/prelabel', status_code=201)
     def prelabel_batch(name: str, body: PrelabelBody, user: dict = Depends(batch_writer)):

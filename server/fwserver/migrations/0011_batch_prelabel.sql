@@ -7,5 +7,6 @@ ALTER TABLE batch_steps ADD CONSTRAINT batch_steps_step_check
   CHECK (step IN ('upload', 'submit', 'reject', 'approve', 'import', 'close', 'prelabel'));
 ALTER TABLE batch_steps ADD COLUMN job_id bigint REFERENCES jobs(id);   -- prelabel: the prediction job
 ALTER TABLE batch_steps ADD CONSTRAINT batch_steps_prelabel_job CHECK ((step = 'prelabel') = (job_id IS NOT NULL));
--- a job is noted once per batch, however often it is asked for again
-CREATE UNIQUE INDEX batch_steps_job ON batch_steps (batch_id, job_id) WHERE job_id IS NOT NULL;
+-- a job is noted once per revision, however often it is asked for again; a later revision with the same
+-- images (only the labels changed) is answered by the same job and notes it again
+CREATE UNIQUE INDEX batch_steps_job ON batch_steps (batch_id, job_id, version_id) WHERE job_id IS NOT NULL;
