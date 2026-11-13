@@ -229,6 +229,25 @@ class Api:
     def versions(self, name: str):
         return self.get(f'/datasets/{name}/versions')
 
+    def labels(self, name: str):
+        """Every label (v0.1.0) of a dataset or snapshot, and what the next could be."""
+        return self.get(f'/datasets/{name}/labels')
+
+    def add_label(self, name: str, number, label: str, note: str = ''):
+        return self.post_retried(f'/datasets/{name}/versions/{number}/labels', {'label': label, 'note': note})
+
+    def retire_label(self, name: str, label: str, note: str):
+        return self.post(f'/datasets/{name}/labels/{label}/retire', {'note': note})
+
+    def model_labels(self, name: str):
+        return self.get(f'/models/{name}/labels')
+
+    def add_model_label(self, name: str, number, label: str, note: str = ''):
+        return self.post_retried(f'/models/{name}/versions/{number}/labels', {'label': label, 'note': note})
+
+    def retire_model_label(self, name: str, label: str, note: str):
+        return self.post(f'/models/{name}/labels/{label}/retire', {'note': note})
+
     def create_version(self, name: str, manifest_sha256: str, parent_id: Optional[int],
                        expect_latest_id: Optional[int], source: str, note: str):
         """expect_latest_id: the dataset's latest version as this client saw it; the server refuses the new

@@ -14,9 +14,9 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, List, Optional, Set, Tuple
 
-from fw.contract import ContractError, classify_changes, parse_manifest
+from fw.contract import LABEL_HELP, ContractError, classify_changes, is_label, parse_manifest, split_ref
 
-from . import events
+from . import events, labels
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
@@ -30,6 +30,15 @@ class DatasetError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+def parse_ref(ref: Any, what: str = '版本', labels: bool = True) -> Tuple[str, str]:
+    """(name, which) of a version written by a person: see fw.contract.split_ref. For every place of the
+    server that is handed such a text."""
+    try:
+        return split_ref(ref, what, labels)
+    except ContractError as e:
+        raise DatasetError(400, str(e))
 
 
 def check_digest(digest: str) -> str:
@@ -63,7 +72,15 @@ def _version(row: dict) -> dict:
             'ref': f'{row["dataset"]}@{row["number"]}', 'parent': parent,
             'manifest_sha256': row['manifest_sha256'], 'file_count': row['file_count'],
             'total_bytes': row['total_bytes'], 'source': row['source'], 'note': row['note'],
-            'created_by': row['created_by'], 'created_at': _stamp(row['created_at'])}
+            'created_by': row['created_by'], 'created_at': _stamp(row['created_at']), 'labels': []}
+
+
+def _labelled(conn, versions: List[dict]) -> List[dict]:
+    """With the labels (v0.1.0) of each."""
+    found = labels.of(conn, 'dataset', [v['id'] for v in versions])
+    for v in versions:
+        v['labels'] = found[v['id']]
+    return versions
 
 
 _DATASET = """
@@ -78,8 +95,9 @@ def _datasets(conn, rows: List[dict]) -> List[dict]:
     latest_ids = [r['latest_id'] for r in rows if r['latest_id'] is not None]
     latest = {}
     if latest_ids:
-        for v in conn.execute(_VERSION + ' WHERE v.id = ANY(%s)', (latest_ids,)).fetchall():
-            latest[v['id']] = _version(v)
+        for v in _labelled(conn, [_version(v) for v in conn.execute(_VERSION + ' WHERE v.id = ANY(%s)',
+                                                                    (latest_ids,)).fetchall()]):
+            latest[v['id']] = v
     return [{'id': r['id'], 'name': r['name'], 'site': r['site'], 'line': r['line'], 'kind': r['kind'],
              'note': r['note'], 'created_by': r['created_by'], 'created_at': _stamp(r['created_at']),
              'version_count': r['version_count'], 'latest': latest.get(r['latest_id'])} for r in rows]
@@ -121,22 +139,91 @@ def _insert_dataset(conn, user_id: int, name: str, site: str, line: str, kind: s
 def list_versions(conn, name: str) -> List[dict]:
     dataset = get_dataset(conn, name)
     rows = conn.execute(_VERSION + ' WHERE v.dataset_id = %s ORDER BY v.number', (dataset['id'],)).fetchall()
-    return [_version(r) for r in rows]
+    return _labelled(conn, [_version(r) for r in rows])
 
 
 def get_version(conn, name: str, number: str) -> dict:
+    """number: a version number, a label (v0.1.0) or 'latest'."""
     dataset = get_dataset(conn, name)
+    number = str(number)
     if number == 'latest':
         if dataset['latest'] is None:
             raise DatasetError(404, f'{dataset["name"]} 还没有版本')
         return dataset['latest']
-    if not str(number).isdigit():
-        raise DatasetError(400, '版本序号应为正整数或 latest')
+    if is_label(number):
+        found = labels.find(conn, 'dataset', dataset['id'], number)
+        if found is None:
+            raise DatasetError(404, f'{dataset["name"]} 没有版本号 {number}')
+        if found['retired_at'] is not None:
+            raise DatasetError(404, f'{dataset["name"]} 的版本号 {number} 已撤销'
+                                    + (f'（{found["retired_note"]}）' if found['retired_note'] else ''))
+        return get_version_by_id(conn, found['version_id'])
+    if not (number.isascii() and number.isdigit()):
+        raise DatasetError(400, '版本应为序号（正整数）、版本号（v0.1.0）或 latest')
     row = conn.execute(_VERSION + ' WHERE v.dataset_id = %s AND v.number = %s',
                        (dataset['id'], int(number))).fetchone()
     if row is None:
         raise DatasetError(404, f'没有版本 {dataset["name"]}@{number}')
-    return _version(row)
+    return _labelled(conn, [_version(row)])[0]
+
+
+def _note(note: Any) -> str:
+    note = (note or '').strip() if isinstance(note, str) else None
+    if note is None or len(note) > labels.NOTE_MAX:
+        raise DatasetError(400, f'备注最多 {labels.NOTE_MAX} 个字')
+    return note
+
+
+def check_label(label: Any) -> str:
+    if not is_label(label):
+        raise DatasetError(400, f'{label!r}：{LABEL_HELP}')
+    return label
+
+
+def list_labels(conn, name: str) -> dict:
+    """Every label of a dataset (also the retired ones) and what the next could be."""
+    dataset = get_dataset(conn, name)
+    out = labels.listing(conn, 'dataset', dataset['id'])
+    for row in out['labels']:
+        row['ref'] = f'{dataset["name"]}@{row["number"]}'
+    return dict(out, dataset=dataset['name'])
+
+
+def add_label(conn, user_id: int, name: str, number: str, label: str, note: str = '') -> dict:
+    """Give a version a label. A label is written once: it names this version for good."""
+    label, note = check_label(label), _note(note)
+    version = get_version(conn, name, number)
+    if version['kind'] == 'batch':
+        raise DatasetError(400, f'{version["dataset"]} 是标注批次，它的各版只有序号，不起版本号')
+    dataset = get_dataset(conn, name)
+    with conn.transaction():
+        if not labels.add(conn, 'dataset', dataset['id'], version['id'], label, note, user_id):
+            was = labels.find(conn, 'dataset', dataset['id'], label)
+            if was['retired_at'] is None and was['version_id'] == version['id']:
+                return version  # asked twice
+            where = get_version_by_id(conn, was['version_id'])['ref']
+            raise DatasetError(409, f'{dataset["name"]} 的版本号 {label} 已经'
+                                    + (f'撤销（原来指 {where}），撤销的版本号不能再用' if was['retired_at'] is not None
+                                       else f'用在 {where} 上，版本号定了就不能挪到别的版本') + '；换一个')
+        events.record(conn, user_id, 'version.label', version['ref'], label=label, note=note)
+    return get_version_by_id(conn, version['id'])
+
+
+def retire_label(conn, user_id: int, name: str, label: str, note: str) -> dict:
+    """Take a label off its version (it was put on the wrong one). The string stays taken."""
+    label, note = check_label(label), _note(note)
+    if not note:
+        raise DatasetError(400, '撤销版本号要写原因')
+    dataset = get_dataset(conn, name)
+    was = labels.find(conn, 'dataset', dataset['id'], label)
+    if was is None:
+        raise DatasetError(404, f'{dataset["name"]} 没有版本号 {label}')
+    with conn.transaction():
+        if not labels.retire(conn, 'dataset', dataset['id'], label, note, user_id):
+            raise DatasetError(409, f'{dataset["name"]} 的版本号 {label} 已经撤销过了')
+        version = get_version_by_id(conn, was['version_id'])
+        events.record(conn, user_id, 'version.unlabel', version['ref'], label=label, note=note)
+    return version
 
 
 def version_files(conn, version_id: int) -> List[Tuple[str, str, int]]:
@@ -150,7 +237,7 @@ def get_version_by_id(conn, version_id: int) -> dict:
     row = conn.execute(_VERSION + ' WHERE v.id = %s', (version_id,)).fetchone()
     if row is None:
         raise DatasetError(404, f'没有 id 为 {version_id} 的版本')
-    return _version(row)
+    return _labelled(conn, [_version(row)])[0]
 
 
 def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256: str, parent_id: Optional[int],

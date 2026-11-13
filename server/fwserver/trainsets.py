@@ -106,11 +106,7 @@ def _stem(path: str) -> str:
     return path[: len(path) - len(suffix)] if suffix else path
 
 
-def _parse_ref(ref: str) -> Tuple[str, str]:
-    name, sep, number = (ref or '').partition('@')
-    if not name:
-        raise DatasetError(400, f'版本写法不对：{ref!r}，应为 名称@序号')
-    return name, (number if sep else 'latest')
+_parse_ref = datasets.parse_ref
 
 
 def _bad_name(name) -> bool:
@@ -733,7 +729,7 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
            before_freeze=None) -> dict:
     """Build the snapshot again exactly as planned and freeze it. expect_latest_id is the newest snapshot of
     this name the person saw in the preview: if another one was made meanwhile, nothing is created (409)."""
-    loose = [ref for ref in o.sources if not _parse_ref(ref)[1].isdigit()]
+    loose = [ref for ref in o.sources if _parse_ref(ref)[1] == 'latest']  # a number or a label: one version for good
     if loose:
         raise DatasetError(400, f'建快照时来源要写成具体版本（预览时定下的那个），例如 名称@3：{_examples(loose)}')
     p = plan(conn, store, name, o)

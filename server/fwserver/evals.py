@@ -32,13 +32,7 @@ TOOL = 'aoi-deteval'
 DETEVAL_NAME = re.compile(r'[^A-Za-z0-9._+-]')
 
 
-def _ref(ref: Any, what: str) -> tuple:
-    if not isinstance(ref, str) or not ref.strip():
-        raise DatasetError(400, f'要写{what}')
-    name, sep, number = ref.strip().partition('@')
-    if not name:
-        raise DatasetError(400, f'{what}写法不对：{ref!r}，应为 名称@序号')
-    return name, (number if sep else 'latest')
+_ref = datasets.parse_ref
 
 
 def _onnx(conn, mv: dict) -> List[list]:

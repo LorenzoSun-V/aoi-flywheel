@@ -17,6 +17,8 @@ LIMIT = 500
 ACTIONS = {
     'dataset.create': '新建数据集',
     'version.create': '建版本',
+    'version.label': '给版本起版本号',
+    'version.unlabel': '撤销版本号',
     'batch.upload': '上传批次版本',
     'batch.prelabel': '批次预标注',
     'batch.submit': '批次提交复核',
@@ -27,6 +29,8 @@ ACTIONS = {
     'model.create': '新建模型',
     'model_version.register': '登记模型版本',
     'model_version.tag': '改模型标签',
+    'model_version.label': '给模型版本起版本号',
+    'model_version.unlabel': '撤销模型版本号',
     'eval.register': '登记评估报告',
     'prediction_set.register': '登记预测集',
     'release.register': '登记发布',

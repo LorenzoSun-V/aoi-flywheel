@@ -95,5 +95,6 @@ details.warn summary { color: var(--warn); }
 .tag.warn { background: #fff6e0; color: var(--warn); }
 .tag.bad { background: #fdecec; color: var(--bad); }
 .tag.ok { background: #e7f6ec; color: var(--ok); }
+.tag.ver { background: #e7f6ec; color: var(--ok); font-variant-numeric: tabular-nums; }
 .tag.muted { background: #f1f5f9; color: inherit; }
 textarea { font: inherit; width: 100%; }
