@@ -23,8 +23,8 @@ const { chromium } = require('playwright');
   seen.datasets = await page.$$eval('table tr td:first-child', (tds) => tds.map((t) => t.textContent));
   seen.who = await page.textContent('#who');
   await page.screenshot({ path: `${out}/datasets.png` });
-  await page.click(`text=${dataset}`);
-  await page.waitForSelector('h2');
+  await page.click(`a:text-is("${dataset}")`);
+  await page.waitForSelector('.crumbs');  // the dataset's page (the list has headings too)
   seen.versions = await page.$$eval('table tr td:first-child', (tds) => tds.map((t) => t.textContent));
   await page.click(`text=${dataset}@2`);
   await page.waitForSelector('.folders');

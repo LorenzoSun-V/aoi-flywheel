@@ -239,6 +239,38 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
+    from fw import ops
+    from helpers import quiet, register_place
+    from test_trainsets import make, pool, sample_files
+    site = f'S{os.urandom(4).hex()}'
+    register_place(site, 'TY')
+    a = pool(api, tmp_path / 'a', {**sample_files('2026-09', 4), **sample_files('2026-10', 2)}, site=site, line='TX')
+    b = pool(api, tmp_path / 'b', sample_files('2026-09', 2), site=site, line='TY')
+    ts = make(api, f'T-{os.urandom(4).hex()}', [f'{a}@1'], test_dirs=['2026-10'])['dataset']
+    model = f'M-{os.urandom(4).hex()}'
+    api.create_model(model, site, 'TX', 'det', '')
+    batch = ops.upload_batch(api, write_tree(tmp_path / 'day', {'x.png': real_png(64, 32, 5)}), b, '张三', echo=quiet)['name']
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'browse.cjs'), service.url + '/', tokens['algo'], site, a, b, ts, model,
+                        str(shots)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert {a, b} <= set(seen['all']['pools']) and ts in seen['all']['snapshots']
+    assert any(x.startswith(site) for x in seen['tree']) and seen['tree'][0].startswith('全部')
+    assert sorted(seen['site']['pools']) == sorted([a, b]) and seen['site']['snapshots'] == [ts]
+    assert seen['ty'] == {'pools': [b], 'snapshots': []} and f'site={site}' in seen['tyHash']
+    assert seen['tx'] == {'pools': [a], 'snapshots': [ts]}           # the snapshot took its data from TX
+    assert (seen['formSite'], seen['formLine']) == (site, 'TX')      # a new pool starts on the line being browsed
+    assert '这里没有符合的数据池' in seen['none']
+    assert seen['navModels'] == f'#/models?site={site}&line=TX' and seen['models'] == [model] and seen['navOn'] == '模型'
+    assert seen['navAfter'] == '#/'
+    assert batch in seen['batches']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path):
     from fw import ops
     from helpers import quiet

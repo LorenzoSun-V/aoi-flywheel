@@ -103,7 +103,7 @@ async function call(path, { method = 'GET', body, blob, raw = false, stay = fals
 
 export const api = {
   me: (stay = false) => call('/me', { stay }),  // stay: on the login page, say why instead of going there
-  datasets: () => call('/datasets'),
+  datasets: (query = {}) => call(`/datasets?${new URLSearchParams(query)}`),
   dataset: (name) => call(`/datasets/${encodeURIComponent(name)}`),
   versions: (name) => call(`/datasets/${encodeURIComponent(name)}/versions`),
   version: (name, number) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
@@ -115,7 +115,7 @@ export const api = {
   addModelLabel: (name, number, label, note) => call(`/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
   diff: (oldId, newId) => call(`/diff?old=${oldId}&new=${newId}`),
   object: (digest) => call(`/objects/${digest}`, { raw: true }),
-  models: () => call('/models'),
+  models: (query = {}) => call(`/models?${new URLSearchParams(query)}`),
   model: (name) => call(`/models/${encodeURIComponent(name)}`),
   modelVersions: (name) => call(`/models/${encodeURIComponent(name)}/versions`),
   modelVersion: (name, number) => call(`/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
@@ -298,23 +298,82 @@ async function labelForm(name, versions, model, done) {
       + retired.map((r) => `${r.label}（原来指 ${r.ref}，${r.retired_note}）`).join('、')) : null];
 }
 
-async function datasetsPage() {
+// --- browsing by site and line ------------------------------------------------------------------------
+// The list pages (datasets, batches, models) show what belongs to one site or line, chosen in the tree on the
+// left; the choice and the search text are in the address (?site=&line=&q=), and the links at the top keep
+// the site and line while one moves between the lists.
+let scope = { site: '', line: '' };
+
+export function scopeOf(query) {
+  const site = query.get('site') || '';
+  return { site, line: site ? (query.get('line') || '') : '', q: query.get('q') || '' };
+}
+
+// What the server is asked for: the scope without its empty parts, plus the page's own conditions.
+export function scopeQuery(at, more = {}) {
+  return Object.fromEntries(Object.entries({ ...more, site: at.site, line: at.line, q: at.q })
+    .filter(([, v]) => v !== '' && v !== undefined && v !== null && v !== false));
+}
+
+// The tree of sites and lines with a count per line (counts: the keys of a line summed up), the search box,
+// and the list itself next to them. parts, keep: the page's address and the query parts it keeps.
+function browse(tree, at, parts, keep, counts, hint, ...list) {
+  const n = (line) => counts.reduce((sum, k) => sum + (line[k] || 0), 0);
+  const link = (site, line, text, count, on) => el('a', {
+    href: hrefOf(parts, { ...keep, site, line, q: at.q }), class: on ? 'on' : '',
+  }, text, count === null ? null : el('span', { class: 'count' }, String(count)));
+  const total = tree.sites.reduce((sum, s) => sum + s.lines.reduce((t, x) => t + n(x), 0), 0) + n(tree.other);
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const items = [el('li', {}, link('', '', '全部', total, !at.site))];
+  for (const s of tree.sites) {
+    const here = same(s.code, at.site);
+    items.push(el('li', { class: 'site' }, link(s.code, '', placeText(s), s.lines.reduce((t, x) => t + n(x), 0), here && !at.line)),
+      ...s.lines.map((x) => el('li', { class: 'line' }, link(s.code, x.code, placeText(x), n(x), here && same(x.code, at.line)))));
+  }
+  const q = el('input', { id: 'search', type: 'text', placeholder: hint, value: at.q });
+  const go = (ev) => {
+    ev.preventDefault();
+    location.hash = hrefOf(parts, { ...keep, site: at.site, line: at.line, q: q.value.trim() });
+  };
+  return el('div', { class: 'browse' },
+    el('aside', { id: 'places' }, el('div', { class: 'muted' }, '现场 / 产线'), el('ul', {}, items),
+      n(tree.other) ? el('p', { class: 'muted small' }, `另有 ${n(tree.other)} 个没有归到登记的产线下（跨产线的快照、没写现场产线的测试集），只在「全部」里。`) : null),
+    el('div', { class: 'list' },
+      el('form', { class: 'row', onsubmit: go }, q, el('button', { type: 'submit' }, '搜索'),
+        at.q ? el('a', { href: hrefOf(parts, { ...keep, site: at.site, line: at.line }) }, '清除') : null,
+        at.site ? el('span', { class: 'muted' }, `只看 ${[at.site, at.line].filter(Boolean).join(' / ')}`) : null),
+      ...list));
+}
+
+async function datasetsPage(query) {
   const show = live();
-  const rows = await api.datasets();
-  const body = rows.map((d) => el('tr', {},
+  const at = scopeOf(query);
+  scope = at;
+  renderNav();
+  const [rows, tree] = await Promise.all([api.datasets(scopeQuery(at)), api.sites()]);
+  const table = (list, kindColumn) => el('table', {}, el('tr', {}, ['名称', kindColumn ? '类型' : null, '现场 / 产线', '版本数', '最新版本', '大小', '最新版本时间', '备注']
+    .filter(Boolean).map((h) => el('th', {}, h))), list.map((d) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['d', d.name]) }, d.name)),
-    el('td', {}, d.kind === 'trainset' ? el('span', { class: 'tag' }, '训练集快照') : d.kind),
-    el('td', {}, [d.site, d.line].filter(Boolean).join(' / ')),
+    kindColumn ? el('td', {}, KIND_NAMES[d.kind] || d.kind) : null,
+    el('td', {}, [d.site, d.line].filter(Boolean).join(' / ') || (d.kind === 'trainset' ? '跨产线' : '-')),
     el('td', {}, String(d.version_count)),
     el('td', {}, d.latest ? [el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref), labelChips(d.latest)] : '-'),
     el('td', {}, d.latest ? `${d.latest.file_count} 个文件，${sizeText(d.latest.total_bytes)}` : ''),
     el('td', {}, d.latest ? when(d.latest.created_at) : ''),
-    el('td', { class: 'muted' }, d.note)));
+    el('td', { class: 'muted' }, d.note))));
+  const pools = rows.filter((d) => d.kind !== 'trainset');
+  const snapshots = rows.filter((d) => d.kind === 'trainset');
+  const narrowed = at.site || at.q;
   show(el('h1', {}, '数据集'),
-    rows.length ? el('table', {}, el('tr', {}, ['名称', '类型', '现场 / 产线', '版本数', '最新版本', '大小', '最新版本时间', '备注']
-      .map((h) => el('th', {}, h))), body) : el('p', { class: 'muted' }, '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
-    can('datasets.write') ? el('div', { style: 'margin-top:16px' }, newDatasetForm(await api.sites())) : null,
-    can('sites.write') ? el('div', { style: 'margin-top:8px' }, newPlaceForm(() => datasetsPage())) : null);
+    browse(tree, at, [], {}, ['datasets', 'trainsets'], '搜名称',
+      el('h2', { id: 'pools' }, `数据池和测试集（${pools.length}）`),
+      pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的数据池。'
+        : '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
+      el('h2', { id: 'snapshots' }, `训练集快照（${snapshots.length}）`),
+      snapshots.length ? table(snapshots, false) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的训练集快照。' : '还没有训练集快照：用 fw trainset create 从数据池版本建。'),
+      at.line ? el('p', { class: 'muted' }, '训练集快照按它取过数据的产线算：从几条产线取数据的快照，在每条产线下都列出。') : null,
+      can('datasets.write') ? el('div', { style: 'margin-top:16px' }, newDatasetForm(tree, at)) : null,
+      can('sites.write') ? el('div', { style: 'margin-top:8px' }, newPlaceForm(() => datasetsPage(query))) : null));
 }
 
 // A version's source: 'batch:NAME@N' (a labelling batch that was imported) links to the batch.
@@ -626,6 +685,7 @@ async function diffPage(name, query) {
 
 
 // --- models, evaluations, jobs, prediction sets -----------------------------------------------------------
+const KIND_NAMES = { pool: '数据池', test: '测试集', regression: '回归集', other: '其他' };
 const TASK_NAMES = { det: '检测', seg: '分割', obb: '旋转框', pose: '关键点', cls: '分类' };
 
 // The numbers of a metrics JSON as [dotted key, value], in file order (= fw.ops.flatten_metrics).
@@ -688,17 +748,21 @@ const mref = (ref) => {
 };
 const jobLink = (id) => (id ? el('a', { href: hrefOf(['job', String(id)]) }, `任务 ${id}`) : '-');
 
-async function modelsPage() {
+async function modelsPage(query) {
   const show = live();
-  const rows = await api.models();
+  const at = scopeOf(query);
+  scope = at;
+  renderNav();
+  const [rows, tree] = await Promise.all([api.models(scopeQuery(at)), api.sites()]);
   show(el('h1', {}, '模型'),
-    rows.length ? el('table', {}, el('tr', {}, ['名称', '现场 / 产线', '任务', '版本数', '最新', '建立', '备注'].map((h) => el('th', {}, h))),
-      rows.map((m) => el('tr', {},
-        el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
-        el('td', {}, `${m.site} / ${m.line}`), el('td', {}, TASK_NAMES[m.task] || m.task),
-        el('td', {}, String(m.version_count)), el('td', {}, m.latest ? mref(m.latest) : '-'),
-        el('td', {}, `${m.created_by}，${when(m.created_at)}`), el('td', { class: 'muted' }, m.note))))
-      : el('p', { class: 'muted' }, '还没有模型：用 fw model create 建，再 fw model register 登记版本。'));
+    browse(tree, at, ['models'], {}, ['models'], '搜名称',
+      rows.length ? el('table', {}, el('tr', {}, ['名称', '现场 / 产线', '任务', '版本数', '最新', '建立', '备注'].map((h) => el('th', {}, h))),
+        rows.map((m) => el('tr', {},
+          el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
+          el('td', {}, `${m.site} / ${m.line}`), el('td', {}, TASK_NAMES[m.task] || m.task),
+          el('td', {}, String(m.version_count)), el('td', {}, m.latest ? mref(m.latest) : '-'),
+          el('td', {}, `${m.created_by}，${when(m.created_at)}`), el('td', { class: 'muted' }, m.note))))
+        : el('p', { class: 'muted' }, at.site || at.q ? '这里没有符合的模型。' : '还没有模型：用 fw model create 建，再 fw model register 登记版本。')));
 }
 
 async function modelPage(name) {
@@ -1469,21 +1533,28 @@ export function boxChangeText(row) {
 
 async function batchesPage(query) {
   const show = live();
+  const at = scopeOf(query);
+  scope = at;
+  renderNav();
   const view = query.get('view') || (can('batches.review') ? 'todo' : 'mine');
-  const { batches } = await api.batches(view === 'todo' ? { todo: true } : view === 'mine' ? { mine: true } : {});
+  const [{ batches }, tree] = await Promise.all([
+    api.batches(scopeQuery(at, view === 'todo' ? { todo: true } : view === 'mine' ? { mine: true } : {})), api.sites()]);
   const tabs = [can('batches.review') ? ['todo', '待我复核'] : null, ['mine', '我上传的'], ['all', '全部']].filter(Boolean)
-    .map(([k, t]) => el('a', { href: hrefOf(['batches'], { view: k }), class: k === view ? 'on' : '' }, t));
+    .map(([k, t]) => el('a', { href: hrefOf(['batches'], { view: k, site: at.site, line: at.line, q: at.q }), class: k === view ? 'on' : '' }, t));
   const rows = batches.map((b) => el('tr', {},
     el('td', {}, bref(b.name)), el('td', {}, `第 ${b.revision} 版`),
     el('td', {}, el('span', { class: `tag ${BATCH_CLASS[b.status]}` }, b.status_text)),
     el('td', {}, `${b.pool} / ${b.dir}/`), el('td', {}, `${b.file_count} 个文件，${sizeText(b.total_bytes)}`),
     el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), el('td', {}, when(b.updated_at))));
-  const empty = { todo: '没有待你复核的批次。', mine: '你还没有上传过批次。', all: '还没有批次。' }[view];
+  const empty = at.site || at.q ? '这里没有符合的批次。'
+    : { todo: '没有待你复核的批次。', mine: '你还没有上传过批次。', all: '还没有批次。' }[view];
   show(el('h1', {}, '标注批次'),
     el('p', { class: 'muted' }, '一个批次是一个要进数据池的目录：上传（每次上传都冻结成一版，不进数据池）、提交给复核人、退回或通过，通过以后由算法工程师入库。'),
-    el('div', { class: 'row tabs' }, tabs, can('batches.write') ? el('a', { class: 'button primary', href: '#/batch-new' }, '上传新批次') : null),
-    rows.length ? el('table', {}, el('tr', {}, ['批次', '版次', '状态', '入库到', '大小', '上传账号', '标注人', '复核人', '最近变化']
-      .map((h) => el('th', {}, h))), rows) : el('p', { class: 'muted' }, empty));
+    browse(tree, at, ['batches'], { view }, ['batches'], '搜批次名称',
+      el('div', { class: 'row tabs' }, tabs, can('batches.write') ? el('a', { class: 'button primary', href: '#/batch-new' }, '上传新批次') : null),
+      rows.length ? el('table', {}, el('tr', {}, ['批次', '版次', '状态', '入库到', '大小', '上传账号', '标注人', '复核人', '最近变化']
+        .map((h) => el('th', {}, h))), rows) : el('p', { class: 'muted' }, empty),
+      el('p', { class: 'muted small' }, '左边的数字是还在办的批次（没入库、没关闭的）。')));
 }
 
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
@@ -1921,7 +1992,7 @@ function placeText(p) {
 }
 
 // Two selects, the registered sites and the lines of the one chosen: a pool or model only takes those.
-function placePicker(tree) {
+function placePicker(tree, at = { site: '', line: '' }) {
   const site = el('select', { id: 'site' }, tree.sites.map((x) => el('option', { value: x.code }, placeText(x))));
   const line = el('select', { id: 'line' });
   const fill = () => {
@@ -1929,7 +2000,11 @@ function placePicker(tree) {
     line.replaceChildren(...(at ? at.lines : []).map((x) => el('option', { value: x.code }, placeText(x))));
   };
   site.addEventListener('change', fill);
+  const chosen = tree.sites.find((x) => x.code.toLowerCase() === at.site.toLowerCase());  // the one being browsed
+  if (chosen) site.value = chosen.code;
   fill();
+  const picked = chosen && chosen.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
+  if (picked) line.value = picked.code;
   return { site, line };
 }
 
@@ -1949,9 +2024,9 @@ function newPlaceForm(done) {
       el('button', { id: 'place-go', class: 'primary', type: 'submit' }, '登记')));
 }
 
-function newDatasetForm(tree) {
+function newDatasetForm(tree, at = { site: '', line: '' }) {
   const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX' });
-  const { site, line } = placePicker(tree);
+  const { site, line } = placePicker(tree, at);
   const note = el('input', { type: 'text', placeholder: '备注' });
   const msg = el('div');
   const go = async (ev) => {
@@ -1971,7 +2046,7 @@ function newDatasetForm(tree) {
 // --- frame and routing ------------------------------------------------------------------------------------
 // [link, text, the capability that shows it, the pages it stands for]
 const NAV = [
-  ['#/', '数据集', 'datasets.read', /^#\/?($|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/],
+  ['#/', '数据集', 'datasets.read', /^#\/?($|\?|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/],
   ['#/batches', '标注批次', 'batches.read', /^#\/(batches|b\/|batch-new|batch-up\/)/],
   ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/],
   ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/],
@@ -1980,10 +2055,15 @@ const NAV = [
   ['#/users', '账号', 'users.manage', /^#\/users/],
 ];
 
+const SCOPED = new Set(['#/', '#/batches', '#/models']);
+
 function renderNav() {
   const here = location.hash || '#/';
   document.getElementById('nav').replaceChildren(...NAV.filter(([, , cap]) => !me || can(cap))
-    .map(([href, text, , on]) => el('a', { href, class: on.test(here) ? 'on' : '' }, text)));
+    .map(([href, text, , on]) => el('a', {  // the lists keep the site and line being browsed
+      href: SCOPED.has(href) && scope.site ? hrefOf(href.slice(2).split('/').filter(Boolean), { site: scope.site, line: scope.line }) : href,
+      class: on.test(here) ? 'on' : '',
+    }, text)));
 }
 
 function renderWho(account) {
@@ -2015,12 +2095,12 @@ async function render() {
     return;
   }
   try {
-    if (parts.length === 0) await datasetsPage();
+    if (parts.length === 0) await datasetsPage(query);
     else if (parts[0] === 'd' && parts[1]) await datasetPage(parts[1]);
     else if (parts[0] === 'v' && parts[2]) await versionPage(parts[1], parts[2], query);
     else if (parts[0] === 'img' && parts[3]) await imagePage(parts[1], parts[2], parts.slice(3).join('/'), query);
     else if (parts[0] === 'diff' && parts[1]) await diffPage(parts[1], query);
-    else if (parts[0] === 'models') await modelsPage();
+    else if (parts[0] === 'models') await modelsPage(query);
     else if (parts[0] === 'm' && parts[1]) await modelPage(parts[1]);
     else if (parts[0] === 'mv' && parts[2]) await modelVersionPage(parts[1], parts[2]);
     else if (parts[0] === 'eval' && parts[1]) await evalPage(parts[1]);
