@@ -22,7 +22,7 @@ client/      fw：命令行和 Python 客户端（fw.contract 里的清单格式
 server/      fw-server：接口、数据库表（numbered SQL 迁移）、文件库、账号和凭据
 deploy/      Dockerfile、docker-compose.yml、setup.sh、backup.sh、restore.sh
 tests/       client/（不需要服务，Windows 和 Python 3.8 也跑）、server/（真实服务 + PostgreSQL）
-tools/       bench.py（规模测速）、deploy-drill.sh（部署、在线备份、异地恢复演练）
+tools/       bench.py（规模测速）、bench_versions.py（几百个版本以后的测速）、deploy-drill.sh（部署、在线备份、异地恢复演练）
 docs/        架构文档、清单格式
 ```
 
@@ -170,7 +170,7 @@ EOF
 5. 冻结后改不了：`docker compose exec db psql -U fw -c "INSERT INTO version_files ..."` 之类的语句都会被拒绝。
 6. 中途失败：导入时拔网线或 Ctrl+C，平台上不出现新版本；重跑同一条命令只传剩下的文件。
 7. 导入期间运行 `backup.sh`；在另一台机器上 `setup.sh` + `restore.sh`，再取回一致。`tools/deploy-drill.sh` 在一台机器上用两套部署自动跑一遍这个过程。
-8. 规模：`FW_SERVER=... FW_TOKEN=... python tools/bench.py --pairs 100000 --work /data/tmp`，十万对（20 万个文件）入库、差异、冷取、热取的时间；`--pairs 500000` 是百万文件。
+8. 规模：`FW_SERVER=... FW_TOKEN=... python tools/bench.py --pairs 100000 --work /data/tmp`，十万对（20 万个文件）入库、差异、冷取、热取的时间；`--pairs 500000` 是百万文件。版本多了以后的代价用 `python tools/bench_versions.py --files 1000000 --versions 300 --work /data/tmp`：每天加一个目录连加 300 个版本，量每次加目录的时间；跑完在服务器上看数据库大小、`fw-server verify` 和备份的时间（2026-11-13 在 4 核云机上跑到 100 个版本的数字见[架构文档](docs/architecture.md)）。
 
 ## 开发
 
