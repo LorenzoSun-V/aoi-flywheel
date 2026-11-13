@@ -21,7 +21,8 @@ def empty_db():
 def test_migrate_once_then_nothing(empty_db):
     assert db.migrate(empty_db) == ['0001_init.sql', '0002_trainsets.sql', '0003_models.sql', '0004_optional_code.sql',
                                     '0005_jobs.sql', '0006_eval_jobs.sql', '0007_predictions.sql',
-                                    '0008_version_changes.sql', '0009_events_roles.sql', '0010_batches.sql']
+                                    '0008_version_changes.sql', '0009_events_roles.sql', '0010_batches.sql',
+                                    '0011_batch_prelabel.sql']
     assert db.migrate(empty_db) == []
     with db.connect(empty_db) as c:
         assert db.schema_problems(c) == []

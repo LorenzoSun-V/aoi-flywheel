@@ -18,6 +18,7 @@ ACTIONS = {
     'dataset.create': '新建数据集',
     'version.create': '建版本',
     'batch.upload': '上传批次版本',
+    'batch.prelabel': '批次预标注',
     'batch.submit': '批次提交复核',
     'batch.reject': '退回批次',
     'batch.approve': '批次复核通过',

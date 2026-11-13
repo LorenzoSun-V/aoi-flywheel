@@ -358,6 +358,7 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']
     assert 'b.png 漏标' in seen['rejected'] and seen['sameReviewer'] == tokens['algo_name']
+    assert seen['prelabel'] == 1 and '预标注：让模型先给第 1 版的图画框' in seen['rejected']
     assert '标注有变化的图片 1 张：加框 1' in seen['changes'] and seen['resubmitted'] == '待复核'
     assert '新增 20261104/：4 个文件' in seen['plan'] and f'建 {pool}@2' in seen['plan']
     assert f'已入库为 {pool}@2' in seen['done'] and seen['buttons'] == 0

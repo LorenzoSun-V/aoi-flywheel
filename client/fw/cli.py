@@ -146,6 +146,7 @@ def cmd_batch_show(args, api: Api) -> None:
            [[f'第 {r["number"]} 版', r['file_count'], ops.size_text(r['total_bytes']),
              r['labeler'] + ('（复核人修改）' if r['by_reviewer'] else ''), r['created_by'], _when(r['created_at']),
              r['note']] for r in b['revisions']])
+    states = {r['job_id']: r for r in api.batch_prelabels(b['name'])['prelabels']}
     print('经过：')
     for s in b['steps']:
         what = s['step_text'] + (f'第 {s["revision"]} 版' if s['revision'] else '')
@@ -153,9 +154,16 @@ def cmd_batch_show(args, api: Api) -> None:
             what += f'，复核人 {s["reviewer"]}' + ('（自审）' if s['self_review'] else '')
         if s['pool_version']:
             what += f'，成为 {s["pool_version"]}'
+        if s['step'] == 'prelabel':
+            state = states.get(s['job_id'])
+            what += f'（任务 {s["job_id"]}' + (f'，{state["status_text"]}' if state else '') + '）'
         print(f'  {_when(s["at"])}  {s["actor"]}  {what}' + (f'：{s["comment"]}' if s['comment'] else ''))
         for image in s['images']:
             print(f'      问题图片 {image}')
+
+
+def cmd_batch_prelabel(args, api: Api) -> None:
+    ops.prelabel_batch(api, args.name, model=args.model, runner=args.runner, conf=args.conf, wait=args.wait)
 
 
 def cmd_batch_get(args, api: Api) -> None:
@@ -163,6 +171,12 @@ def cmd_batch_get(args, api: Api) -> None:
     b = api.batch(name)
     cache = Cache()
     try:
+        if args.prelabel:
+            if number and int(number) != b['revision']:
+                raise ops.FwError(f'预标注只取最新的一版（第 {b["revision"]} 版）')
+            ops.get_batch_prelabels(api, cache, b['name'], args.to or b['dir'].rpartition('/')[2],
+                                    threshold=args.threshold, replace=args.replace, workers=args.workers)
+            return
         ops.get(api, cache, f'{b["name"]}@{number or b["revision"]}', args.to or b['dir'].rpartition('/')[2],
                 link='copy', workers=args.workers)
     finally:
@@ -776,7 +790,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--list', action='store_true', help='列出全部变化的文件（制表符分隔）')
     s.set_defaults(func=cmd_dataset_diff)
 
-    bt = sub.add_parser('batch', help='标注批次：上传、复核、入库（upload、update、submit、list、show、get、diff、'
+    bt = sub.add_parser('batch', help='标注批次：上传、复核、入库（upload、update、prelabel、submit、list、show、get、diff、'
                                       'reject、approve、import、close）').add_subparsers(
         dest='action', required=True, metavar='操作')
 
@@ -819,8 +833,18 @@ def build_parser() -> argparse.ArgumentParser:
     s = bt.add_parser('get', help='把批次的一版取到本地目录（用 LiteAnno 打开标注或复核）')
     s.add_argument('ref', metavar='批次', help='批次名称，或 名称@版次；不写版次取最新的一版')
     s.add_argument('--to', help='放到哪个目录（默认当前目录下、批次的目录名）；必须不存在或是空的')
+    s.add_argument('--prelabel', action='store_true', help='带上预标注：没有标注的图写上模型的框（未确认），已有的标注保留')
+    s.add_argument('--threshold', type=float, help='和 --prelabel 一起用：只写分数不低于它的框（默认 0.3）')
+    s.add_argument('--replace', action='store_true', help='和 --prelabel 一起用：已有标注的图也换成预标注')
     s.add_argument('--workers', type=int, default=8, help='并行数（默认 8）')
     s.set_defaults(func=cmd_batch_get)
+    s = bt.add_parser('prelabel', help='让模型给批次最新的一版预标注（在 GPU 机上排队跑）')
+    s.add_argument('name', help='批次名称')
+    s.add_argument('--model', help='模型版本，例如 det-ses@3（默认这条产线现在发布的模型）')
+    s.add_argument('--runner', help='推理环境（只有一个能推理的时可以不写）')
+    s.add_argument('--conf', type=float, help='保留分数不低于它的框（默认 0.1）；取回时还能用 --threshold 再筛')
+    s.add_argument('--wait', action='store_true', help='等到跑完')
+    s.set_defaults(func=cmd_batch_prelabel)
     s = bt.add_parser('diff', help='比较批次的两版：哪些图片的标注变了，加、删、挪、改类别各多少框')
     s.add_argument('name', help='批次名称')
     s.add_argument('--old', type=int, help='旧的版次（默认新版次的前一版）')

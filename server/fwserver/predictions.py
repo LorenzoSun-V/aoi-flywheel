@@ -9,7 +9,12 @@ builds (or reuses) its engine as for an evaluation, runs it over the images and 
 predictions.json against the input list and registers the prediction set in the same transaction.
 
 Pre-labels are written from a prediction set by the client (fw predict get) at a score threshold, as
-LiteAnno / X-AnyLabeling JSON with checked=false; writing them back into review batches comes with those.
+LiteAnno / X-AnyLabeling JSON with checked=false.
+
+A labelling batch is pre-labelled the same way (submit_for_batch): the batch's owner, who may not submit jobs
+in general, asks for the newest revision of their own batch; the model defaults to the one released on the
+pool's line and the runner to the only one that can run a model. The batch notes the job; fw batch get
+--prelabel lays the result out, the owner corrects it and uploads it as the next revision.
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from fw.contract import ContractError, eval_dirs, manifest_bytes, parse_manifest, predict_selection
 
-from . import datasets, events, jobs, models
+from . import batches, datasets, events, jobs, models
 from .datasets import DatasetError
 from .store import Store, StoreError
 
@@ -137,6 +142,74 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
             'conf': conf,
             'runner': jobs.runner_params(rv)}
         return dict(jobs.enqueue(conn, user, 'predict', rv, job_params), reused=False)
+
+
+def batch_defaults(conn, name: str) -> dict:
+    """What a pre-label of this batch runs with when nothing is said: the model version released on the
+    pool's line (None when there is no release yet), and the runners that can run a model."""
+    pool = batches.pool_of(conn, name)
+    model = None
+    if pool['site'] and pool['line']:
+        try:
+            release = models.current_release(conn, pool['site'], pool['line'])
+            model = {'ref': release['model_version']['ref'], 'release': release['ref']}
+        except DatasetError:
+            pass
+    runners = [r['runner'] for r in jobs.list_runners(conn) if r['framework']]
+    return {'model': model, 'site': pool['site'], 'line': pool['line'], 'runners': runners}
+
+
+def submit_for_batch(conn, store: Store, user: dict, name: str, model: Optional[str] = None,
+                     runner: Optional[str] = None, conf: Optional[float] = None,
+                     revision: Optional[int] = None) -> dict:
+    """Queue the pre-labelling of the newest revision of a batch, for its owner. Returns the job (reused: as
+    for submit). The job and the batch's note of it are written together. A revision with the same images as
+    an earlier one (only labels changed) reuses that revision's job, since the model would answer the same,
+    and the batch notes the job for this revision too. One unfinished pre-label per batch: the GPU queue is
+    shared by everyone."""
+    b = batches.prelabel_target(conn, user, name, revision)
+    defaults = batch_defaults(conn, name)
+    if not model:
+        if defaults['model'] is None:
+            raise DatasetError(400, f'{defaults["site"]}/{defaults["line"]} 还没有登记过发布，不知道用哪个模型；'
+                                    f'写明模型版本（--model 名称@序号）')
+        model = defaults['model']['ref']
+    if not runner:
+        if len(defaults['runners']) != 1:
+            raise DatasetError(400, '要写用哪个推理环境（--runner）：' + (
+                f'有 {"、".join(defaults["runners"])}' if defaults['runners'] else '还没有能推理的推理环境，请算法工程师在 GPU 机上登记'))
+        runner = defaults['runners'][0]
+    params = {'model': model, 'data': b['ref']}
+    if conf is not None:
+        params['conf'] = conf
+    with conn.transaction():
+        now = batches.prelabel_target(conn, user, name, b['revision'], lock=True)
+        busy = [j for j, _ in batches.prelabel_jobs(conn, name)
+                if conn.execute("SELECT 1 FROM jobs WHERE id = %s AND status IN ('queued', 'running')", (j,)).fetchone()]
+        job = submit(conn, store, user, runner, params)
+        if busy and job['id'] not in busy:  # raising takes the new job back
+            raise DatasetError(409, f'{b["name"]} 的预标注任务 {busy[0]} 还没跑完；等它跑完再换模型或分数重跑')
+        batches.note_prelabel(conn, user, now, job['id'],
+                              f'{job["params"]["model"]["ref"]}，推理环境 {job["runner"]}，最低分数 {job["params"]["conf"]:g}')
+    return job
+
+
+def for_batch(conn, name: str, detail: bool = True) -> List[dict]:
+    """The pre-labels asked for a batch, newest first: the job's state and, once done, its prediction set.
+    For accounts that see batches but not the job queue; detail false: without the worker's error text (it can
+    name paths on the GPU machine), for accounts that may not read jobs."""
+    out = []
+    for job_id, revision in reversed(batches.prelabel_jobs(conn, name)):
+        j = jobs.get_job(conn, job_id)
+        result = j['result'] or {}
+        out.append({'job_id': j['id'], 'revision': revision, 'status': j['status'], 'status_text': j['status_text'],
+                    'queued_ahead': j['queued_ahead'], 'model': j['params']['model']['ref'], 'runner': j['runner'],
+                    'conf': j['params']['conf'], 'images': j['params']['data']['images'],
+                    'prediction_set': result.get('prediction_set'), 'boxes': result.get('boxes'),
+                    'error': j['error'] if detail or not j['error'] else '失败原因请算法工程师在任务页看',
+                    'submitted_by': j['submitted_by'], 'created_at': j['created_at'],
+                    'finished_at': j['finished_at']})
+    return out
 
 
 def _ref_of(ref: Any, what: str) -> tuple:

@@ -217,6 +217,13 @@ class BatchImportBody(BaseModel):
     note: str = ''
 
 
+class PrelabelBody(BaseModel):
+    model: Optional[str] = None      # nothing: the model version released on the pool's line
+    runner: Optional[str] = None     # nothing: the only runner that can run a model
+    conf: Optional[float] = None
+    revision: Optional[int] = None
+
+
 class CloseBody(BaseModel):
     comment: str = ''
 
@@ -735,6 +742,23 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def close_batch(name: str, body: CloseBody, user: dict = Depends(batch_writer)):
         with conn() as c:
             return batches.close(c, user, name, body.comment)
+
+    @app.get('/api/v1/batches/{name}/prelabel')
+    def batch_prelabels(name: str, user: dict = Depends(batch_reader)):
+        """The pre-labels asked for this batch and their state, and what one runs with by default."""
+        with conn() as c:
+            return {'prelabels': predictions.for_batch(c, name, auth.allowed(user['role'], 'jobs.read')),
+                    'defaults': predictions.batch_defaults(c, name)}
+
+    @app.post('/api/v1/batches/{name}/prelabel', status_code=201)
+    def prelabel_batch(name: str, body: PrelabelBody, user: dict = Depends(batch_writer)):
+        """The batch's owner has its newest revision pre-labelled (a prediction job)."""
+        with conn() as c:
+            job = predictions.submit_for_batch(c, store, user, name, body.model, body.runner, body.conf,
+                                               body.revision)
+        if not job['reused']:
+            log.info('batch %s: pre-label job %s submitted by %s', name, job['id'], user['name'])
+        return job
 
     @app.get('/api/v1/batches/{name}/compare')
     def compare_batch(name: str, old: Optional[int] = None, new: Optional[int] = None,
