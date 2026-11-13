@@ -18,8 +18,8 @@ const { chromium } = require('playwright');
   await page.waitForSelector('details summary');
   await page.click('summary:has-text("新建数据池")');
   await page.fill('input[placeholder^="名称"]', name);
-  await page.fill('input[placeholder="现场"]', 'SES');
-  await page.fill('input[placeholder="产线"]', 'TX');
+  await page.selectOption('#site', 'SES');
+  await page.selectOption('#line', 'TX');
   await page.click('button:has-text("建好后上传")');
   await page.waitForFunction((n) => document.querySelector('h1') && document.querySelector('h1').textContent === `上传到 ${n}`, name);
 

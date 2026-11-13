@@ -86,7 +86,8 @@ export COMPOSE_PROJECT_NAME=fwdrilla FW_STORE_DIR=$W/a-data/store FW_DB_DIR=$W/a
 time bash setup.sh drill-admin > "$W/setup-a.log" 2>&1 || { cat "$W/setup-a.log"; exit 1; }
 TOKEN=$(grep '^fw_' "$W/setup-a.log")
 "$FW" login --server http://127.0.0.1:18000 --token "$TOKEN"
-"$FW" dataset create DRILL --site drill --note 'tools/deploy-drill.sh'
+"$FW" site add drill/L1 --name 'tools/deploy-drill.sh'
+"$FW" dataset create DRILL --site drill --line L1 --note 'tools/deploy-drill.sh'
 
 step 'A：导入 v1'
 time "$FW" dataset import DRILL "$W/v1" --yes --note v1

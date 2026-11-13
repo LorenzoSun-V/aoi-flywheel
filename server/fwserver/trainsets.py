@@ -799,5 +799,6 @@ def layout(conn, name: str, number: str) -> dict:
             'problems': problems[:EXAMPLES], 'problem_count': len(problems)}
 
 
-def list_trainsets(conn) -> List[dict]:
-    return [d for d in datasets.list_datasets(conn) if d['kind'] == 'trainset']
+def list_trainsets(conn, site: str = '', line: str = '', q: str = '') -> List[dict]:
+    """site, line: the snapshots that took data from that site or line; q: text in the name."""
+    return datasets.list_datasets(conn, site, line, q, kind='trainset')

@@ -7,7 +7,7 @@ import uuid
 import psycopg
 import pytest
 
-from helpers import quiet, read_tree, write
+from helpers import quiet, read_tree, register_place, write
 from fw import cli as fw_cli
 from fw import ops
 from fw.api import ApiError
@@ -439,6 +439,7 @@ def test_two_lines_never_share_a_release_ref(api, make_api, snapshot, tmp_path):
     name = f'M-{uuid.uuid4().hex[:8]}'
     with pytest.raises(ApiError, match='只能用汉字'):
         api.create_model(name, 'A-B', 'C', 'det', '')
+    register_place('A', 'B')
     api.create_model(name, 'A', 'B', 'det', '')
     register(api, name, snapshot, files_in(tmp_path))
     for site, line in (('A-B', 'C'), ('A', 'B-C'), ('SES/A', 'TX'), ('SES', 'T X'), ('S%2F', 'TX'), ('S?', 'TX'),
@@ -593,6 +594,7 @@ def test_creating_the_same_model_at_once(api, make_api, sql):
 
 # --- releases ---------------------------------------------------------------------------------------------
 def release(api, model_ref, when, commit='abcdef1', **kw):
+    register_place(kw.get('site', 'SES'), kw.get('line', 'TX'))
     return ops.register_release(api, model_ref, 'https://git.example.com/deploy/trt.git', commit, when, echo=quiet,
                                 **kw)
 
@@ -736,6 +738,7 @@ def test_command_line(api, model, snapshot, tmp_path, monkeypatch, service, toke
 
     login(monkeypatch, tmp_path, service, tokens['deploy'])
     site = f'S{uuid.uuid4().hex[:6]}'
+    register_place(site, 'TX')
     assert fw_cli.main(['release', 'register', '--model', f'{model}@1', '--site', site, '--line', 'TX',
                         '--deploy-repo', 'git@git.example.com:d.git', '--deploy-commit', 'abcdef1',
                         '--deployed-at', '2026-10-20T10:30+08:00', '--gpu', 'RTX3070', '--trt', '10.3',

@@ -16,7 +16,7 @@ from typing import Any, Callable, List, Optional, Set, Tuple
 
 from fw.contract import LABEL_HELP, ContractError, classify_changes, is_label, parse_manifest, split_ref
 
-from . import events, labels
+from . import events, labels, sites
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
@@ -103,9 +103,111 @@ def _datasets(conn, rows: List[dict]) -> List[dict]:
              'version_count': r['version_count'], 'latest': latest.get(r['latest_id'])} for r in rows]
 
 
-def list_datasets(conn) -> List[dict]:
-    """Without the datasets that hold the revisions of labelling batches: those are listed as batches."""
-    return _datasets(conn, conn.execute(_DATASET + " WHERE d.kind <> 'batch' ORDER BY lower(d.name)").fetchall())
+# --- sites and lines -------------------------------------------------------------------------------------
+def place(conn, site: Any, line: Any, required: bool = True) -> Tuple[str, str]:
+    """The registered site and line a new pool, model or release is given, as their codes (typed ses/tx ->
+    SES/TX). Unregistered ones are refused: they are registered first, once, so that every list can be
+    grouped by them. required false: none at all is allowed too (a test set that belongs to no line)."""
+    site = site.strip() if isinstance(site, str) else None
+    line = line.strip() if isinstance(line, str) else None
+    if site is None or line is None:
+        raise DatasetError(400, '现场和产线应为文本')
+    if not site and not line and not required:
+        return '', ''
+    if not site or not line:
+        raise DatasetError(400, '要写现场和产线（fw site list 看登记了哪些）')
+    found = sites.find(conn, site, line)
+    if found is None:
+        raise DatasetError(400, f'{site}/{line} 还没有登记；fw site list 看登记了哪些，新的现场或产线先用 '
+                                f'fw site add {site}/{line} 登记（管理员或算法工程师）')
+    return found[0], found[1]
+
+
+def _place_name(name: Any) -> str:
+    name = name.strip() if isinstance(name, str) else None
+    if name is None or len(name) > 64 or any(c in name for c in '\x00\t\r\n'):
+        raise DatasetError(400, '显示名最多 64 个字，不能换行')
+    return name
+
+
+def _place_ref(ref: Any) -> Tuple[str, Optional[str]]:
+    """'SES' -> the site; 'SES/TX' -> its line."""
+    if not isinstance(ref, str) or not ref.strip():
+        raise DatasetError(400, '要写现场，或 现场/产线')
+    site, sep, line = ref.strip().partition('/')
+    for code, what in ((site, '现场'), (line if sep else None, '产线')):
+        if code is not None and not sites.CODE.match(code):
+            raise DatasetError(400, f'{what} {code!r} 写法不对：{sites.CODE_HELP}')
+    return site, (line if sep else None)
+
+
+def list_places(conn) -> dict:
+    return sites.tree(conn)
+
+
+def add_place(conn, user_id: Optional[int], ref: str, name: str = '') -> dict:
+    """Register a site ('SES') or a line of a site ('SES/TX'; the site is registered with it when it is
+    new). name: what is shown next to the code of the site or line registered. Codes are for good."""
+    site, line = _place_ref(ref)
+    name = _place_name(name)
+    with conn.transaction():
+        new_site = sites.add_site(conn, site, name if line is None else '', user_id)
+        code = sites.find(conn, site)[0]
+        if new_site:
+            events.record(conn, user_id, 'site.add', code, name=name if line is None else '')
+        elif line is None:
+            raise DatasetError(409, f'现场 {code} 已经登记过了')
+        if line is not None:
+            if not sites.add_line(conn, code, line, name, user_id):
+                raise DatasetError(409, f'{"/".join(sites.find(conn, code, line))} 已经登记过了')
+            events.record(conn, user_id, 'line.add', f'{code}/{line}', name=name)
+    return sites.tree(conn)
+
+
+def rename_place(conn, user_id: Optional[int], ref: str, name: str) -> dict:
+    """Change the name shown next to a site's or line's code. The code itself never changes."""
+    site, line = _place_ref(ref)
+    name = _place_name(name)
+    found = sites.find(conn, site, line)
+    if found is None:
+        raise DatasetError(404, f'{ref} 没有登记')
+    with conn.transaction():
+        sites.rename(conn, site, line, name)
+        events.record(conn, user_id, 'site.rename', '/'.join(x for x in found if x), name=name)
+    return sites.tree(conn)
+
+
+def where_place(site: str, line: str, q: str, alias: str = 'd') -> Tuple[List[str], List[Any]]:
+    """The conditions of a list narrowed to a site, a line of it, and text in the name."""
+    where, args = [], []
+    for column, value in (('site', site), ('line', line)):
+        if value:
+            where.append(f'lower({alias}.{column}) = lower(%s)')
+            args.append(value)
+    if q:
+        where.append(f"position(lower(%s) in lower({alias}.name)) > 0")
+        args.append(q)
+    return where, args
+
+
+def list_datasets(conn, site: str = '', line: str = '', q: str = '', kind: str = '') -> List[dict]:
+    """Without the datasets that hold the revisions of labelling batches: those are listed as batches.
+    site, line: only what belongs there; a training snapshot also belongs to every line one of its versions
+    took data from. q: text in the name. kind: only that kind."""
+    where, args = ["d.kind <> 'batch'"], []
+    own, own_args = where_place(site, line, '')
+    if own:
+        src, src_args = where_place(site, line, '', 'sd')
+        where.append(f'(({" AND ".join(own)}) OR EXISTS (SELECT 1 FROM versions v '
+                     f'JOIN trainset_sources ts ON ts.version_id = v.id JOIN versions sv ON sv.id = ts.source_id '
+                     f'JOIN datasets sd ON sd.id = sv.dataset_id WHERE v.dataset_id = d.id AND {" AND ".join(src)}))')
+        args += own_args + src_args
+    more, more_args = where_place('', '', q)
+    if kind:
+        more.append('d.kind = %s')
+        more_args.append(kind)
+    return _datasets(conn, conn.execute(_DATASET + ' WHERE ' + ' AND '.join(where + more) + ' ORDER BY lower(d.name)',
+                                        args + more_args).fetchall())
 
 
 def get_dataset(conn, name: str) -> dict:
@@ -122,6 +224,8 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
         raise DatasetError(400, '名称只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
     if kind not in KINDS and not (internal and kind == 'trainset'):
         raise DatasetError(400, f'类型只能是 {"、".join(KINDS)}')
+    if not internal:  # a data pool belongs to a line; a test set may belong to none
+        site, line = place(conn, site, line, required=kind == 'pool')
     with conn.transaction():
         if not _insert_dataset(conn, user_id, name, site, line, kind, note):
             raise DatasetError(409, f'{name} 已经存在（数据集、训练集快照和标注批次共用名称，不分大小写）')

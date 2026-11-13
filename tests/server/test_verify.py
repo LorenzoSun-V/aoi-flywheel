@@ -18,7 +18,7 @@ from fwserver.store import Store, StoreError
 @pytest.fixture
 def version(api, tmp_path):
     name = f'V-{uuid.uuid4().hex[:6]}'
-    api.create_dataset(name, '', '', 'pool', '')
+    api.create_dataset(name, 'SES', 'TX', 'pool', '')
     for rel, data in {'a.bmp': b'aaaa', 'a.json': b'{"a": 1}', 'b.bmp': b'bbbb'}.items():
         write(tmp_path / 'src', rel, data)
     return ops.import_folder(api, name, tmp_path / 'src', echo=quiet)

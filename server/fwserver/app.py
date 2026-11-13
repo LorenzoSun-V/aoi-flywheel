@@ -131,6 +131,11 @@ class FetchBody(BaseModel):
     objects: List[str] = Field(max_length=FETCH_LIMIT)
 
 
+class PlaceBody(BaseModel):
+    ref: str = Field(max_length=200)   # 'SES' or 'SES/TX'
+    name: str = Field(default='', max_length=200)
+
+
 class DatasetBody(BaseModel):
     name: str
     site: str = ''
@@ -408,6 +413,8 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     model_writer = need('models.write')
     release_writer = need('releases.write')
     label_admin = need('labels.retire')
+    site_reader = need('sites.read')
+    site_writer = need('sites.write')
     event_reader = need('events.read')
     account_admin = need('users.manage')
 
@@ -636,9 +643,26 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- datasets and versions -------------------------------------------------------------------
     @app.get('/api/v1/datasets')
-    def list_datasets(user: dict = Depends(data_reader)):
+    def list_datasets(site: str = '', line: str = '', q: str = '', kind: str = '',
+                      user: dict = Depends(data_reader)):
         with conn() as c:
-            return datasets.list_datasets(c)
+            return datasets.list_datasets(c, site, line, q, kind)
+
+    # The register of sites and their lines: what pools, models and releases may name.
+    @app.get('/api/v1/sites')
+    def list_sites(user: dict = Depends(site_reader)):
+        with conn() as c:
+            return datasets.list_places(c)
+
+    @app.post('/api/v1/sites', status_code=201)
+    def add_site(body: PlaceBody, user: dict = Depends(site_writer)):
+        with conn() as c:
+            return datasets.add_place(c, user['user_id'], body.ref, body.name)
+
+    @app.post('/api/v1/sites/name')
+    def rename_site(body: PlaceBody, user: dict = Depends(site_writer)):
+        with conn() as c:
+            return datasets.rename_place(c, user['user_id'], body.ref, body.name)
 
     @app.post('/api/v1/datasets', status_code=201)
     def create_dataset(body: DatasetBody, user: dict = Depends(data_user)):
@@ -711,11 +735,11 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- labelling batches -------------------------------------------------------------------------
     @app.get('/api/v1/batches')
-    def list_batches(mine: bool = False, todo: bool = False, status: str = '', pool: str = '',
-                     user: dict = Depends(batch_reader)):
+    def list_batches(mine: bool = False, todo: bool = False, status: str = '', pool: str = '', site: str = '',
+                     line: str = '', q: str = '', user: dict = Depends(batch_reader)):
         """mine: the account's own; todo: those waiting for this account's review."""
         with conn() as c:
-            return {'statuses': batches.STATUS, 'batches': batches.list_batches(c, user, mine, todo, status, pool)}
+            return {'statuses': batches.STATUS, 'batches': batches.list_batches(c, user, mine, todo, status, pool, site, line, q)}
 
     @app.get('/api/v1/reviewers')
     def list_reviewers(user: dict = Depends(batch_writer)):
@@ -808,9 +832,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- training-set snapshots ------------------------------------------------------------------
     @app.get('/api/v1/trainsets')
-    def list_trainsets(user: dict = Depends(data_reader)):
+    def list_trainsets(site: str = '', line: str = '', q: str = '', user: dict = Depends(data_reader)):
         with conn() as c:
-            return trainsets.list_trainsets(c)
+            return trainsets.list_trainsets(c, site, line, q)
 
     @app.post('/api/v1/trainsets/{name}/preview')
     def preview_trainset(name: str, body: TrainsetBody, user: dict = Depends(data_user)):
@@ -839,9 +863,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- models, evaluations, releases -------------------------------------------------------------
     @app.get('/api/v1/models')
-    def list_models(user: dict = Depends(model_reader)):
+    def list_models(site: str = '', line: str = '', q: str = '', user: dict = Depends(model_reader)):
         with conn() as c:
-            return models.list_models(c)
+            return models.list_models(c, site, line, q)
 
     @app.post('/api/v1/models', status_code=201)
     def create_model(body: ModelBody, user: dict = Depends(model_writer)):

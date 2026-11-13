@@ -214,8 +214,19 @@ class Api:
     def me(self):
         return self.get('/me')
 
-    def datasets(self):
-        return self.get('/datasets')
+    def datasets(self, site: str = '', line: str = '', q: str = '', kind: str = ''):
+        return self.get('/datasets', **{k: v for k, v in (('site', site), ('line', line), ('q', q), ('kind', kind)) if v})
+
+    def sites(self):
+        """The registered sites with their lines, and how much each line holds."""
+        return self.get('/sites')
+
+    def add_site(self, ref: str, name: str = ''):
+        """ref: 'SES' or 'SES/TX'."""
+        return self.post('/sites', {'ref': ref, 'name': name})
+
+    def rename_site(self, ref: str, name: str):
+        return self.post('/sites/name', {'ref': ref, 'name': name})
 
     def dataset(self, name: str):
         return self.get(f'/datasets/{name}')
@@ -266,7 +277,7 @@ class Api:
 
     # --- labelling batches ---------------------------------------------------------------------
     def batches(self, **params):
-        """mine, todo (waiting for this account's review), status, pool."""
+        """mine, todo (waiting for this account's review), status, pool, site, line, q."""
         return self.get('/batches', **{k: v for k, v in params.items() if v})
 
     def batch(self, name: str):
@@ -298,8 +309,8 @@ class Api:
         return self.get('/diff', old=old_id, new=new_id)
 
     # --- training-set snapshots ----------------------------------------------------------------
-    def trainsets(self):
-        return self.get('/trainsets')
+    def trainsets(self, site: str = '', line: str = '', q: str = ''):
+        return self.get('/trainsets', **{k: v for k, v in (('site', site), ('line', line), ('q', q)) if v})
 
     def preview_trainset(self, name: str, body: dict):
         """What creating this snapshot would make (counts, changes, problems); nothing is written."""
@@ -313,8 +324,8 @@ class Api:
         return self.get(f'/trainsets/{name}/versions/{number}')
 
     # --- models, evaluations, releases -------------------------------------------------------------
-    def models(self):
-        return self.get('/models')
+    def models(self, site: str = '', line: str = '', q: str = ''):
+        return self.get('/models', **{k: v for k, v in (('site', site), ('line', line), ('q', q)) if v})
 
     def model(self, name: str):
         return self.get(f'/models/{name}')

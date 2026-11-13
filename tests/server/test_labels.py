@@ -3,7 +3,7 @@ import uuid
 
 import pytest
 
-from helpers import quiet, write
+from helpers import quiet, register_place, write
 from fw import cli as fw_cli
 from fw import ops
 from fw.contract import ContractError, label_key, next_labels, split_ref
@@ -129,7 +129,9 @@ def test_labels_of_snapshots_and_models(api, make_api, model, snapshot, tmp_path
     assert status_of(lambda: field.add_model_label(model, 2, 'v1.1.0')) == 403
     assert status_of(lambda: api.retire_model_label(model, 'v1.0.0', '错了')) == 403
     # a release names the model version by its label: it is as fixed as the number
-    rel = field.register_release({'model': model, 'number': 'v1.0.0', 'site': f'S{uuid.uuid4().hex[:6]}', 'line': 'L1',
+    site = f'S{uuid.uuid4().hex[:6]}'
+    register_place(site, 'L1')
+    rel = field.register_release({'model': model, 'number': 'v1.0.0', 'site': site, 'line': 'L1',
                                   'deploy_repo': 'git@x:deploy.git',
                                   'deploy_commit': 'a' * 40, 'deployed_at': '2026-11-01T08:00:00+08:00'})
     assert rel['model_version']['ref'] == f'{model}@1'

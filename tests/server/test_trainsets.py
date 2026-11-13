@@ -7,7 +7,7 @@ import uuid
 import psycopg
 import pytest
 
-from helpers import quiet, read_tree, write
+from helpers import register_place, quiet, read_tree, write
 from fw import cli as fw_cli
 from fw import ops
 from fw.api import ApiError
@@ -45,7 +45,8 @@ def status_of(call):
 def pool(api, tmp_path, files: dict, site='SES', line='TX', name=None) -> str:
     """A pool dataset with one version holding files ({path: bytes}); returns its name."""
     name = name or f'P-{uuid.uuid4().hex[:8]}'
-    api.create_dataset(name, site, line, 'pool', '')
+    register_place(site, line)
+    api.create_dataset(name, site, line, 'pool' if site else 'other', '')  # a pool always has a line
     add_version(api, tmp_path, name, files)
     return name
 

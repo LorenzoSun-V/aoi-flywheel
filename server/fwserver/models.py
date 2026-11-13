@@ -235,8 +235,11 @@ def _model(r: dict) -> dict:
             'latest': f'{r["name"]}@{r["latest"]}' if r['latest'] is not None else None}
 
 
-def list_models(conn) -> List[dict]:
-    return [_model(r) for r in conn.execute(_MODEL + ' ORDER BY lower(m.name)').fetchall()]
+def list_models(conn, site: str = '', line: str = '', q: str = '') -> List[dict]:
+    """site, line: only the models of that site or line; q: text in the name."""
+    where, args = datasets.where_place(site, line, q, 'm')
+    return [_model(r) for r in conn.execute(_MODEL + (' WHERE ' + ' AND '.join(where) if where else '')
+                                            + ' ORDER BY lower(m.name)', args).fetchall()]
 
 
 def get_model(conn, name: str) -> dict:
@@ -249,7 +252,7 @@ def get_model(conn, name: str) -> dict:
 def create_model(conn, user_id: int, name: str, site: str, line: str, task: str = 'det', note: str = '') -> dict:
     if not NAME.match(name or ''):
         raise DatasetError(400, '模型名称只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
-    site, line = _name(site, '现场'), _name(line, '产线')
+    site, line = datasets.place(conn, _name(site, '现场'), _name(line, '产线'))
     if task not in TASKS:
         raise DatasetError(400, f'任务类型只能是 {"、".join(TASKS)}（{"、".join(TASKS.values())}）')
     note = _text(note, '备注')
@@ -654,8 +657,7 @@ def register_release(conn, user_id: int, name: str, number: str, site: str, line
                      engine_sha256: Optional[str] = None, engine_size: Optional[int] = None,
                      note: str = '') -> dict:
     mv = get_model_version(conn, name, _pinned(name, number))
-    site = _name(site or mv['site'], '现场')
-    line = _name(line or mv['line'], '产线')
+    site, line = datasets.place(conn, _name(site or mv['site'], '现场'), _name(line or mv['line'], '产线'))
     repo = _repo(deploy_repo, '部署仓库地址', required=True)
     commit = _commit(deploy_commit, '部署仓库的提交号')
     when = _deployed_at(deployed_at)
