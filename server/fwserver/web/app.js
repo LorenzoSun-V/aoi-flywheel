@@ -1446,11 +1446,19 @@ function metricsTable(metrics, limit = 60) {
   rows.length > limit ? el('p', { class: 'muted' }, `仅列出前 ${limit} 项，完整内容见 metrics.json。`) : null];
 }
 
-function fileTable(files) {
+// names: the name a file is saved under, by its path, when not its own (a model version's ONNX)
+function fileTable(files, names = {}) {
   return el('table', {}, el('tr', {}, ['文件', 'sha256', '大小', ''].map((h) => el('th', {}, h))),
     files.map((f) => el('tr', {}, el('td', {}, f.path), el('td', { class: 'mono' }, f.sha256.slice(0, 12)),
       el('td', {}, sizeText(f.size)),
-      el('td', {}, el('button', { onclick: (ev) => download(f, ev.currentTarget) }, '下载')))));
+      el('td', {}, el('button', { onclick: (ev) => download(f, ev.currentTarget, names[f.path]) }, '下载')))));
+}
+
+// The name a model version's ONNX is saved under: its reference, and its 版本号 when it has one (the highest in
+// use), so a file found on a machine says which version it is. The number stays: a 版本号 can be retired.
+export function onnxName(mv) {
+  const labels = mv.labels || [];
+  return `${mv.model}@${mv.number}${labels.length ? `_${labels[labels.length - 1]}` : ''}.onnx`;
 }
 
 // Downloads go through the API with the token, so the file is fetched whole and handed to the browser; the
@@ -1475,15 +1483,15 @@ async function readAll(response, onProgress) {
   return new Blob(chunks);
 }
 
-async function download(f, button) {
+async function download(f, button, as = '') {
   button.disabled = true;
-  const label = button.textContent;
+  const label = [...button.childNodes];  // its icon too
   button.title = `${f.path}，${sizeText(f.size)}`;
   button.textContent = downloadText(0, f.size);
   try {
     const blob = await readAll(await api.object(f.sha256), (got) => { button.textContent = downloadText(got, f.size); });
     const url = URL.createObjectURL(blob);
-    const a = el('a', { href: url, download: f.path.slice(f.path.lastIndexOf('/') + 1) });
+    const a = el('a', { href: url, download: as || f.path.slice(f.path.lastIndexOf('/') + 1) });
     document.body.append(a);
     a.click();
     a.remove();
@@ -1492,7 +1500,7 @@ async function download(f, button) {
     button.after(el('span', { class: 'bad' }, ` 下载失败：${e.message}`));
   } finally {
     button.disabled = false;
-    button.textContent = label;
+    button.replaceChildren(...label);
     button.removeAttribute('title');
   }
 }
@@ -1575,10 +1583,18 @@ async function modelVersionPage(name, number) {
   const mine = sets.filter((p) => p.model_version.id === mv.id).reverse();
   const asking = el('div');
   const history = chain.model_version.tag_history || [];  // the trace chain has it: every tag added or taken off
+  const onnx = mv.files.find((f) => f.path === 'model.onnx');
+  const saveAs = onnxName(mv);
+  const writer = can('models.write');
   show(crumbs('models', mv, [mv.model, hrefOf(['m', mv.model])], `@${mv.number}`),
-    pageHead([mv.ref, labelChips(mv), tagChips(mv.tags)], ...(can('models.write') ? [...tagButtons(mv, asking, () => modelVersionPage(name, number)),
-      info(['候选：该版本可考虑部署。', '弃用：提示不应再使用该版本，可填写原因。',
-        '标记可随时取消；文件和记录均保留，标记的经过列在下方「标签经过」中。'], '候选和弃用说明')] : [])),
+    pageHead([mv.ref, labelChips(mv), tagChips(mv.tags)],
+      onnx && can('objects.download') ? el('button', { id: 'onnx-download', class: 'primary', onclick: (ev) => download(onnx, ev.currentTarget, saveAs) },
+        icon('download'), '下载 ONNX') : null,
+      ...(writer ? tagButtons(mv, asking, () => modelVersionPage(name, number)) : []),
+      info([`下载的 ONNX 文件名为 ${saveAs}：模型版本的引用${(mv.labels || []).length ? '和版本号' : ''}，可据此在平台上查到该版本。`,
+        '现场使用 ONNX 在本机建立 TensorRT 引擎。',
+        ...(writer ? ['候选：该版本可考虑部署。', '弃用：提示不应再使用该版本，可填写原因。',
+          '标记可随时取消；文件和记录均保留，标记的经过列在下方「标签经过」中。'] : [])], writer ? '下载和标记说明' : '下载说明')),
     asking,
     el('dl', { class: 'kv' },
       el('dt', {}, '训练集快照'), el('dd', {}, vref(mv.trainset.ref)),
@@ -1593,7 +1609,7 @@ async function modelVersionPage(name, number) {
         history.map((t) => el('li', {}, `${t.added ? '标记为' : '取消'}「${TAG_NAMES[t.tag] || t.tag}」，${t.by}，${when(t.at)}`
           + (t.note ? `：${t.note}` : '')))))] : null),
     flattenMetrics(mv.metrics).length ? [el('h2', {}, '训练时的指标（metrics.json）'), metricsTable(mv.metrics, 20)] : null,
-    el('h2', {}, '文件'), fileTable(mv.files),
+    el('h2', {}, '文件'), fileTable(mv.files, { 'model.onnx': saveAs }),
     el('h2', {}, '评估'), evalTable(mv.evals.slice().reverse(), false),
     el('h2', {}, '预测集'), predictionTable(mine, false),
     can('jobs.write') ? await submitForms(mv) : null);

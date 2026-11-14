@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   shortWhen, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
-  parseClasses, dirsOf, splitRef, nextRef, ruleText,
+  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -272,4 +272,10 @@ test('a class table is read as typed or from a classes.txt, and a snapshot is to
   assert.equal(ruleText({ mode: 'continue', val: 0.25, test: 0, seed: 0, new_to: 'trainval', merge_test: true, class_map: { DL1: 'DL', others: '' } }),
     '接着上一版的划分；新样本按比例划分（val 25%，test 0%，随机种子 0）；上一版 test 中的样本重新划分到 train 和 val；类别映射 DL1→DL、others→去掉');
   assert.equal(ruleText({ mode: 'split-file', split_count: 12 }), '按划分清单划分（12 个样本）');
+});
+
+test('a model version\'s ONNX is saved under its reference and highest 版本号', () => {
+  assert.equal(onnxName({ model: 'SES-TX-detr', number: 3, labels: [] }), 'SES-TX-detr@3.onnx');
+  assert.equal(onnxName({ model: 'SES-TX-detr', number: 3 }), 'SES-TX-detr@3.onnx');
+  assert.equal(onnxName({ model: 'SES-TX-detr', number: 12, labels: ['v0.9.0', 'v1.0.0'] }), 'SES-TX-detr@12_v1.0.0.onnx');  // in use, lowest first
 });
