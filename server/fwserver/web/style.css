@@ -101,13 +101,16 @@ button.link:hover { background: none; text-decoration: underline; }
 button.danger { color: var(--bad); border-color: #e8b4b0; }
 button.danger:hover { background: var(--del); }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.page-head .actions { display: flex; gap: 8px; flex: none; margin-top: 10px; }
+.page-head .actions { display: flex; align-items: center; gap: 8px; flex: none; margin-top: 10px; }
 .page-head .actions:empty { display: none; }
 .page-head .actions .button, .page-head .actions button { display: inline-flex; align-items: center; gap: 6px; }
 .page-head .actions .icon { width: 16px; height: 16px; }
 form.panel.narrow { max-width: 720px; margin-bottom: 20px; }
 form.panel.narrow h2 { margin-top: 0; }
 ul.plain { list-style: none; margin: 0; padding: 0; }
+.section-head .links { display: flex; align-items: center; gap: 14px; }
+.section-head .links .icon { width: 14px; height: 14px; }
+.section-head .links .with-icon { gap: 4px; }
 table#labels { margin-top: 12px; }
 td.indent { padding-left: 28px; }
 td.place-name form { margin: 0; flex-wrap: nowrap; }
@@ -309,3 +312,20 @@ tr:hover .more .dots, tr:focus-within .more .dots, .more.open .dots, .more .dots
 #search { min-width: 240px; }
 h1 .tag { font-weight: 500; vertical-align: middle; letter-spacing: 0; }
 table + p.small { margin-top: 8px; }
+
+/* ⓘ: the details behind a title, a field or a button, shown on pointing, focus or a click */
+button.info { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0;
+              margin-left: 4px; border: 0; border-radius: 50%; background: none; color: #8a8a8f; cursor: help;
+              vertical-align: -3px; flex: none; }
+button.info:hover, button.info[aria-expanded="true"] { background: none; color: var(--accent); }
+button.info:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.info .icon { width: 16px; height: 16px; }
+h1 button.info { width: 24px; height: 24px; margin-left: 6px; vertical-align: 1px; }
+h1 button.info .icon { width: 19px; height: 19px; }
+.form .label > .name { display: inline-flex; align-items: center; }
+.tip { position: absolute; z-index: 60; max-width: 400px; padding: 10px 14px; border-radius: 10px; background: #1d1d1f;
+       color: #f5f5f7; font-size: 13px; line-height: 1.65; font-weight: 400; letter-spacing: 0;
+       box-shadow: 0 8px 28px rgba(0, 0, 0, .2); }
+.tip p { margin: 0 0 6px; }
+.tip p:last-child { margin: 0; }
+.form h3 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }

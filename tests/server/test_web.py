@@ -75,7 +75,7 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
                        capture_output=True, text=True, timeout=120, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
-    assert '凭据不对' in seen['wrong']
+    assert '凭据无效' in seen['wrong']
     assert seen['home'] == '概览'
     assert name in seen['datasets'] and tokens['algo_name'] in seen['who']
     assert seen['versions'] == [f'{name}@2', f'{name}@1']
@@ -110,7 +110,7 @@ def test_a_snapshot_is_shown_in_the_folders_fw_get_makes(service, tokens, api, t
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['top'] == ['📁 neg_train 1', '📁 test 1', '📁 train 2', '📁 val 2']  # not images/<划分>/<现场>/…
-    assert 'fw get 默认取回的一样' in seen['note']
+    assert 'fw get 默认取回的结构一致' in seen['note']  # behind the ⓘ of the title
     assert seen['train'] == ['📁 images 2']
     assert seen['trainTiles'] == ['train0.png', 'train1.png'] and seen['trainLabeled'] == 2
     assert seen['crumbs'].endswith('/train/images') and 'scratch × 1' in seen['image'] and seen['count'] == '1 / 2'
@@ -168,7 +168,7 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
     assert f'预测集 #{set_id}' in seen['result'] and '推理了' in seen['log']
     assert [t.split()[-1] for t in seen['tiles']] == ['A/img000.png', 'A/img001.png', 'A/new.png']
     assert all(t.startswith('1 框') for t in seen['tiles'])
-    assert '3 个框，3 张图有框，0 张没有' in seen['summary']
+    assert '共 3 个框；3 张图片有框，0 张无框' in seen['summary']
     assert 'scratch × 1' in seen['image'] and '预测（虚线' in seen['image']
     assert seen['imageHash'].startswith('/img/') and f'pred={set_id}' in seen['imageHash']
     assert 'A%2Fimg001.png' in seen['next'] and f'pred={set_id}' in seen['next']
@@ -266,7 +266,7 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     assert seen['ty'] == {'pools': [b], 'snapshots': []} and f'site={site}' in seen['tyHash']
     assert seen['tx'] == {'pools': [a], 'snapshots': [ts]}           # the snapshot took its data from TX
     assert seen['newHref'] == f'#/dataset-new?site={site}&line=TX'    # a new pool starts on the line being browsed
-    assert '这里没有符合的数据池' in seen['none']
+    assert '没有符合条件的数据集' in seen['none']
     assert seen['navModels'] == f'#/models?site={site}&line=TX' and seen['models'] == [model] and seen['navOn'] == '模型'
     assert seen['navAfter'] == '#/datasets'
     assert batch in seen['batches']
@@ -313,13 +313,13 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     assert seen['treeOn'].startswith('TX')
     assert seen['navModels'] == f'#/models?site={site}&line=TX'               # the lists keep the line
     assert seen['moreBatches'] == f'#/batches?site={site}&line=TX&view=all'
-    assert '还没有登记过发布' in seen['ty'] and '这条产线还没有模型' in seen['ty'] and seen['tyPools'] == [f'{b}@1']
-    assert '不是登记过的产线' in seen['unknown']
+    assert '尚未登记发布' in seen['ty'] and '该产线暂无模型' in seen['ty'] and seen['tyPools'] == [f'{b}@1']
+    assert '不是已登记的产线' in seen['unknown']
     assert seen['siteLines'] == [f'{site} / TX', f'{site} / TY']
     # a field account reads every part of it
     assert seen['field']['sections'] == ['models', 'data', 'batches'] and seen['field']['refused'] == []
     assert rel['ref'] in seen['field']['release'] and seen['field']['model'] == model
-    assert '概览' not in seen['workerNav'] and '换一个有权限的账号' in seen['refused']
+    assert '概览' not in seen['workerNav'] and '请使用有权限的账号' in seen['refused']
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
@@ -355,14 +355,14 @@ def test_one_finds_the_way_around(service, tokens, api, tmp_path):
         assert tx in shown['tree'] and ty not in shown['tree'] and not any(other in h for h in shown['tree'])
         assert f'{site} / TX' in shown['table'] and f'{site} / TY' not in shown['table']
         assert not any(x.startswith(other) for x in shown['table'])
-    assert seen['lineOfHiddenSiteOff'] is True and '没显示' in seen['hiddenNote']
+    assert seen['lineOfHiddenSiteOff'] is True and '未显示' in seen['hiddenNote']
     assert not any(other in h for h in seen['listTree']) and seen['hiddenPoolListed'] is True   # the list hides nothing
     assert seen['listCrumbs'].replace(' ', '') == '概览/数据集'
     assert seen['headers'] and all(h == ['nowrap', True] for h in seen['headers'])
     assert seen['browsedHidden'] == [ty]
     assert (seen['siteModels'], seen['siteModelRows']) == ('3', 3)     # TY is not shown, its two models still count
     assert seen['backFromBatch'] == '/datasets'                         # not caught between the two addresses of a batch
-    assert '没有要显示的产线' in seen['allLinesHidden'] and '选择' in seen['allLinesHidden']
+    assert '没有可显示的产线' in seen['allLinesHidden'] and '选择' in seen['allLinesHidden']
     # the path and the way back
     assert seen['lineCrumbs'] == ['概览', '/', site, '/', 'TX']
     assert seen['crumbs'] == [['概览', '#/'], [site, f'#/?site={site}'], ['TX', tx],
@@ -467,10 +467,10 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert seen['toast'] == f'已复制 {detr}@2' and seen['clipboard'] == f'{detr}@2'
     assert seen['evalPage'] == [f'/eval/{shown["id"]}', f'评估 #{shown["id"]}']
     assert seen['versionPage'] == f'/mv/{detr}/2' and seen['releasePage'] == f'/mv/{mv_name}/{mv_number}'
-    assert '还没有登记过发布' in seen['empty']['release'] and '这条产线还没有模型' in seen['empty']['models']
+    assert '尚未登记发布' in seen['empty']['release'] and '该产线暂无模型' in seen['empty']['models']
     assert seen['empty']['lineOn'] == f'{empty} 组装线'
     assert seen['fallback'] == {'value': f'{detr}@2', 'focused': True, 'selected': True,
-                                'text': '浏览器不让这个页面写剪贴板，按 Ctrl+C 复制：'}
+                                'text': '浏览器不允许本页面写入剪贴板，请按 Ctrl+C 复制：'}
     assert seen['fallbackFocusBack']
     assert seen['byCommand'] == {'toast': f'已复制 {detr}@2', 'copied': f'{detr}@2', 'menu': 0, 'focusBack': True}
     assert seen['refsOneLine']
@@ -540,7 +540,7 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
     assert [x['label'] for x in api.labels(labelled)['labels'] if x['retired']] == ['v0.1.0']
     assert seen['metricsShown']
     assert '候选' in seen['candidate'] and '候选' in seen['both'] and '弃用' in seen['both']
-    assert seen['history'] == ['标成「候选」', '标成「弃用」：漏检多', '去掉「候选」']
+    assert seen['history'] == ['标记为「候选」', '标记为「弃用」：漏检多', '取消「候选」']
     assert api.model_version(model, mv['number'])['tags'] == ['deprecated'] and '弃用' in seen['listTags']
     assert seen['firstRows'] == 500 and seen['more'] == '全部列出（510 个）' and seen['allRows'] == 510
     assert seen['lines'] == {'新增': 510, '删除': 1} and seen['firstLine'] == '新增\td/0000.png'
@@ -548,6 +548,81 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
     page = seen['field'].pop('newPage')
     assert seen['field'] == {'rename': 0, 'register': 0, 'manage': 0, 'tags': 0, 'newDataset': 0}
     assert '不能新建数据集' in page[0] and page[1] == 0                      # said on opening, not on submitting
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_pool_is_filled_from_folders_the_way_they_were_collected(service, tokens, api, tmp_path):
+    """A new pool starts from its line; two folders dragged in at once, or the folders inside a "pool" folder
+    without that level, each go in under their own names; a loose file there is refused; the whole-version
+    upload says what it makes of a "pool" folder and of folders dragged in; a field account gets no new-pool links."""
+    seed = int.from_bytes(os.urandom(2), 'big')
+    img = lambda k: real_png(16, 8 + k // 256, seed + k)  # noqa: E731  (all different)
+    parent = write_tree(tmp_path / 'p' / 'pool', {'20261101/a.png': img(1), '20261101/a.json': label('scratch'),
+                                                  '20261102/b.png': img(2)})
+    day3 = write_tree(tmp_path / 'd' / '20261103', {'c.png': img(3)})
+    day4 = write_tree(tmp_path / 'd' / '20261104', {'d.png': img(4), 'night/e.png': img(5)})
+    loose = write_tree(tmp_path / 'l' / 'pool', {'x.png': img(6), '20261105/f.png': img(7)})
+    pool = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '')
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'folders.cjs'), service.url + '/', tokens['algo'], pool, str(shots),
+                        str(parent), str(day3), str(day4), str(loose), tokens['field']],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['overviewNew'] == '#/dataset-new?site=SES&line=TX' and '#/dataset-new?site=SES&line=TX' in seen['placesNew']
+    assert seen['fieldOverview'] == {'newData': 0, 'links': 0} and seen['fieldPlaces'] == 0  # a field account cannot start one
+    two = seen['two']
+    assert two['box'] == '2 个目录 · 3 个文件' and '20261103/、20261104/' in two['dirs']
+    assert two['target'] == ['', True] and two['inside']
+    assert '新增 20261103/' in two['plan']['text'] and '新增 20261104/' in two['plan']['text'] and two['plan']['at'] == f'/v/{pool}/1'
+    inside = seen['inside']
+    assert inside['target'] == 'pool' and '仅添加 pool/ 下的子目录' in inside['label']
+    assert '20261101/、20261102/' in inside['dirs'] and inside['targetAfter'] == ['', True]
+    assert inside['plan']['at'] == f'/v/{pool}/2' and 'pool/' not in inside['plan']['text']
+    assert '顶层有 1 个文件不在任何子目录中' in seen['loose'] and 'x.png' in seen['loose']
+    assert '20261101/、20261102/目录保留原名，不包含 pool 这一层' in seen['wholeParent']
+    assert seen['wholeTwo'].startswith('新版本的内容为这 2 个目录（20261103/、20261104/），各目录保留原名')
+    versions = {v['number']: v for v in api.versions(pool)}
+    assert [(o['op'], o['dir']) for o in versions[1]['ops']] == [('add', '20261103'), ('add', '20261104')]
+    assert [(o['op'], o['dir']) for o in versions[2]['ops']] == [('add', '20261101'), ('add', '20261102')]
+    assert versions[2]['file_count'] == 6 and versions[1]['source'] == '网页上传新增目录 20261103、20261104'
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, tmp_path):
+    """No page carries long grey hints; they are behind an ⓘ, which shows its text while pointed at or focused,
+    keeps it after a click until Esc, a second click or a click elsewhere, and never ticks the box it sits by."""
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    name = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    ops.import_folder(api, name, write_tree(tmp_path / 'base', {'20261101/a.png': real_png(64, 32, seed),
+                                                                '20261101/a.json': label('scratch')}), echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'tips.cjs'), service.url + '/', tokens['algo'], tokens['admin'], name, str(shots)],
+                       capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['long'] == {}                                                  # no long hint left on any page
+    for hash in ('#/', f'#/add/{name}', f'#/upload/{name}', f'#/remove/{name}', '#/dataset-new', '#/places', '#/batches',
+                 '#/batch-new', '#/predictions', '#/events', '#/me', '#/users'):
+        assert seen['marks'][hash] >= 1, hash
+    assert 'fw dataset add' in seen['hovered'] and seen['label'] == '上传新增目录说明'
+    assert seen['left'] is None                                                # pointed away: gone
+    assert 'fw dataset add' in seen['clicked']['text'] and seen['clicked']['expanded'] == 'true'  # clicked: stays
+    assert seen['escaped'] is None and seen['secondClick'] is None and seen['elsewhere'] is None
+    assert 'fw dataset add' in seen['focused'] and seen['blurred'] is None
+    assert seen['box'] == {'ticked': False, 'text': seen['box']['text']} and '20261103/' in seen['box']['text']
+    assert not [x for x in seen['controls'] if '的说明' in x], seen['controls']  # the mark does not join their names
+    assert '- checkbox "替换已有目录"' in seen['controls'], seen['controls']
+    assert '- checkbox "仅添加所选目录下的子目录"' in seen['controls'], seen['controls']
+    assert any(x.startswith('- textbox "池中目录"') for x in seen['controls']), seen['controls']
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
@@ -572,8 +647,8 @@ def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_p
     assert seen['errors'] == []
     assert seen['target'] == '20261103'
     assert '新增 20261103/：4 个文件' in seen['plan'] and f'新版本 {name}@2：7 个文件' in seen['plan']
-    assert '和池里已有图片内容完全相同' in seen['plan'] and '20261103/a_again.png = 20261101/a.png' in seen['plan']
-    assert '图片相同、标注不一样' in seen['plan'] and '（2 个目标） 和 20261101/a.png（1 个目标）' in seen['plan']
+    assert '与数据池中已有图片内容相同' in seen['plan'] and '20261103/a_again.png = 20261101/a.png' in seen['plan']
+    assert '图片相同但标注不同' in seen['plan'] and '（2 个目标） 和 20261101/a.png（1 个目标）' in seen['plan']
     assert seen['added'] == f'/v/{name}/2'
     assert '池里已有 20261103/' in seen['again'] and seen['offered'] == 0
     assert '去掉 20261101/：2 个文件' in seen['removal'] and f'新版本 {name}@3：5 个文件' in seen['removal']
@@ -609,7 +684,7 @@ def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
     assert '图片和标注以外的文件' in seen['refused'] and '系统文件 1 个不入库' in seen['report']
     assert f'这是 {name} 的第一个版本' in seen['plan'] and '6 个文件' in seen['plan']
     assert seen['first'] == f'/v/{name}/1'
-    assert '新增 1，删除 1，修改 1' in seen['plan2'] and '会删掉' in seen['plan2'] and 'B/b.png' in seen['plan2']
+    assert '新增 1，删除 1，修改 1' in seen['plan2'] and '将删除' in seen['plan2'] and 'B/b.png' in seen['plan2']
     assert seen['second'] == f'/v/{name}/2'
     assert seen['errors'] == []
 
@@ -667,15 +742,16 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert seen['errors'] == []
     assert '标注批次' in seen['fieldNav'] and '操作记录' not in seen['fieldNav']
     assert seen['reading'] == '正在读取目录…' and seen['picked'] == {'text': '20261104/ · 3 个文件', 'reading': 0}
-    assert '要是一个目录' in seen['droppedFile'] and seen['dropped'] == '20261104/ · 4 个文件'
-    assert seen['cancelled'] == {'text': seen['droppedFile'], 'reading': 0}   # choosing, then cancelling, mid-read
+    assert '请拖放目录' in seen['droppedFile'] and seen['dropped'] == '20261104/ · 4 个文件'
+    assert '每次只能拖放一个目录' in seen['droppedTwo']
+    assert seen['cancelled'] == {'text': seen['droppedTwo'], 'reading': 0}   # choosing, then cancelling, mid-read
     assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']
     assert 'b.png 漏标' in seen['rejected'] and seen['sameReviewer'] == tokens['algo_name']
-    assert seen['prelabel'] == 1 and '预标注：让模型先给第 1 版的图画框' in seen['rejected']
+    assert seen['prelabel'] == 1 and '运行预标注' in seen['rejected']
     assert '标注有变化的图片 1 张：加框 1' in seen['changes'] and seen['resubmitted'] == '待复核'
-    assert '新增 20261104/：4 个文件' in seen['plan'] and f'建 {pool}@2' in seen['plan']
+    assert '新增 20261104/：4 个文件' in seen['plan'] and f'建立 {pool}@2' in seen['plan']
     assert f'已入库为 {pool}@2' in seen['done'] and seen['buttons'] == 0
     b = api.batch(name)
     assert b['status'] == 'imported' and [r['labeler'] for r in b['revisions']] == ['张三', '李四']
