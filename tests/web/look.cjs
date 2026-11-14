@@ -139,7 +139,21 @@ const { chromium } = require('playwright');
   await page.screenshot({ path: `${out}/overview-tx-1180.png`, fullPage: true });
 
   // a browser without a clipboard for this page (http on the intranet): the reference is shown, selected
-  const bare = await open({}, () => { Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined }); });
+  // first the older copy command still works (as on most browsers over http): copied, the menu closes
+  const older = await open({}, () => {
+    Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined });
+    document.execCommand = (cmd) => { window.copiedByCommand = cmd === 'copy' ? String(window.getSelection() || document.activeElement.value.slice(document.activeElement.selectionStart, document.activeElement.selectionEnd)) : null; return cmd === 'copy'; };
+  });
+  await older.page.goto(`${url}#/?site=SES&line=TX`);
+  await h1(older.page, 'TX 贴片线');
+  await older.page.waitForSelector('table.models');
+  await older.page.click(dots('SES-TX-detr'));
+  await older.page.click('.menu [role=menuitem]:has-text("复制版本号")');
+  await older.page.waitForSelector('#toast.show');
+  seen.byCommand = { toast: await older.page.textContent('#toast'), copied: await older.page.evaluate(() => window.copiedByCommand),
+    menu: await older.page.$$eval('.menu', (m) => m.length), focusBack: await older.page.evaluate(() => document.activeElement.classList.contains('dots')) };
+  // then neither works: the reference is shown, selected, for Ctrl+C
+  const bare = await open({}, () => { Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined }); document.execCommand = () => false; });
   await bare.page.goto(`${url}#/?site=SES&line=TX`);
   await h1(bare.page, 'TX 贴片线');
   await bare.page.waitForSelector('table.models');
@@ -163,6 +177,10 @@ const { chromium } = require('playwright');
   seen.calm = await calm.page.$eval('table.models button.dots', (e) => getComputedStyle(e).transitionDuration);
   seen.normal = await page.$eval('table.models button.dots', (e) => getComputedStyle(e).transitionDuration);
 
+  // references never break at their hyphens, even in a table with many columns on a narrow window
+  await page.goto(`${url}#/mv/SES-TX-detr/2`);
+  await page.waitForSelector('main table a.ref');
+  seen.refsOneLine = await page.$$eval('main table a.ref', (as) => as.every((a) => a.getClientRects().length === 1));
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();

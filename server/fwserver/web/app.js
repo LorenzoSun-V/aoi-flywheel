@@ -950,13 +950,13 @@ async function download(f, button) {
 
 const vref = (ref) => {  // NAME@N -> link to the dataset version page
   const [name, number] = ref.split(':')[0].split('@');
-  return el('a', { href: hrefOf(['v', name, number]) }, ref);
+  return el('a', { class: 'ref', href: hrefOf(['v', name, number]) }, ref);
 };
 const mref = (ref) => {
   const [name, number] = ref.split('@');
-  return el('a', { href: hrefOf(['mv', name, number]) }, ref);
+  return el('a', { class: 'ref', href: hrefOf(['mv', name, number]) }, ref);
 };
-const jobLink = (id) => (id ? el('a', { href: hrefOf(['job', String(id)]) }, `任务 ${id}`) : '-');
+const jobLink = (id) => (id ? el('a', { class: 'ref', href: hrefOf(['job', String(id)]) }, `任务 ${id}`) : '-');
 
 async function modelsPage(query) {
   const show = live();
@@ -1732,7 +1732,7 @@ async function removePage(name) {
 // --- accounts, tokens, the record of who did what ------------------------------------------------------------
 // --- labelling batches: upload, review, import ---------------------------------------------------------
 const BATCH_CLASS = { open: '', review: 'warn', rejected: 'bad', approved: 'ok', imported: 'muted', closed: 'muted' };
-const bref = (name) => el('a', { href: hrefOf(['b', name]) }, name);
+const bref = (name) => el('a', { class: 'ref', href: hrefOf(['b', name]) }, name);
 
 export function boxChangeText(row) {
   if (row.unreadable) return '标注读不出框，没有逐框比较';
@@ -2361,8 +2361,9 @@ function moreMenu(label, items) {
   return wrap;
 }
 
-// Copy a version's full reference. Where the browser refuses (an http address on the intranet has no
-// clipboard for pages), the menu shows the reference selected, for Ctrl+C.
+// Copy a version's full reference. Where the browser has no clipboard for the page (an http address on the
+// intranet), the menu shows the reference selected and tries the older copy command on it; if that fails
+// too, it says to press Ctrl+C.
 async function copyRef(ref, menu, close) {
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
@@ -2374,6 +2375,12 @@ async function copyRef(ref, menu, close) {
     menu.replaceChildren(el('p', { class: 'small' }, '浏览器不让这个页面写剪贴板，按 Ctrl+C 复制：'), field);
     field.focus();
     field.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { /* not there either */ }
+    if (copied) {
+      close(true);
+      toast(`已复制 ${ref}`);
+    }
   }
 }
 

@@ -236,6 +236,7 @@ table.models td, table.data td { vertical-align: middle; }
 table.models td.num, table.data td.num { font-size: 15px; }
 table.models tr:hover > td, table.models tr:focus-within > td,
 table.data tr:hover > td, table.data tr:focus-within > td { background: #f2f6fd; }
+a.ref { white-space: nowrap; }  /* a version, batch or job reference never breaks at its hyphen */
 .with-icon { display: inline-flex; align-items: center; gap: 10px; }
 .with-icon .icon { width: 20px; height: 20px; color: var(--accent); }
 a.tool.go { color: #8a8f98; }

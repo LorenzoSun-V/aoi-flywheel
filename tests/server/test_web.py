@@ -471,6 +471,8 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert seen['fallback'] == {'value': f'{detr}@2', 'focused': True, 'selected': True,
                                 'text': '浏览器不让这个页面写剪贴板，按 Ctrl+C 复制：'}
     assert seen['fallbackFocusBack']
+    assert seen['byCommand'] == {'toast': f'已复制 {detr}@2', 'copied': f'{detr}@2', 'menu': 0, 'focusBack': True}
+    assert seen['refsOneLine']
     assert seen['calm'] == '0s' and seen['normal'] != '0s'
 
 
