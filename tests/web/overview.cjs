@@ -1,11 +1,11 @@
 // The overview of a line (run by tests/server/test_web.py):
-// node overview.cjs <url> <token> <worker token> <site> <out dir>.
+// node overview.cjs <url> <token> <worker token> <field token> <site> <out dir>.
 // Opens the overview, picks the line TX of the site, then TY, a line that is not registered, and the page as
 // an account that may not see it. Prints one JSON line.
 const { chromium } = require('playwright');
 
 (async () => {
-  const [url, token, workerToken, site, out] = process.argv.slice(2);
+  const [url, token, workerToken, fieldToken, site, out] = process.argv.slice(2);
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errors = [];
@@ -42,6 +42,19 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/overview?site=${site}`);
   await page.waitForFunction(() => document.querySelector('#lines') && document.querySelector('#places li.site a.on'));
   seen.siteLines = await page.$$eval('#lines tr td:first-child', (c) => c.map((x) => x.textContent));
+  // a field account may read all the page asks for: nothing is refused, every section is there
+  await page.evaluate((t) => localStorage.setItem('fw-token', t), fieldToken);
+  await page.goto(`${url}#/models`);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '模型');
+  await page.goto(`${url}#/overview?site=${site}&line=TX`);
+  await page.waitForFunction((s) => document.querySelector('main h1')?.textContent === `${s} / TX` && document.querySelector('#release'), site);
+  seen.field = {
+    sections: await page.$$eval('.browse .list h2', (h) => h.map((x) => x.id)),
+    release: await page.textContent('#release + *'),
+    model: await page.textContent('#models + table tr:nth-child(2) td'),
+    refused: await page.$$eval('main .error', (e) => e.map((x) => x.textContent)),
+  };
   // an account without the capability: no link, and the page says why
   await page.evaluate((t) => localStorage.setItem('fw-token', t), workerToken);
   await page.goto(`${url}#/jobs`);

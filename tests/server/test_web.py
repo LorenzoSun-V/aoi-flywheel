@@ -296,7 +296,7 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     shots.mkdir(parents=True, exist_ok=True)
     w = make_worker()
     r = subprocess.run(['node', str(WEB_TESTS / 'overview.cjs'), service.url + '/', tokens['algo'],
-                        w.http.headers['authorization'].split(' ', 1)[1], site, str(shots)],
+                        w.http.headers['authorization'].split(' ', 1)[1], tokens['field'], site, str(shots)],
                        capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
@@ -315,6 +315,9 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     assert '还没有登记过发布' in seen['ty'] and '这条产线还没有模型' in seen['ty'] and seen['tyPools'] == [b]
     assert '不是登记过的产线' in seen['unknown']
     assert seen['siteLines'] == [f'{site} / TX', f'{site} / TY']
+    # a field account reads every part of it
+    assert seen['field']['sections'] == ['release', 'models', 'snapshots', 'pools', 'batches'] and seen['field']['refused'] == []
+    assert rel['ref'] in seen['field']['release'] and seen['field']['model'] == model
     assert '概览' not in seen['workerNav'] and '换一个有权限的账号' in seen['refused']
 
 
