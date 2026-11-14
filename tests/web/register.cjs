@@ -11,13 +11,19 @@ const { chromium } = require('playwright');
 (async () => {
   const [url, token, field, snapshot, other, name, dir, out] = process.argv.slice(2);
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const errors = [];
-  page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => { if (m.type() === 'error' && !/40[049]/.test(m.text())) errors.push(m.text()); });  // the refusals asked for below
-  await page.goto(url);
-  await page.evaluate((t) => localStorage.setItem('fw-token', t), token);
-  await page.reload();
+  // a page (and browser context) of its own for each account: a request the page of the last account still makes
+  // goes out as that account, not as the next one
+  const open = async (t) => {
+    const p = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    p.on('pageerror', (e) => errors.push(String(e)));
+    p.on('console', (m) => { if (m.type() === 'error' && !/40[049]/.test(m.text())) errors.push(m.text()); });  // the refusals asked for below
+    await p.goto(url);
+    await p.evaluate((x) => localStorage.setItem('fw-token', x), t);
+    await p.reload();
+    return p;
+  };
+  let page = await open(token);
   const seen = {};
   const form = async () => {
     await page.waitForSelector('#mv-go');
@@ -47,6 +53,10 @@ const { chromium } = require('playwright');
   await page.setInputFiles('#mv-onnx', `${dir}/external.onnx`);
   seen.external = await send();
   seen.afterRefusal = await page.inputValue('#mv-model');  // the model made on the way is now the one chosen
+  await page.selectOption('#mv-trainset', other);          // and stays chosen when the snapshot changes
+  seen.kept = await form();
+  await page.selectOption('#mv-trainset', snapshot);
+  await form();
   await page.setInputFiles('#mv-onnx', `${dir}/best.onnx`);
   await page.setInputFiles('#mv-metrics', `${dir}/metrics.json`);
   await page.setInputFiles('#mv-weights', `${dir}/best.pt`);
@@ -91,9 +101,8 @@ const { chromium } = require('playwright');
   seen.againHash = await page.evaluate(() => location.hash);
 
   // a field account: nothing to register with
-  await page.evaluate((t) => localStorage.setItem('fw-token', t), field);
+  page = await open(field);
   await page.goto(`${url}#/v/${encodeURIComponent(snapshot)}/1`);
-  await page.reload();
   await page.waitForSelector('#snapshot-info');
   seen.fieldButtons = await page.$$eval('#model-from, #model-register', (x) => x.length);
   await page.goto(`${url}#/model-register?trainset=${encodeURIComponent(`${snapshot}@1`)}`);

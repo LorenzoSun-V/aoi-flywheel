@@ -681,6 +681,7 @@ def test_a_model_version_is_registered_from_the_browser(service, tokens, api, tm
     assert seen['first'] == {'trainset': f'{snap}@1', 'model': '+', 'newShown': True, 'place': f'WEB/{line}'}  # no model on the line
     assert '不是 ONNX 文件' in seen['notOnnx']
     assert 'external data' in seen['external'] and seen['afterRefusal'] == name
+    assert (seen['kept']['trainset'], seen['kept']['model'], seen['kept']['newShown']) == (f'{other}@1', name, False)
     assert seen['sent'] is None and seen['page']['hash'] == f'#/mv/{name}/1' and seen['page']['title'].startswith(f'{name}@1')
     assert f'{snap}@1' in seen['page']['info'] and 'scratch、dent' in seen['page']['info'] and 'a' * 40 in seen['page']['info']
     assert {'model.onnx', 'metrics.json', 'weights/best.pt', 'classes.txt'} <= set(seen['page']['files'])

@@ -1794,6 +1794,8 @@ async function modelRegisterPage(query) {
         const m = await api.createModel({ name, site: site.value, line: line.value, task: 'det', note: '' });
         model.insertBefore(el('option', { value: m.name }, `${m.name}（${m.site} / ${m.line}）`), model.lastElementChild);
         model.value = m.name;
+        models.push(m);
+        picked = true;  // a snapshot chosen after this keeps it, never 新建模型… again
         shape();
       }
       const mv = await api.registerModelVersion(name, { files: rows, trainset_id: t.id, code_repo: repo.value.trim(),
