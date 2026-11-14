@@ -122,6 +122,7 @@ export const api = {
   evals: (model = '') => call(`/evals?model=${encodeURIComponent(model)}`),
   eval: (id) => call(`/evals/${Number(id)}`),
   chain: (ref) => call(`/chain?ref=${encodeURIComponent(ref)}`),
+  currentRelease: (site, line) => call(`/releases/current?${new URLSearchParams({ site, line })}`),
   runners: async () => (await call('/runners')).runners,
   jobs: async (status = '', limit = 100) => (await call(`/jobs?status=${encodeURIComponent(status)}&limit=${limit}`)).jobs,
   job: (id) => call(`/jobs/${Number(id)}`),
@@ -315,29 +316,34 @@ export function scopeQuery(at, more = {}) {
     .filter(([, v]) => v !== '' && v !== undefined && v !== null && v !== false));
 }
 
-// The tree of sites and lines with a count per line (counts: the keys of a line summed up), the search box,
-// and the list itself next to them. parts, keep: the page's address and the query parts it keeps.
-function browse(tree, at, parts, keep, counts, hint, ...list) {
+// The tree of sites and lines with a count per line (counts: the keys of a line summed up; none: no counts).
+// link(site, line): where a choice leads.
+function placeTree(tree, at, counts, link) {
   const n = (line) => counts.reduce((sum, k) => sum + (line[k] || 0), 0);
-  const link = (site, line, text, count, on) => el('a', {
-    href: hrefOf(parts, { ...keep, site, line, q: at.q }), class: on ? 'on' : '',
-  }, text, count === null ? null : el('span', { class: 'count' }, String(count)));
+  const a = (site, line, text, count, on) => el('a', { href: link(site, line), class: on ? 'on' : '' }, text,
+    counts.length ? el('span', { class: 'count' }, String(count)) : null);
   const total = tree.sites.reduce((sum, s) => sum + s.lines.reduce((t, x) => t + n(x), 0), 0) + n(tree.other);
-  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
-  const items = [el('li', {}, link('', '', '全部', total, !at.site))];
+  const same = (x, y) => x.toLowerCase() === y.toLowerCase();
+  const items = [el('li', {}, a('', '', '全部', total, !at.site))];
   for (const s of tree.sites) {
     const here = same(s.code, at.site);
-    items.push(el('li', { class: 'site' }, link(s.code, '', placeText(s), s.lines.reduce((t, x) => t + n(x), 0), here && !at.line)),
-      ...s.lines.map((x) => el('li', { class: 'line' }, link(s.code, x.code, placeText(x), n(x), here && same(x.code, at.line)))));
+    items.push(el('li', { class: 'site' }, a(s.code, '', placeText(s), s.lines.reduce((t, x) => t + n(x), 0), here && !at.line)),
+      ...s.lines.map((x) => el('li', { class: 'line' }, a(s.code, x.code, placeText(x), n(x), here && same(x.code, at.line)))));
   }
+  return el('aside', { id: 'places' }, el('div', { class: 'muted' }, '现场 / 产线'), el('ul', {}, items),
+    counts.length && n(tree.other) ? el('p', { class: 'muted small' }, `另有 ${n(tree.other)} 个没有归到登记的产线下（跨产线的快照、没写现场产线的测试集），只在「全部」里。`) : null);
+}
+
+// The tree, the search box, and the list itself next to them. parts, keep: the page's address and the query
+// parts it keeps.
+function browse(tree, at, parts, keep, counts, hint, ...list) {
   const q = el('input', { id: 'search', type: 'text', placeholder: hint, value: at.q });
   const go = (ev) => {
     ev.preventDefault();
     location.hash = hrefOf(parts, { ...keep, site: at.site, line: at.line, q: q.value.trim() });
   };
   return el('div', { class: 'browse' },
-    el('aside', { id: 'places' }, el('div', { class: 'muted' }, '现场 / 产线'), el('ul', {}, items),
-      n(tree.other) ? el('p', { class: 'muted small' }, `另有 ${n(tree.other)} 个没有归到登记的产线下（跨产线的快照、没写现场产线的测试集），只在「全部」里。`) : null),
+    placeTree(tree, at, counts, (site, line) => hrefOf(parts, { ...keep, site, line, q: at.q })),
     el('div', { class: 'list' },
       el('form', { class: 'row', onsubmit: go }, q, el('button', { type: 'submit' }, '搜索'),
         at.q ? el('a', { href: hrefOf(parts, { ...keep, site: at.site, line: at.line }) }, '清除') : null,
@@ -2043,9 +2049,108 @@ function newDatasetForm(tree, at = { site: '', line: '' }) {
       el('label', {}, '产线', line), el('label', {}, '备注', note), el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '建好后上传')));
 }
 
+// --- the overview of a line --------------------------------------------------------------------------------
+// One line at a glance: what runs there now (the release), its models with their last evaluation, its training
+// snapshots, its pools, and the batches still under way. Without a line: every line and how much it holds.
+const KEY_METRICS = ['mAP50', 'mAP50-95', 'P', 'R'];
+
+// The few numbers of an evaluation shown in a list: [[name, text], ...] for those the report has.
+export function keyMetrics(metrics) {
+  return KEY_METRICS.filter((k) => typeof (metrics || {})[k] === 'number').map((k) => [k, numberText(metrics[k])]);
+}
+
+// Batches still under way: not imported, not closed.
+export function batchesUnderWay(batches) {
+  return batches.filter((b) => b.status !== 'imported' && b.status !== 'closed');
+}
+
+// The newest evaluation of each model version name: {model name: report}; reports come oldest first.
+export function lastEvalByModel(evals) {
+  const out = {};
+  for (const e of evals) out[e.model_version.ref.split('@')[0]] = e;
+  return out;
+}
+
+function lineTable(tree, at) {
+  const sites = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
+  const rows = sites.flatMap((s) => s.lines.map((x) => el('tr', {},
+    el('td', {}, el('a', { href: hrefOf(['overview'], { site: s.code, line: x.code }) }, `${placeText(s)} / ${placeText(x)}`)),
+    ...['datasets', 'trainsets', 'models', 'batches', 'releases'].map((k) => el('td', { class: 'num' }, String(x[k] || 0))))));
+  if (!rows.length) return el('p', { class: 'muted' }, at.site ? '这个现场还没有登记产线。' : '还没有登记现场和产线：在「数据集」页最下面登记。');
+  return el('table', { id: 'lines' }, el('tr', {}, ['现场 / 产线', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数'].map((h, i) => el('th', { class: i ? 'num' : '' }, h))), rows);
+}
+
+async function overviewPage(query) {
+  const show = live();
+  const at = { ...scopeOf(query), q: '' };
+  scope = at;
+  renderNav();
+  const tree = await api.sites();
+  const side = placeTree(tree, at, [], (site, line) => hrefOf(['overview'], { site, line }));
+  if (!at.line) {
+    show(el('h1', {}, '概览'),
+      el('div', { class: 'browse' }, side, el('div', { class: 'list' },
+        el('p', { class: 'muted' }, '点一条产线，看它现在发布的模型、最近的评估、训练集快照、数据池和在办的批次。'), lineTable(tree, at))));
+    return;
+  }
+  const where = { site: at.site, line: at.line };
+  const none = (e) => { if (e.status === 404) return null; throw e; };
+  const [data, models, release, batches] = await Promise.all([
+    api.datasets(where), api.models(where), api.currentRelease(at.site, at.line).catch(none),
+    can('batches.read') ? api.batches(where).then((r) => batchesUnderWay(r.batches)) : null]);
+  const evals = lastEvalByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat());
+  const more = (parts, text) => el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, text);
+  const head = (id, text, parts, link) => el('h2', { id }, text, ' ', more(parts, link));
+  const latest = (d) => (d.latest ? [el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref), labelChips(d.latest)] : '-');
+  const dataTable = (list, kind) => el('table', {}, el('tr', {}, ['名称', kind ? '类型' : null, '最新版本', '大小', '最新版本时间'].filter(Boolean).map((h) => el('th', {}, h))),
+    list.map((d) => el('tr', {}, el('td', {}, el('a', { href: hrefOf(['d', d.name]) }, d.name)),
+      kind ? el('td', {}, KIND_NAMES[d.kind] || d.kind) : null, el('td', {}, latest(d)),
+      el('td', {}, d.latest ? `${d.latest.file_count} 个文件，${sizeText(d.latest.total_bytes)}` : ''),
+      el('td', {}, d.latest ? when(d.latest.created_at) : ''))));
+  const pools = data.filter((d) => d.kind !== 'trainset');
+  const snapshots = data.filter((d) => d.kind === 'trainset');
+  const site = tree.sites.find((s) => s.code.toLowerCase() === at.site.toLowerCase());
+  const line = site && site.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
+  show(el('div', { class: 'crumbs' }, el('a', { href: '#/overview' }, '概览'), ' / ',
+    el('a', { href: hrefOf(['overview'], { site: at.site }) }, site ? placeText(site) : at.site), ' / ', line ? placeText(line) : at.line),
+  el('h1', {}, `${at.site} / ${at.line}`),
+  el('div', { class: 'browse' }, side, el('div', { class: 'list' },
+    line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是登记过的产线，下面是名字对得上的东西。`),
+    el('h2', { id: 'release' }, '现在发布的'),
+    release ? el('dl', { class: 'kv' },
+      el('dt', {}, '发布'), el('dd', {}, release.ref),
+      el('dt', {}, '模型版本'), el('dd', {}, mref(release.model_version.ref)),
+      el('dt', {}, '部署时间'), el('dd', {}, when(release.deployed_at)),
+      el('dt', {}, '登记'), el('dd', {}, `${release.created_by}，${when(release.created_at)}`),
+      el('dt', {}, '备注'), el('dd', {}, release.note || '-'))
+      : el('p', { class: 'muted' }, '这条产线还没有登记过发布；部署成功后用 fw release register 登记。'),
+    head('models', `模型（${models.length}）`, ['models'], '全部模型'),
+    models.length ? el('table', {}, el('tr', {}, ['名称', '最新版本', '最近一次评估', ...KEY_METRICS, '测试集', '评估时间'].map((h) => el('th', { class: KEY_METRICS.includes(h) ? 'num' : '' }, h))),
+      models.map((m) => {
+        const e = evals[m.name];
+        const shown = e ? Object.fromEntries(keyMetrics(e.metrics)) : {};
+        return el('tr', {}, el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
+          el('td', {}, m.latest ? mref(m.latest) : '-'),
+          el('td', {}, e ? [el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`), ' ', mref(e.model_version.ref)] : '还没有评估'),
+          ...KEY_METRICS.map((k) => el('td', { class: 'num' }, shown[k] || (e ? '-' : ''))),
+          el('td', {}, e ? vref(e.testset.ref) : ''), el('td', {}, e ? when(e.created_at) : ''));
+      })) : el('p', { class: 'muted' }, '这条产线还没有模型。'),
+    head('snapshots', `训练集快照（${snapshots.length}）`, [], '全部数据集'),
+    snapshots.length ? dataTable(snapshots, false) : el('p', { class: 'muted' }, '还没有从这条产线取数据的训练集快照。'),
+    head('pools', `数据池和测试集（${pools.length}）`, [], '全部数据集'),
+    pools.length ? dataTable(pools, true) : el('p', { class: 'muted' }, '这条产线还没有数据池。'),
+    batches === null ? null : [head('batches', `在办的批次（${batches.length}）`, ['batches'], '全部批次'),
+      batches.length ? el('table', {}, el('tr', {}, ['批次', '状态', '入库到', '上传账号', '复核人', '最近变化'].map((h) => el('th', {}, h))),
+        batches.map((b) => el('tr', {}, el('td', {}, bref(b.name)),
+          el('td', {}, el('span', { class: `tag ${BATCH_CLASS[b.status]}` }, b.status_text)),
+          el('td', {}, `${b.pool} / ${b.dir}/`), el('td', {}, b.owner), el('td', {}, b.reviewer || '-'), el('td', {}, when(b.updated_at)))))
+        : el('p', { class: 'muted' }, '没有在办的批次（没入库、没关闭的）。')])));
+}
+
 // --- frame and routing ------------------------------------------------------------------------------------
 // [link, text, the capability that shows it, the pages it stands for]
 const NAV = [
+  ['#/overview', '概览', 'sites.read', /^#\/overview/],
   ['#/', '数据集', 'datasets.read', /^#\/?($|\?|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/],
   ['#/batches', '标注批次', 'batches.read', /^#\/(batches|b\/|batch-new|batch-up\/)/],
   ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/],
@@ -2055,7 +2160,7 @@ const NAV = [
   ['#/users', '账号', 'users.manage', /^#\/users/],
 ];
 
-const SCOPED = new Set(['#/', '#/batches', '#/models']);
+const SCOPED = new Set(['#/overview', '#/', '#/batches', '#/models']);
 
 function renderNav() {
   const here = location.hash || '#/';
@@ -2100,6 +2205,7 @@ async function render() {
     else if (parts[0] === 'v' && parts[2]) await versionPage(parts[1], parts[2], query);
     else if (parts[0] === 'img' && parts[3]) await imagePage(parts[1], parts[2], parts.slice(3).join('/'), query);
     else if (parts[0] === 'diff' && parts[1]) await diffPage(parts[1], query);
+    else if (parts[0] === 'overview') await overviewPage(query);
     else if (parts[0] === 'models') await modelsPage(query);
     else if (parts[0] === 'm' && parts[1]) await modelPage(parts[1]);
     else if (parts[0] === 'mv' && parts[2]) await modelVersionPage(parts[1], parts[2]);

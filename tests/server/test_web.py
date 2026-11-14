@@ -148,7 +148,7 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
         return json.loads(p.stdout.strip().splitlines()[-1])
 
     seen = walk('submit', data, r['ref'])  # other tests' runners are listed too
-    assert seen['nav'] == ['数据集', '标注批次', '模型', '任务', '预测集', '操作记录']
+    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '任务', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
     assert 'nope' in seen['refused']
@@ -222,7 +222,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
-    assert seen['nav'] == ['数据集', '标注批次', '模型', '任务', '预测集', '操作记录', '账号']
+    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '任务', '预测集', '操作记录', '账号']
     assert seen['token'].startswith('fw_') and '只显示这一次' in seen['tokens'] and '现场笔记本' in seen['tokens']
     assert '账号名只能用' in seen['refused']
     admin = tokens['admin_name']
@@ -231,7 +231,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert 'from=algo' in seen['events'][1][4] and 'to=field' in seen['events'][1][4]
     assert seen['token'] not in json.dumps(seen['events'])
     # the account it made works, as a field account: it reads, and is offered nothing it may not do
-    assert seen['fieldNav'] == ['数据集', '标注批次', '模型', '预测集'] and seen['fieldWho'] == f'{name}（现场实施）'
+    assert seen['fieldNav'] == ['概览', '数据集', '标注批次', '模型', '预测集'] and seen['fieldWho'] == f'{name}（现场实施）'
     assert seen['fieldButtons'] == [] and '现场实施账号不能管理账号' in seen['fieldUsers']
     assert '现场笔记本' in seen['mine'] and '有效' in seen['mine']
     me = make_api(token=seen['token']).me()
@@ -268,6 +268,57 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     assert seen['navModels'] == f'#/models?site={site}&line=TX' and seen['models'] == [model] and seen['navOn'] == '模型'
     assert seen['navAfter'] == '#/'
     assert batch in seen['batches']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker, tmp_path):  # noqa: F811
+    """The overview: every line with how much it holds; one line with its release, models and their last
+    evaluation, snapshots, pools and the batches under way; said plainly when the line is unknown or the
+    account may not see it."""
+    from fw import ops
+    from helpers import quiet, register_place
+    from test_models import deteval_out, files_in, register, release
+    from test_trainsets import make, pool, sample_files
+    site = f'S{os.urandom(4).hex()}'
+    register_place(site, 'TY')
+    a = pool(api, tmp_path / 'a', {**sample_files('2026-09', 8), **sample_files('2026-10', 3)}, site=site, line='TX')
+    b = pool(api, tmp_path / 'b', sample_files('2026-09', 2), site=site, line='TY')
+    snap = make(api, f'T-{os.urandom(4).hex()}', [f'{a}@1'], test_dirs=['2026-10'])
+    model = f'M-{os.urandom(4).hex()}'  # noqa: F811
+    api.create_model(model, site, 'TX', 'det', '')
+    register(api, model, snap, files_in(tmp_path))
+    e = ops.register_eval(api, f'{model}@1', f'{snap["ref"]}:test', deteval=deteval_out(tmp_path), echo=quiet)
+    rel = release(make_api('deploy'), f'{model}@1', '2026-10-20T10:00+08:00', site=site, line='TX')
+    batch = ops.upload_batch(api, write_tree(tmp_path / 'day', {'x.png': real_png(64, 32, 9)}), a, '张三', echo=quiet)['name']
+    done = ops.upload_batch(api, write_tree(tmp_path / 'old', {'y.png': real_png(64, 32, 10)}), a, '张三', echo=quiet)['name']
+    api.batch_step(done, 'close', {})
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    w = make_worker()
+    r = subprocess.run(['node', str(WEB_TESTS / 'overview.cjs'), service.url + '/', tokens['algo'],
+                        w.http.headers['authorization'].split(' ', 1)[1], tokens['field'], site, str(shots)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['nav'][0] == '概览'
+    assert seen['lineRow'] == [f'{site} / TX', '1', '1', '1', '1', '1']   # pool, snapshot, model, batch under way, release
+    assert rel['ref'] in seen['release'] and f'{model}@1' in seen['release']
+    assert seen['models'][:2] == [model, f'{model}@1'] and f'#{e["id"]}' in seen['models'][2]
+    assert seen['models'][3] == '0.7' and seen['models'][4:7] == ['-', '-', '-']   # the numbers the report has
+    assert f'{snap["ref"]}:test' in seen['models'][7]
+    assert seen['snapshots'] == [snap['dataset']] and seen['pools'] == [a]
+    assert seen['batches'][0] == batch and seen['batches'][1] == '待提交复核'      # the closed one is not under way
+    assert seen['treeOn'].startswith('TX')
+    assert seen['navModels'] == f'#/models?site={site}&line=TX'               # the lists keep the line
+    assert seen['moreBatches'] == f'#/batches?site={site}&line=TX&view=all'
+    assert '还没有登记过发布' in seen['ty'] and '这条产线还没有模型' in seen['ty'] and seen['tyPools'] == [b]
+    assert '不是登记过的产线' in seen['unknown']
+    assert seen['siteLines'] == [f'{site} / TX', f'{site} / TY']
+    # a field account reads every part of it
+    assert seen['field']['sections'] == ['release', 'models', 'snapshots', 'pools', 'batches'] and seen['field']['refused'] == []
+    assert rel['ref'] in seen['field']['release'] and seen['field']['model'] == model
+    assert '概览' not in seen['workerNav'] and '换一个有权限的账号' in seen['refused']
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
