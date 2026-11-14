@@ -149,8 +149,22 @@ input[type=range] { width: 200px; accent-color: var(--accent); }
 pre.log { background: #1d1d1f; color: #f5f5f7; padding: 14px 16px; border-radius: 10px; max-height: 60vh; overflow: auto;
           white-space: pre-wrap; word-break: break-all; font-size: 12px; min-height: 3em; }
 .progress { margin: 12px 0; }
-.waiting { margin: 8px 0; }
-.waiting::before { content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 8px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
+.form .label { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 8px; margin-bottom: 10px; }
+.drop { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 12px; border: 1px dashed #c7cbd3;
+        border-radius: var(--radius); background: var(--head); transition: background .12s, border-color .12s; }
+.drop.over { border-color: var(--accent); background: var(--tint); }
+.drop.off { opacity: .55; }
+.drop .choose { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid #d2d2d7;
+                border-radius: 8px; background: #fff; cursor: pointer; line-height: 1.4; white-space: nowrap; }
+.drop .choose:hover { background: var(--soft); }
+.drop .choose:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.drop.off .choose { cursor: default; }
+.drop .choose .icon { width: 16px; height: 16px; color: var(--accent); }
+.drop .choose input { position: absolute; inset: 0; width: 100%; opacity: 0; pointer-events: none; }
+.drop .bad { color: var(--bad); }
+.drop.reading > span::before { content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 8px;
+        border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+        vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .progress .track { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-bottom: 6px; }
 .progress .fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }

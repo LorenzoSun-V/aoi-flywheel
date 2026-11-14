@@ -617,7 +617,8 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert '标注批次' in seen['fieldNav'] and '操作记录' not in seen['fieldNav']
-    assert '在等浏览器读目录' in seen['waiting'] and seen['waitingAfter'] == 0
+    assert seen['reading'] == '正在读取目录…' and seen['picked'] == {'text': '20261104/ · 3 个文件', 'reading': 0}
+    assert '要是一个目录' in seen['droppedFile'] and seen['dropped'] == '20261104/ · 4 个文件'
     assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']

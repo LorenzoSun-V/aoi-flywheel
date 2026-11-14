@@ -1385,19 +1385,74 @@ function bar() {
   return node;
 }
 
-// A folder input. After the folder is picked the browser first counts every file in it and asks whether to
-// upload them, before the page gets anything; on a slow disk that takes a while, so until the files arrive
-// (or the pick is cancelled) the page says what it is waiting for.
+// The files of a folder dragged onto the page, from its FileSystemDirectoryEntry: the folder's name, the
+// files and their paths inside the folder (what relPaths gives for a picked folder).
+export async function readDropped(dir) {
+  const found = [];
+  const walk = async (d) => {
+    const reader = d.createReader();
+    for (;;) {  // readEntries hands the entries over a batch at a time, then an empty one
+      const batch = await new Promise((ok, no) => reader.readEntries(ok, no));
+      if (!batch.length) return;
+      for (const e of batch) if (e.isDirectory) await walk(e); else if (e.isFile) found.push(e);
+    }
+  };
+  await walk(dir);
+  const files = new Array(found.length);
+  await inParallel(found, 32, async (e, i) => { files[i] = await new Promise((ok, no) => e.file(ok, no)); });
+  const cut = dir.fullPath.length + 1;  // fullPath is "/<folder>/sub/a.png"
+  return { folder: dir.name, files, paths: found.map((e) => e.fullPath.slice(cut)) };
+}
+
+// Where a folder is given: dragged onto the box, or chosen with the button. Dragging skips the browser's
+// folder dialog and its "upload N files?" prompt, which on some Windows machines take seconds whatever the
+// folder holds. The box's files / paths / folder hold what was given; a 'change' event says new ones came.
 function folderInput() {
   const input = el('input', { type: 'file', webkitdirectory: true, multiple: true });
-  const note = el('p', { class: 'muted waiting', role: 'status' },
-    '在等浏览器读目录：浏览器要先数完目录里的文件，再弹窗问要不要上传；点了「上传」，这里就开始检查。'
-    + '目录大、或者在 U 盘和网络盘上时要等一会，不是卡住了。');
-  const stop = () => note.remove();
-  input.addEventListener('click', () => input.after(note));
-  input.addEventListener('change', stop);
-  input.addEventListener('cancel', stop);
-  return input;
+  const status = el('span', { class: 'muted' }, '或者把目录拖到这里');
+  const box = el('div', { class: 'drop' }, el('label', { class: 'button choose' }, icon('folder'), '选择目录', input), status);
+  let disabled = false;
+  let shown = status.textContent;
+  const say = (text, cls = 'muted') => { status.textContent = text; status.className = cls; };
+  const reading = () => { shown = status.textContent; box.classList.add('reading'); say('正在读取目录…'); };
+  const pick = (files, paths, folder) => {
+    Object.assign(box, { files, paths, folder });
+    box.classList.remove('reading');
+    say(files.length ? `${folder}/ · ${files.length} 个文件` : `${folder}/ 是空的`, files.length ? '' : 'bad');
+  };
+  Object.assign(box, { files: [], paths: [], folder: '' });
+  Object.defineProperty(box, 'disabled', {
+    get: () => disabled,
+    set: (on) => { disabled = on; input.disabled = on; box.classList.toggle('off', on); },
+  });
+  input.addEventListener('click', reading);
+  input.addEventListener('cancel', () => { box.classList.remove('reading'); say(shown); });
+  input.addEventListener('change', () => {  // then the event goes on up to the box, where the page listens
+    const files = [...input.files];
+    pick(files, relPaths(files), files.length ? (files[0].webkitRelativePath || '').split('/')[0] : '');
+  });
+  box.addEventListener('dragover', (ev) => {
+    ev.preventDefault();
+    if (!disabled) box.classList.add('over');
+  });
+  box.addEventListener('dragleave', (ev) => { if (!box.contains(ev.relatedTarget)) box.classList.remove('over'); });
+  box.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    box.classList.remove('over');
+    if (disabled) return;
+    const items = [...((ev.dataTransfer && ev.dataTransfer.items) || [])].filter((i) => i.kind === 'file');
+    const entries = items.map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
+    if (entries.length !== 1 || !entries[0].isDirectory) {
+      say('拖进来的要是一个目录：不是文件，也不是几个目录一起', 'bad');
+      return;
+    }
+    reading();
+    readDropped(entries[0]).then(({ folder, files, paths }) => {
+      pick(files, paths, folder);
+      box.dispatchEvent(new Event('change'));
+    }).catch((e) => { box.classList.remove('reading'); say(`读不了这个目录：${e.message}`, 'bad'); });
+  });
+  return box;
 }
 
 let uploading = false;
@@ -1523,8 +1578,8 @@ async function uploadPage(name) {
   };
 
   picker.addEventListener('change', () => {
-    files = [...picker.files];
-    paths = relPaths(files);
+    files = picker.files;
+    paths = picker.paths;
     check().catch((e) => result.replaceChildren(errorBox(e)));
   });
   for (const box of [allowOther, force]) box.addEventListener('change', () => check().catch((e) => result.replaceChildren(errorBox(e))));
@@ -1535,7 +1590,7 @@ async function uploadPage(name) {
       + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
       + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
     el('div', { class: 'panel form' },
-      el('label', {}, '目录', picker),
+      el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       el('label', {}, '备注', note),
       el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
       el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
@@ -1694,9 +1749,9 @@ async function addPage(name) {
 
   const again = () => check().catch((e) => result.replaceChildren(errorBox(e)));
   picker.addEventListener('change', () => {
-    files = [...picker.files];
-    paths = relPaths(files);
-    if (files.length) target.value = (files[0].webkitRelativePath || '').split('/')[0];
+    files = picker.files;
+    paths = picker.paths;
+    if (files.length) target.value = picker.folder;
     again();
   });
   for (const box of [replace, allowOther, force]) box.addEventListener('change', again);
@@ -1711,7 +1766,7 @@ async function addPage(name) {
     el('p', { class: 'muted' }, `选一个目录，比如今天采集的那一天：只上传这个目录，新版本 = ${d.latest ? d.latest.ref : '空'} + 这个目录，池里原有的文件不动。`
       + '池里已经有同名目录时会拦下，除非勾选「替换已有目录」。和池里重复的图片、标注不一致的重复图片只提醒，不拦。和 fw dataset add 是同一件事。'),
     el('div', { class: 'panel form' },
-      el('label', {}, '目录', picker),
+      el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       el('label', {}, '放在池里的目录', target),
       el('label', {}, '备注', note),
       el('label', { class: 'check' }, replace, '替换已有目录：池里已有这个目录时，整个换成这一份（--replace）'),
@@ -1883,9 +1938,9 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
 
   const again = () => check().catch((e) => result.replaceChildren(errorBox(e)));
   picker.addEventListener('change', () => {
-    files = [...picker.files];
-    paths = relPaths(files);
-    if (files.length && onPick) onPick((files[0].webkitRelativePath || '').split('/')[0]);
+    files = picker.files;
+    paths = picker.paths;
+    if (files.length && onPick) onPick(picker.folder);
     again();
   });
   for (const box of [allowOther, force]) box.addEventListener('change', again);
@@ -1953,7 +2008,7 @@ async function batchUploadPage(name, query) {
         : '选一个目录，原始图片或已经标注的都行：冻结成批次的第 1 版，不会进数据池；复核通过以后由算法工程师入库。'),
     el('div', { class: 'panel form' },
       b ? null : el('label', {}, '进哪个数据池', pool),
-      el('label', {}, '目录', picker),
+      el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       b ? null : el('label', {}, '批次名称', batchName),
       b ? null : el('label', {}, '池里的目录名', dir),
       el('label', {}, approve ? '修改人姓名' : '标注人姓名', labeler),
@@ -2615,6 +2670,9 @@ async function start() {
   }
   try { if (localStorage.getItem(SIDE_KEY) === 'off') document.body.classList.add('side-off'); } catch { /* private window */ }
   window.addEventListener('hashchange', render);
+  for (const kind of ['dragover', 'drop']) {  // a folder dropped beside the box must not open in the tab instead
+    window.addEventListener(kind, (ev) => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) ev.preventDefault(); });
+  }
   document.addEventListener('keydown', (ev) => {  // one listener; the page shown now sets keyNav
     if (ev.key === 'Escape' && openMenu) { closeMenu(true); return; }
     if (keyNav && !ev.target.closest('input, select, textarea')) keyNav(ev.key);

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  shortWhen, modelRow, downloadText,
+  shortWhen, modelRow, downloadText, readDropped,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -219,4 +219,24 @@ test('a download says how far it has come, in whole percent', () => {
   assert.equal(downloadText(999, 1000), '下载中 99%');
   assert.equal(downloadText(1000, 1000), '下载中 100%');
   assert.equal(downloadText(5, 0), '下载中 0%');
+});
+
+test('a dragged folder is read through all its batches and subfolders, with paths inside the folder', async () => {
+  const file = (fullPath) => ({ isFile: true, isDirectory: false, fullPath, file: (ok) => ok({ name: fullPath }) });
+  const dir = (fullPath, kids, size = 2) => ({
+    isFile: false, isDirectory: true, fullPath, name: fullPath.slice(fullPath.lastIndexOf('/') + 1),
+    createReader() {  // hands the entries over a few at a time, like a browser does (100 at a time there)
+      let at = 0;
+      return { readEntries(ok) { const part = kids.slice(at, at + size); at += size; setTimeout(() => ok(part)); } };
+    },
+  });
+  const top = dir('/20261104', [file('/20261104/a.png'), file('/20261104/a.json'), file('/20261104/b.png'),
+    dir('/20261104/night', [file('/20261104/night/c.png')]), dir('/20261104/empty', [])]);
+  const got = await readDropped(top);
+  assert.equal(got.folder, '20261104');
+  assert.deepEqual(got.paths, ['a.png', 'a.json', 'b.png', 'night/c.png']);
+  assert.deepEqual(got.files.map((f) => f.name), ['/20261104/a.png', '/20261104/a.json', '/20261104/b.png', '/20261104/night/c.png']);
+  const broken = dir('/x', []);
+  broken.createReader = () => ({ readEntries: (ok, no) => no(new Error('读不了')) });
+  await assert.rejects(readDropped(broken), /读不了/);
 });
