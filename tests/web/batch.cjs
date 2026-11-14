@@ -84,7 +84,7 @@ const { chromium } = require('playwright');
   await algo.click('#import-go');
   await algo.waitForFunction(() => document.querySelector('#batch-status')?.textContent === '已入库');
   seen.done = await algo.textContent('main');
-  seen.buttons = await algo.locator('main button').count();
+  seen.buttons = await algo.locator('main button:not(.back)').count();  // nothing left to do (back is not a step of the batch)
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();

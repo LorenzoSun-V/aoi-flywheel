@@ -75,6 +75,7 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert '凭据不对' in seen['wrong']
+    assert seen['home'] == '概览'
     assert name in seen['datasets'] and tokens['algo_name'] in seen['who']
     assert seen['versions'] == [f'{name}@2', f'{name}@1']
     assert [f.split()[1] for f in seen['folders']] == ['A', 'B', 'C']
@@ -111,7 +112,7 @@ def test_a_snapshot_is_shown_in_the_folders_fw_get_makes(service, tokens, api, t
     assert 'fw get 默认取回的一样' in seen['note']
     assert seen['train'] == ['📁 images 2']
     assert seen['trainTiles'] == ['train0.png', 'train1.png'] and seen['trainLabeled'] == 2
-    assert seen['crumbs'].endswith('/ train / images') and 'scratch × 1' in seen['image'] and seen['count'] == '1 / 2'
+    assert seen['crumbs'].endswith('/train/images') and 'scratch × 1' in seen['image'] and seen['count'] == '1 / 2'
     assert seen['negTiles'] == ['neg_train2.png'] and seen['valTiles'] == ['neg_val4.png', 'val3.png']
     assert seen['errors'] == []
 
@@ -266,7 +267,7 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     assert (seen['formSite'], seen['formLine']) == (site, 'TX')      # a new pool starts on the line being browsed
     assert '这里没有符合的数据池' in seen['none']
     assert seen['navModels'] == f'#/models?site={site}&line=TX' and seen['models'] == [model] and seen['navOn'] == '模型'
-    assert seen['navAfter'] == '#/'
+    assert seen['navAfter'] == '#/datasets'
     assert batch in seen['batches']
 
 
@@ -319,6 +320,50 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     assert seen['field']['sections'] == ['release', 'models', 'snapshots', 'pools', 'batches'] and seen['field']['refused'] == []
     assert rel['ref'] in seen['field']['release'] and seen['field']['model'] == model
     assert '概览' not in seen['workerNav'] and '换一个有权限的账号' in seen['refused']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_one_finds_the_way_around(service, tokens, api, tmp_path):
+    """The home page is the overview; a site folds up and only the ticked sites and lines are shown, which the
+    browser remembers and which hides nothing from the lists; every page says where it is and its back button
+    leads to where one came from, or one step up on a page opened directly; table headers stay on one line."""
+    from helpers import register_place
+    from test_trainsets import pool, sample_files
+    site, other = f'S{os.urandom(4).hex()}', f'S{os.urandom(4).hex()}'
+    register_place(site, 'TY')
+    register_place(other, 'TX')
+    a = pool(api, tmp_path / 'a', sample_files('2026-09', 2), site=site, line='TX')
+    b = pool(api, tmp_path / 'b', sample_files('2026-09', 2), site=other, line='TX')
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'nav.cjs'), service.url + '/', tokens['algo'], site, other, a, b, str(shots)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['home'] == {'h1': '概览', 'on': '概览', 'crumbs': 0} and seen['brand'] == '#/'
+    # folding
+    assert (seen['linesBefore'], seen['linesFolded'], seen['linesFoldedAfterReload'], seen['linesOpened']) == (2, 0, 0, 2)
+    assert seen['foldSays'] == 'false'
+    # choosing: the line and the site that were unticked are gone from the tree and the table, and stay gone
+    tx, ty = f'#/?site={site}&line=TX', f'#/?site={site}&line=TY'
+    for shown in (seen['chosen'], seen['chosenAfterReload']):
+        assert tx in shown['tree'] and ty not in shown['tree'] and not any(other in h for h in shown['tree'])
+        assert f'{site} / TX' in shown['table'] and f'{site} / TY' not in shown['table']
+        assert not any(x.startswith(other) for x in shown['table'])
+    assert seen['lineOfHiddenSiteOff'] is True and '没显示' in seen['hiddenNote']
+    assert not any(other in h for h in seen['listTree']) and seen['hiddenPoolListed'] is True   # the list hides nothing
+    assert seen['listCrumbs'].replace(' ', '') == '概览/数据集'
+    assert seen['headers'] and all(h == ['nowrap', True] for h in seen['headers'])
+    assert seen['browsedHidden'] == [ty]
+    # the path and the way back
+    assert seen['lineCrumbs'] == ['概览', '/', site, '/', 'TX']
+    assert seen['crumbs'] == [['概览', '#/'], [site, f'#/?site={site}'], ['TX', tx],
+                              ['数据集', f'#/datasets?site={site}&line=TX'], [a, None]]
+    assert seen['onInDataset'] == '数据集'
+    assert seen['versionCrumbs'] == ['概览', site, 'TX', '数据集', a, '@1']
+    assert seen['backTo'] == f'/?site={site}&line=TX' and seen['homeHash'] == '/'
+    assert seen['upTo'] == f'/datasets?site={site}&line=TX' and seen['upPools'] == [a]
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

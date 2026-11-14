@@ -13,6 +13,7 @@ const { chromium } = require('playwright');
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.goto(url);
   await page.evaluate((t) => localStorage.setItem('fw-token', t), token);
+  await page.goto(`${url}#/datasets`);
   await page.reload();
   const seen = {};
   await page.waitForSelector('details summary');

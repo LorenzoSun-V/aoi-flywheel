@@ -19,12 +19,15 @@ const { chromium } = require('playwright');
   errors.length = 0;  // the 401 of the wrong token
   await page.fill('input[type=password]', token);
   await page.click('button[type=submit]');
-  await page.waitForSelector('table');
+  await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '概览');  // signing in leads home
+  seen.home = await page.textContent('#nav a.on');
+  await page.click('#nav a:has-text("数据集")');
+  await page.waitForSelector('#pools + table');
   seen.datasets = await page.$$eval('table tr td:first-child', (tds) => tds.map((t) => t.textContent));
   seen.who = await page.textContent('#who');
   await page.screenshot({ path: `${out}/datasets.png` });
   await page.click(`a:text-is("${dataset}")`);
-  await page.waitForSelector('.crumbs');  // the dataset's page (the list has headings too)
+  await page.waitForSelector('select#old');  // the dataset's page (the list has tables too)
   seen.versions = await page.$$eval('table tr td:first-child', (tds) => tds.map((t) => t.textContent));
   await page.click(`text=${dataset}@2`);
   await page.waitForSelector('.folders');
