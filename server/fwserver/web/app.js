@@ -64,6 +64,7 @@ const ICONS = {
   arrow: ['M5 12h14', 'M13 6l6 6-6 6'],
   plus: ['M12 5v14', 'M5 12h14'],
   download: ['M12 4v11', 'M7.5 10.5L12 15l4.5-4.5', 'M5 19.5h14'],
+  info: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 11v5.5', 'M12 7.6v.01'],
 };
 
 export function icon(name, cls = '') {
@@ -137,7 +138,7 @@ async function call(path, { method = 'GET', body, blob, raw = false, stay = fals
   const r = await fetch(`/api/v1${path}`, { method, headers, body: blob !== undefined ? blob : body === undefined ? undefined : JSON.stringify(body) });
   if (r.status === 401 && !stay) {
     location.hash = '#/login';
-    throw new ApiError(401, '要先登录');
+    throw new ApiError(401, '请先登录');
   }
   if (!r.ok) {
     let detail = `${r.status} ${r.statusText}`;
@@ -288,7 +289,63 @@ async function blobUrl(digest) {
 
 // Chrome and Firefox show no TIFF; such images get a note instead of a broken picture.
 export const shownByBrowsers = (path) => !['.tif', '.tiff'].includes(ext(path));
-const NO_TIFF = '浏览器显示不了 TIFF；下载后用 LiteAnno 看';
+const NO_TIFF = '浏览器无法显示 TIFF 图片，请下载后使用 LiteAnno 查看。';
+
+// --- ⓘ: the details behind a title, a field or a button ---------------------------------------------------
+// A page shows what one needs in order to act; how a step works, why, and the matching fw command sit behind an ⓘ
+// next to what they are about. The text shows while the ⓘ is pointed at or has the focus; a click keeps it open
+// until a second click, Esc or a click elsewhere. text: a sentence, or a list of paragraphs.
+let tip = null;  // the text shown now: {node, button, pinned}
+
+function hideTip() {
+  if (!tip) return;
+  tip.node.remove();
+  tip.button.removeAttribute('aria-describedby');
+  tip.button.setAttribute('aria-expanded', 'false');
+  tip = null;
+}
+
+function showTip(button, paragraphs, pinned) {
+  hideTip();
+  const node = el('div', { id: 'tip', class: 'tip', role: 'tooltip' }, paragraphs.map((x) => el('p', {}, x)));
+  document.body.append(node);
+  const r = button.getBoundingClientRect();
+  const left = Math.max(8, Math.min(r.left - 12, window.innerWidth - node.offsetWidth - 8));
+  const below = r.bottom + 8 + node.offsetHeight <= window.innerHeight || r.top - 8 - node.offsetHeight < 0;
+  node.style.left = `${left + window.scrollX}px`;  // through the CSSOM, as everywhere (the page's policy)
+  node.style.top = `${(below ? r.bottom + 8 : r.top - 8 - node.offsetHeight) + window.scrollY}px`;
+  button.setAttribute('aria-describedby', 'tip');
+  button.setAttribute('aria-expanded', String(pinned));
+  tip = { node, button, pinned };
+}
+
+export function info(text, label = '说明') {
+  const paragraphs = [].concat(text).filter(Boolean);
+  const button = el('button', { class: 'info', type: 'button', 'aria-label': label, 'aria-expanded': 'false' }, icon('info'));
+  const mine = () => tip && tip.button === button;
+  button.addEventListener('pointerenter', () => { if (!tip || !tip.pinned) showTip(button, paragraphs, false); });
+  button.addEventListener('pointerleave', () => { if (mine() && !tip.pinned) hideTip(); });
+  button.addEventListener('focus', () => { if (!mine()) showTip(button, paragraphs, false); });
+  button.addEventListener('blur', () => { if (mine() && !tip.pinned) hideTip(); });
+  button.addEventListener('click', (ev) => {
+    ev.preventDefault();  // inside a <label> it must not tick or focus the field
+    if (mine() && tip.pinned) hideTip(); else showTip(button, paragraphs, true);
+  });
+  return button;
+}
+
+// A row of a form: its name, with an ⓘ when there is more to say, and its control. With an ⓘ the row is not a
+// <label> (the ⓘ, a button, would become the control it names), so the control is named by aria-label instead.
+function field(name, control, more = null) {
+  if (!more) return el('label', {}, name, control);
+  if (!control.getAttribute('aria-label')) control.setAttribute('aria-label', name);
+  return el('div', { class: 'label' }, el('span', { class: 'name' }, name, info(more, `${name}的说明`)), control);
+}
+
+// A check box with what it does, and an ⓘ when there is more to say (such as the matching fw option).
+function checkRow(box, text, more = null) {
+  return el('label', { class: 'check' }, box, el('span', {}, text), more ? info(more, typeof text === 'string' ? `${text}的说明` : '说明') : null);
+}
 
 // --- pages ------------------------------------------------------------------------------------------------
 function errorBox(e) {
@@ -297,7 +354,7 @@ function errorBox(e) {
 
 function loginPage() {
   const show = live();
-  const input = el('input', { type: 'password', placeholder: '凭据（fw-server token create 给的那一串）', autocomplete: 'off' });
+  const input = el('input', { type: 'password', placeholder: '账号凭据', autocomplete: 'off', 'aria-label': '账号凭据' });
   const msg = el('div');
   const go = async (ev) => {
     ev.preventDefault();
@@ -306,12 +363,12 @@ function loginPage() {
       renderWho(await api.me(true));
       location.hash = '#/';
     } catch (e) {
-      msg.replaceChildren(errorBox(e.status === 401 ? '凭据不对、已吊销或账号已停用' : e));
+      msg.replaceChildren(errorBox(e.status === 401 ? '凭据无效或已吊销，或账号已停用。' : e));
     }
   };
   show(el('form', { class: 'panel login', onsubmit: go },
-    el('h1', {}, '登录'),
-    el('p', { class: 'muted' }, '用你的账号凭据登录，和 fw login 用的是同一个。凭据只存在这个浏览器里。'),
+    el('h1', {}, '登录', info(['请使用管理员发放的账号凭据登录，该凭据与 fw login 使用的凭据相同。',
+      '凭据仅保存在当前浏览器中，退出登录时清除。'], '登录说明')),
     msg, input, el('button', { class: 'primary', type: 'submit' }, '登录')));
   input.focus();
 }
@@ -324,11 +381,11 @@ function labelChips(v) {
 // The form that gives a version of a dataset, a snapshot or (model true) a model its label. The platform
 // proposes the next one after the highest so far; a label is written once and never moved.
 async function labelForm(name, versions, model, done) {
-  const info = await (model ? api.modelLabels(name) : api.labels(name));
+  const known = await (model ? api.modelLabels(name) : api.labels(name));
   const which = el('select', { id: 'label-version' }, versions.map((v) => el('option', { value: String(v.number) },
     v.ref + ((v.labels || []).length ? `（${v.labels.join('、')}）` : ''))));
   const label = el('input', { id: 'label-text', placeholder: 'v0.1.0', size: 12 });
-  const note = el('input', { id: 'label-note', placeholder: '备注（可不写）', size: 30 });
+  const note = el('input', { id: 'label-note', placeholder: '备注（选填）', size: 30 });
   const msg = el('div', {});
   const go = el('button', { id: 'label-go', class: 'primary', onclick: async () => {
     go.disabled = true;
@@ -337,8 +394,8 @@ async function labelForm(name, versions, model, done) {
       await done();
     } catch (e) { msg.replaceChildren(errorBox(e)); go.disabled = false; }
   } }, '起版本号');
-  const retired = info.labels.filter((r) => r.retired);
-  const alive = info.labels.filter((r) => !r.retired);
+  const retired = known.labels.filter((r) => r.retired);
+  const alive = known.labels.filter((r) => !r.retired);
   const retire = can('labels.retire');
   const row = (r) => {
     const tr = el('tr', {}, el('td', {}, el('span', { class: 'tag ver' }, r.label)), el('td', {}, r.ref),
@@ -348,10 +405,10 @@ async function labelForm(name, versions, model, done) {
   };
   // Retiring asks for the reason in the row itself; the label can never be given again afterwards.
   const asking = (r) => {
-    const why = el('input', { type: 'text', class: 'retire-note', placeholder: `为什么撤销 ${r.label}（必填，比如起错版本了）`, size: 36 });
+    const why = el('input', { type: 'text', class: 'retire-note', placeholder: `撤销 ${r.label} 的原因（必填），例如：版本号起错`, size: 36 });
     const err = el('span', { class: 'bad' });
     const tr = el('tr', { class: 'asking' }, el('td', {}, el('span', { class: 'tag ver' }, r.label)), el('td', { colspan: '3' }, why, ' ',
-      el('span', { class: 'muted small' }, `撤销后 ${r.label} 不再指任何版本，以后也不能再起。`), err),
+      el('span', { class: 'muted small' }, `撤销后，${r.label} 不再指向任何版本，且不能再次使用。`), err),
     el('td', {}, el('div', { class: 'row' },
       el('button', { class: 'danger retire-go', onclick: async (ev) => {
         const button = ev.currentTarget;
@@ -365,17 +422,17 @@ async function labelForm(name, versions, model, done) {
     setTimeout(() => why.focus());
     return tr;
   };
-  return [el('h2', {}, '版本号'),
-    el('p', { class: 'muted' }, '给一个版本起 v主.次.修订 这样的版本号，例如冷启动 v0.0.1、加了数据 v0.1.0、稳定了 v1.0.0。'
-      + `起了以后 ${name}@v0.1.0 就是这个版本，哪里都能用。一个版本可以有几个版本号；版本号定了就不能改到别的版本上。`),
+  return [el('h2', {}, '版本号', info(['版本号的格式为 v主版本.次版本.修订号，例如冷启动时为 v0.0.1，补充数据后为 v0.1.0，效果稳定后为 v1.0.0。',
+      `起版本号后，可在任何需要版本的地方用 ${name}@v0.1.0 引用该版本。一个版本可以有多个版本号；版本号一经确定，不能改指其他版本。`,
+      '右侧三个按钮为平台建议的下一个修订号、次版本号和主版本号。'], '版本号说明')),
     el('div', { class: 'row' }, which, label,
-      ['patch', 'minor', 'major'].map((k) => el('button', { id: `label-${k}`, title: { patch: '小改', minor: '加了数据', major: '大版本' }[k],
-        onclick: () => { label.value = info.suggest[k]; } }, info.suggest[k])), note, go),
+      ['patch', 'minor', 'major'].map((k) => el('button', { id: `label-${k}`, title: { patch: '修订号：小幅修改', minor: '次版本：补充数据', major: '主版本：重大变更' }[k],
+        onclick: () => { label.value = known.suggest[k]; } }, known.suggest[k])), note, go),
     msg,
     alive.length ? el('table', { id: 'labels' }, el('tr', {}, ['版本号', '指向', '起的人', '备注', retire ? '' : null].filter((h) => h !== null)
       .map((h) => el('th', {}, h))), alive.map(row)) : null,
-    retired.length ? el('p', { class: 'muted' }, '已撤销、不能再用的版本号：'
-      + retired.map((r) => `${r.label}（原来指 ${r.ref}，${r.retired_note}）`).join('、')) : null];
+    retired.length ? el('p', { class: 'muted' }, '已撤销的版本号：'
+      + retired.map((r) => `${r.label}（原指向 ${r.ref}，原因：${r.retired_note}）`).join('、')) : null];
 }
 
 // The title of a page with what one can do there on its right.
@@ -421,7 +478,7 @@ function crumbs(section, place, ...steps) {
   const trail = trailOf(section, place, steps.filter(Boolean));
   const up = trail.slice(0, -1).reverse().find(([, href]) => href);
   return el('nav', { class: 'crumbs' }, sideToggle(),
-    el('button', { class: 'tool back', type: 'button', title: '返回刚才的页面', 'aria-label': '返回', onclick: () => {
+    el('button', { class: 'tool back', type: 'button', title: '返回上一页', 'aria-label': '返回', onclick: () => {
       if (visits.length > 1) history.back(); else location.hash = up ? up[1] : '#/';
     } }, icon('left')),
     el('span', { class: 'path' }, trail.map(([text, href], i) => [i ? el('span', { class: 'sep' }, '/') : null,
@@ -554,18 +611,20 @@ function placeTree(tree, at, counts, link) {
     }
     aside.className = choosing ? 'choosing' : '';
     aside.replaceChildren(...present([
-      el('div', { class: 'head' }, el('span', {}, '现场 / 产线'),
-        !choosing && can('sites.write') ? el('a', { id: 'places-manage', class: 'link', href: '#/places', title: '登记现场、产线，改显示名' }, '管理') : null,
+      el('div', { class: 'head' }, el('span', {}, '现场 / 产线',
+        choosing ? info(['仅勾选的现场和产线显示在此处和概览的产线表中，设置保存在当前浏览器中。',
+          '此设置仅用于整理显示，不影响列表内容：点击「全部」时仍列出全部数据。'], '选择显示的说明') : null),
+        !choosing && can('sites.write') ? el('a', { id: 'places-manage', class: 'link', href: '#/places', title: '登记现场和产线，修改显示名' }, '管理') : null,
         tree.sites.length ? el('button', { id: 'places-choose', class: 'link', type: 'button',
-          title: '选哪些现场、产线显示在这里', onclick: () => {
+          title: '选择在此显示的现场和产线', onclick: () => {
             if (choosing) { render(); return; }  // done: the page shows the choice too
             choosing = true;
             draw();
           } }, choosing ? '完成' : '选择') : null),
-      choosing ? el('p', { class: 'muted small' }, '只有勾上的现场和产线显示在这里和概览的表里；这台电脑的这个浏览器会记住。') : null,
       el('ul', {}, items),
-      hidden ? el('p', { class: 'muted small', id: 'places-hidden' }, `有 ${hidden} 个现场 / 产线没显示，点「选择」勾上。`) : null,
-      counts && counts.loose ? el('p', { class: 'muted small' }, `另有 ${counts.loose} 个不在任何登记的现场下（没写现场产线的测试集、现场没登记的旧数据），只在「全部」里。`) : null]));
+      hidden ? el('p', { class: 'muted small', id: 'places-hidden' }, `${hidden} 个现场 / 产线未显示，可点击「选择」恢复显示。`) : null,
+      counts && counts.loose ? el('p', { class: 'muted small' }, `另有 ${counts.loose} 项不属于已登记的现场，仅列在「全部」中`,
+        info('包括未指定现场和产线的测试集，以及所属现场尚未登记的早期数据。', '未归类数据的说明')) : null]));
   };
   draw();
   return aside;
@@ -592,7 +651,7 @@ function browse(tree, at, parts, keep, counts, hint, ...list) {
     el('div', { class: 'list' },
       el('form', { class: 'row', onsubmit: go }, q, el('button', { type: 'submit' }, '搜索'),
         at.q ? el('a', { href: hrefOf(parts, { ...keep, site: at.site, line: at.line }) }, '清除') : null,
-        at.site ? el('span', { class: 'muted' }, `只看 ${[at.site, at.line].filter(Boolean).join(' / ')}`) : null),
+        at.site ? el('span', { class: 'muted' }, `范围：${[at.site, at.line].filter(Boolean).join(' / ')}`) : null),
       ...list))];
 }
 
@@ -617,13 +676,13 @@ async function datasetsPage(query) {
   const narrowed = at.site || at.q;
   show(crumbs('datasets', at), pageHead('数据集', can('datasets.write') ? el('a', { id: 'dataset-new', class: 'button primary',
     href: hrefOf(['dataset-new'], { site: at.site, line: at.line }) }, icon('plus'), '新建数据集') : null),
-    browse(tree, at, ['datasets'], {}, datasetCounts(tree), '搜名称',
+    browse(tree, at, ['datasets'], {}, datasetCounts(tree), '按名称搜索',
       el('h2', { id: 'pools' }, `数据池和测试集（${pools.length}）`),
-      pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的数据池。'
-        : '还没有数据集：点右上角「新建数据集」，建好后上传目录；或者在服务器上用 fw dataset create 和 fw dataset import。'),
-      el('h2', { id: 'snapshots' }, `训练集快照（${snapshots.length}）`),
-      snapshots.length ? table(snapshots, false) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的训练集快照。' : '还没有训练集快照：用 fw trainset create 从数据池版本建。'),
-      at.line ? el('p', { class: 'muted' }, '训练集快照按它取过数据的产线算：从几条产线取数据的快照，在每条产线下都列出。') : null));
+      pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '没有符合条件的数据集。'
+        : '暂无数据集，可点击右上角「新建数据集」创建。'),
+      el('h2', { id: 'snapshots' }, `训练集快照（${snapshots.length}）`, info(['训练集快照由数据池版本生成，使用 fw trainset create 创建。',
+        '快照按其取用数据的产线归类：从多条产线取用数据的快照，在每条产线下均会列出。'], '训练集快照说明')),
+      snapshots.length ? table(snapshots, false) : el('p', { class: 'muted' }, narrowed ? '没有符合条件的训练集快照。' : '暂无训练集快照。')));
 }
 
 // A version's source: 'batch:NAME@N' (a labelling batch that was imported) links to the batch.
@@ -671,9 +730,10 @@ async function datasetPage(name) {
     d.kind === 'trainset' || !can('datasets.write') ? null : el('div', { class: 'row', style: 'margin-top:12px' },
       el('a', { class: 'button primary', href: hrefOf(['add', d.name]) }, '上传新增目录'),
       d.latest ? el('a', { class: 'button', href: hrefOf(['remove', d.name]) }, '去掉目录') : null,
-      el('a', { class: 'button', href: hrefOf(['upload', d.name]) }, '上传完整版本')),
-    d.kind === 'trainset' || !can('datasets.write') ? null : el('p', { class: 'muted' }, '平时用「上传新增目录」：只上传新的那个目录，池里原有的不动。'
-      + '「上传完整版本」是把一个目录当作新版本的全部内容，目录里没有的文件在新版本里就是删除。'),
+      el('a', { class: 'button', href: hrefOf(['upload', d.name]) }, '上传完整版本'),
+      info(['上传新增目录：仅上传新增的目录，数据池中原有文件保持不变，适用于日常追加数据。',
+        '去掉目录：新版本不再包含所选目录，此前的版本保持不变。',
+        '上传完整版本：以所选目录的全部内容作为新版本，其中不存在的文件将从新版本中删除。'], '上传方式说明')),
     el('h2', {}, '比较两个版本'),
     el('div', { class: 'row' }, '从', a, '到', b, compare),
     list.length && can('datasets.write') ? await labelForm(d.name, list, false, () => datasetPage(name)) : null);
@@ -715,12 +775,12 @@ export function listDir(files, dir) {
 }
 
 function lazyThumb(img, file) {
-  if (!shownByBrowsers(file.path)) { img.alt = 'TIFF（浏览器显示不了）'; return; }
+  if (!shownByBrowsers(file.path)) { img.alt = 'TIFF（浏览器无法显示）'; return; }
   const digest = file.sha256;
   const io = new IntersectionObserver((seen) => {
     if (seen.some((s) => s.isIntersecting)) {
       io.disconnect();
-      blobUrl(digest).then((u) => { img.src = u; }).catch(() => { img.alt = '读不了'; });
+      blobUrl(digest).then((u) => { img.src = u; }).catch(() => { img.alt = '无法读取'; });
     }
   });
   io.observe(img);
@@ -744,19 +804,20 @@ async function versionPage(name, number, query) {
     el('button', { disabled: page + 1 >= pages, onclick: () => { location.hash = hrefOf(vparts, { dir, page: page + 1 }); } }, '下一页')) : null;
   const labeled = images.filter((f) => labelOf(f)).length;
   show(crumbsFor(version, dir, place),
-    el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version)),
+    el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version),
+      snapshot && flat && !dir ? info(['此处的目录结构与 fw get 默认取回的结构一致：train 中有标注框的图片位于 train/images，没有标注框的图片位于 neg_train；',
+        'val 和 test 的图片不区分有无标注框，均位于各自的 images 目录中。'], '快照目录说明') : null),
     dir ? null : el('dl', { class: 'kv' },
       el('dt', {}, '文件'), el('dd', {}, `${version.file_count} 个，${sizeText(version.total_bytes)}`),
       el('dt', {}, '父版本'), el('dd', {}, version.parent ? version.parent.ref : '-'),
       el('dt', {}, '登记'), el('dd', {}, `${version.created_by}，${when(version.created_at)}`),
       el('dt', {}, '来源'), el('dd', {}, sourceNode(version.source)),
       el('dt', {}, '清单哈希'), el('dd', { class: 'mono' }, version.manifest_sha256)),
-    !snapshot || dir ? null : el('p', { class: 'muted' }, flat
-      ? '目录和 fw get 默认取回的一样：train 里有框的图在 train/images，没有框的在 neg_train；val、test 的图不分有没有框，都在各自的 images 里。'
-      : `这个快照有文件平铺后会重名（例如 ${problems.join('；')}），fw get 默认的平铺目录摆不了，这里按存储的目录显示；取回用 fw get --format yolo-tree。`),
+    !snapshot || dir || flat ? null : el('p', { class: 'muted' },
+      `该快照中有文件平铺后重名（例如 ${problems.join('；')}），无法按 fw get 默认的平铺目录显示，此处按存储目录显示。取回时请使用 fw get --format yolo-tree。`),
     folders.length ? el('div', { class: 'folders' }, folders.map(([f, n]) =>
       el('a', { href: hrefOf(vparts, { dir: dir ? `${dir}/${f}` : f }) }, `📁 ${f}`, el('span', { class: 'muted' }, `  ${n}`)))) : null,
-    images.length ? el('p', { class: 'muted' }, `这一层 ${images.length} 张图，${labeled} 张有 JSON 标注`) : null,
+    images.length ? el('p', { class: 'muted' }, `本层 ${images.length} 张图片，其中 ${labeled} 张有 JSON 标注`) : null,
     pager,
     el('div', { class: 'grid' }, shown.map((f) => {
       const img = el('img', { alt: '' });
@@ -844,7 +905,7 @@ async function imagePage(name, number, path, query) {
   const place = await placeOfDataset(version.dataset);
   const { files, snapshot } = await viewFiles(version);
   const image = files.find((f) => f.path === path);
-  if (!image) throw new Error(`${version.ref} 里没有 ${path}`);
+  if (!image) throw new Error(`${version.ref} 中不存在 ${path}`);
   const label = labelIndex(files, snapshot)(image);
   const shown = shownPath(image);
   const dir = shown.includes('/') ? shown.slice(0, shown.lastIndexOf('/')) : '';
@@ -883,12 +944,12 @@ async function imagePage(name, number, path, query) {
       img.src = await blobUrl(image.sha256);
       await img.decode();
       size = [img.naturalWidth, img.naturalHeight];
-    } catch (e) { problems.push(`图片显示不了：${e.message}`); }
+    } catch (e) { problems.push(`图片无法显示：${e.message}`); }
   } else problems.push(NO_TIFF);
   if (!size && pdoc && pdoc.images[path]) size = pdoc.images[path].size;
   let doc = null;
   if (label) {
-    try { doc = JSON.parse(await (await api.object(label.sha256)).text()); } catch (e) { problems.push(`标注读不了：${e.message}`); }
+    try { doc = JSON.parse(await (await api.object(label.sha256)).text()); } catch (e) { problems.push(`标注无法读取：${e.message}`); }
   }
   if (!size && doc && doc.imageWidth > 0 && doc.imageHeight > 0) size = [doc.imageWidth, doc.imageHeight];
   [canvas.width, canvas.height] = size || [800, 600];
@@ -911,12 +972,12 @@ async function imagePage(name, number, path, query) {
       el('dt', {}, '尺寸'), el('dd', {}, size ? `${size[0]} × ${size[1]}` : '-'),
       el('dt', {}, '大小'), el('dd', {}, sizeText(image.size)),
       el('dt', {}, 'sha256'), el('dd', { class: 'mono' }, image.sha256),
-      el('dt', {}, '标注'), el('dd', {}, label ? label.path.slice(label.path.lastIndexOf('/') + 1) : '没有（正常图）'),
+      el('dt', {}, '标注'), el('dd', {}, label ? label.path.slice(label.path.lastIndexOf('/') + 1) : '无（正常图）'),
       doc ? [el('dt', {}, '确认'), el('dd', {}, doc.checked === true ? '已确认' : '未确认')] : null),
     problems.map((x) => errorBox(x)),
     shapes.length ? [el('h2', {}, '标注（实线）'), count(shapes)] : null,
     set ? [el('h2', {}, `预测（虚线，分数 ≥ ${Math.max(threshold, set.conf).toFixed(2)}）`),
-      predicted.length ? count(predicted) : el('p', { class: 'muted' }, '没有框')] : null]));
+      predicted.length ? count(predicted) : el('p', { class: 'muted' }, '无预测框')] : null]));
 }
 
 async function diffPage(name, query) {
@@ -930,7 +991,7 @@ async function diffPage(name, query) {
     if (!rows.length) return [];
     const tr = (r) => el('tr', { class: cls }, el('td', { class: 'mark' }), el('td', {}, r));
     const table = el('table', {}, rows.slice(0, LIMIT).map(tr));
-    const more = rows.length > LIMIT ? el('p', { class: 'muted' }, `先列出前 ${LIMIT} 个。`, el('button', { class: 'more-rows', onclick: () => {
+    const more = rows.length > LIMIT ? el('p', { class: 'muted' }, `仅列出前 ${LIMIT} 项。`, el('button', { class: 'more-rows', onclick: () => {
       table.append(...rows.slice(LIMIT).map(tr));
       more.remove();
     } }, `全部列出（${rows.length} 个）`)) : null;
@@ -943,9 +1004,10 @@ async function diffPage(name, query) {
     a2.click();
     a2.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, title: '和 fw dataset diff --list 一样：每行「新增 / 修改 / 删除 / 改名」、制表符、路径，可以用表格打开' }, icon('download'), '下载变化清单');
+  } }, icon('download'), '下载变化清单');
   show(crumbs('datasets', place, [name, hrefOf(['d', name])], '比较'),
-    pageHead(`${a.ref} → ${b.ref}`, save),
+    pageHead(`${a.ref} → ${b.ref}`, save, info(['变化清单的格式与 fw dataset diff --list 相同：每行依次为变化类型（新增 / 修改 / 删除 / 改名）、制表符和路径，可用表格软件打开。'],
+      '变化清单说明')),
     el('p', {}, `新增 ${d.added.length}，删除 ${d.deleted.length}，修改 ${d.modified.length}，改名 ${d.renamed.length}`),
     section('新增', 'change-added', d.added.map((p) => link(b, p))),
     section('删除', 'change-deleted', d.deleted.map((p) => link(a, p))),
@@ -986,10 +1048,10 @@ export function numberText(v) {
 
 function metricsTable(metrics, limit = 60) {
   const rows = flattenMetrics(metrics);
-  if (!rows.length) return el('p', { class: 'muted' }, '没有数值指标');
+  if (!rows.length) return el('p', { class: 'muted' }, '无数值指标');
   return [el('table', { class: 'narrow' }, rows.slice(0, limit).map(([k, v]) =>
     el('tr', {}, el('td', { class: 'mono' }, k), el('td', { class: 'num' }, numberText(v))))),
-  rows.length > limit ? el('p', { class: 'muted' }, `只列出前 ${limit} 项，全部见 metrics.json`) : null];
+  rows.length > limit ? el('p', { class: 'muted' }, `仅列出前 ${limit} 项，完整内容见 metrics.json。`) : null];
 }
 
 function fileTable(files) {
@@ -1035,7 +1097,7 @@ async function download(f, button) {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (e) {
-    button.after(el('span', { class: 'bad' }, ` 下载不了：${e.message}`));
+    button.after(el('span', { class: 'bad' }, ` 下载失败：${e.message}`));
   } finally {
     button.disabled = false;
     button.textContent = label;
@@ -1059,15 +1121,15 @@ async function modelsPage(query) {
   scope = at;
   renderNav();
   const [rows, tree] = await Promise.all([api.models(scopeQuery(at)), api.sites()]);
-  show(crumbs('models', at), el('h1', {}, '模型'),
-    browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '搜名称',
+  show(crumbs('models', at), el('h1', {}, '模型', info('模型使用 fw model create 创建，模型版本使用 fw model register 登记。', '模型说明')),
+    browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '按名称搜索',
       rows.length ? el('table', {}, el('tr', {}, ['名称', '现场 / 产线', '任务', '版本数', '最新', '建立', '备注'].map((h) => el('th', {}, h))),
         rows.map((m) => el('tr', {},
           el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
           el('td', {}, `${m.site} / ${m.line}`), el('td', {}, TASK_NAMES[m.task] || m.task),
           el('td', {}, String(m.version_count)), el('td', {}, m.latest ? mref(m.latest) : '-'),
           el('td', {}, `${m.created_by}，${when(m.created_at)}`), el('td', { class: 'muted' }, m.note))))
-        : el('p', { class: 'muted' }, at.site || at.q ? '这里没有符合的模型。' : '还没有模型：用 fw model create 建，再 fw model register 登记版本。')));
+        : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的模型。' : '暂无模型。')));
 }
 
 async function modelPage(name) {
@@ -1086,18 +1148,18 @@ async function modelPage(name) {
         el('td', { class: 'mono' }, v.code_commit ? v.code_commit.slice(0, 10) + (v.code_dirty ? '*' : '') : '-'),
         el('td', {}, tagChips(v.tags)),
         el('td', {}, v.created_by), el('td', {}, when(v.created_at)), el('td', { class: 'muted' }, v.note))))
-      : el('p', { class: 'muted' }, '还没有版本；用 fw model register 登记。'),
+      : el('p', { class: 'muted' }, '暂无版本，可使用 fw model register 登记。'),
     el('h2', {}, '评估'), evalTable(evals.slice().reverse(), true),
     list.length && can('models.write') ? await labelForm(m.name, list, true, () => modelPage(name)) : null);
 }
 
 function evalTable(rows, withModel) {
-  if (!rows.length) return el('p', { class: 'muted' }, '还没有评估报告。');
+  if (!rows.length) return el('p', { class: 'muted' }, '暂无评估报告。');
   const pick = new Set();
   const compare = el('button', { disabled: true, onclick: () => {
     const [a, b] = [...pick];
     location.hash = hrefOf(['evals'], { a, b });
-  } }, '比较选中的两个');
+  } }, '比较所选的两份报告');
   const head = ['', '编号', withModel ? '模型版本' : null, '测试集', '目录', '工具', '任务', '登记', '备注'].filter((h) => h !== null);
   return [el('table', {}, el('tr', {}, head.map((h) => el('th', {}, h))),
     rows.map((e) => el('tr', {},
@@ -1121,19 +1183,21 @@ async function modelVersionPage(name, number) {
   const asking = el('div');
   const history = chain.model_version.tag_history || [];  // the trace chain has it: every tag added or taken off
   show(crumbs('models', mv, [mv.model, hrefOf(['m', mv.model])], `@${mv.number}`),
-    pageHead([mv.ref, labelChips(mv), tagChips(mv.tags)], ...(can('models.write') ? tagButtons(mv, asking, () => modelVersionPage(name, number)) : [])),
+    pageHead([mv.ref, labelChips(mv), tagChips(mv.tags)], ...(can('models.write') ? [...tagButtons(mv, asking, () => modelVersionPage(name, number)),
+      info(['候选：该版本可考虑部署。', '弃用：提示不应再使用该版本，可填写原因。',
+        '标记可随时取消；文件和记录均保留，标记的经过列在下方「标签经过」中。'], '候选和弃用说明')] : [])),
     asking,
     el('dl', { class: 'kv' },
       el('dt', {}, '训练集快照'), el('dd', {}, vref(mv.trainset.ref)),
       el('dt', {}, '来源数据池'), el('dd', {}, chain.sources.length ? chain.sources.map((v, i) => [i ? '、' : '', vref(v.ref)]) : '-'),
       el('dt', {}, '类别'), el('dd', {}, (mv.classes || []).join('、') || '-'),
       el('dt', {}, 'ONNX'), el('dd', { class: 'mono' }, `${mv.onnx_sha256}（${sizeText(mv.onnx_size || 0)}）`),
-      el('dt', {}, '训练代码'), el('dd', {}, mv.code_commit ? `${mv.code_repo || ''} @ ${mv.code_commit}${mv.code_dirty ? '（有未提交的改动）' : ''}` : '没登记'),
-      el('dt', {}, '发布'), el('dd', {}, chain.releases.length ? chain.releases.map((r) => r.ref).join('、') : '还没发布'),
+      el('dt', {}, '训练代码'), el('dd', {}, mv.code_commit ? `${mv.code_repo || ''} @ ${mv.code_commit}${mv.code_dirty ? '（有未提交的改动）' : ''}` : '未登记'),
+      el('dt', {}, '发布'), el('dd', {}, chain.releases.length ? chain.releases.map((r) => r.ref).join('、') : '未发布'),
       el('dt', {}, '登记'), el('dd', {}, `${mv.created_by}，${when(mv.created_at)}`),
       el('dt', {}, '备注'), el('dd', {}, mv.note || '-'),
       history.length ? [el('dt', {}, '标签经过'), el('dd', {}, el('ul', { class: 'plain', id: 'tag-history' },
-        history.map((t) => el('li', {}, `${t.added ? '标成' : '去掉'}「${TAG_NAMES[t.tag] || t.tag}」，${t.by}，${when(t.at)}`
+        history.map((t) => el('li', {}, `${t.added ? '标记为' : '取消'}「${TAG_NAMES[t.tag] || t.tag}」，${t.by}，${when(t.at)}`
           + (t.note ? `：${t.note}` : '')))))] : null),
     flattenMetrics(mv.metrics).length ? [el('h2', {}, '训练时的指标（metrics.json）'), metricsTable(mv.metrics, 20)] : null,
     el('h2', {}, '文件'), fileTable(mv.files),
@@ -1154,15 +1218,14 @@ function tagButtons(mv, asking, done) {
     }
   };
   const candidate = el('button', { id: 'tag-candidate', onclick: (ev) => set(ev.currentTarget, 'candidate', !has('candidate')) },
-    has('candidate') ? '去掉「候选」' : '标成候选');
+    has('candidate') ? '取消「候选」' : '标记为候选');
   const deprecated = el('button', { id: 'tag-deprecated', onclick: (ev) => {
     if (has('deprecated')) { set(ev.currentTarget, 'deprecated', false); return; }
-    const why = el('input', { type: 'text', id: 'tag-note', size: 40, placeholder: '为什么弃用（可不写），例如 漏检多' });
-    const go = el('button', { id: 'tag-go', class: 'danger', onclick: () => set(go, 'deprecated', true, why.value.trim()) }, '标成弃用');
-    asking.replaceChildren(el('div', { class: 'panel row asking' }, why, go, el('button', { onclick: () => asking.replaceChildren() }, '取消'),
-      el('span', { class: 'muted small' }, '弃用只是提醒别再用它，文件和记录都还在，以后可以去掉。')));
+    const why = el('input', { type: 'text', id: 'tag-note', size: 40, placeholder: '弃用原因（选填），例如：漏检较多' });
+    const go = el('button', { id: 'tag-go', class: 'danger', onclick: () => set(go, 'deprecated', true, why.value.trim()) }, '确认弃用');
+    asking.replaceChildren(el('div', { class: 'panel row asking' }, why, go, el('button', { onclick: () => asking.replaceChildren() }, '取消')));
     why.focus();
-  } }, has('deprecated') ? '去掉「弃用」' : '标成弃用…');
+  } }, has('deprecated') ? '取消「弃用」' : '标记为弃用…');
   return [candidate, deprecated];
 }
 
@@ -1170,7 +1233,8 @@ function tagButtons(mv, asking, done) {
 async function submitForms(mv) {
   const runners = (await api.runners()).filter((r) => r.framework);
   if (!runners.length) {
-    return [el('h2', {}, '提交任务'), el('p', { class: 'muted' }, '还没有能推理的推理环境：在 GPU 机上用 worker 账号运行 fw runner register --framework rfdetr --onnx2engine <程序> 登记。')];
+    return [el('h2', {}, '提交任务'), el('p', { class: 'muted' }, '暂无可用的推理环境。',
+      info('请在 GPU 机上使用 worker 账号运行 fw runner register --framework rfdetr --onnx2engine <程序> 登记推理环境。', '推理环境说明'))];
   }
   const runnerSelect = () => el('select', {}, runners.map((r) => el('option', { value: r.ref }, `${r.ref}（${r.worker}，${r.conda_env}）`)));
   const form = (title, kind, fields, params, hint) => {
@@ -1188,23 +1252,25 @@ async function submitForms(mv) {
         button.disabled = false;
       }
     };
-    return el('form', { class: 'panel form', onsubmit: go }, el('h2', {}, title), el('p', { class: 'muted' }, hint), msg,
+    return el('form', { class: 'panel form', onsubmit: go }, el('h2', {}, title, info(hint, `${title}说明`)), msg,
       el('label', {}, '推理环境', runner), ...fields, el('button', { class: 'primary', type: 'submit' }, '提交'));
   };
   const dirsOf = (input) => input.value.split(/[,，\n]/).map((d) => d.trim()).filter(Boolean);
-  const evalData = el('input', { type: 'text', placeholder: `例如 ${mv.trainset.ref}:test 或 某数据池@3` });
+  const evalData = el('input', { type: 'text', placeholder: `例如 ${mv.trainset.ref}:test 或 数据池名称@3` });
   evalData.value = `${mv.trainset.ref}:test`;
-  const evalDirs = el('input', { type: 'text', placeholder: '数据池版本里的目录，逗号分开；空 = 全部' });
+  const evalDirs = el('input', { type: 'text', placeholder: '数据池版本中的目录，以逗号分隔；留空表示全部' });
   const predData = el('input', { type: 'text', placeholder: '数据池版本，例如 SES-TX@5' });
-  const predDirs = el('input', { type: 'text', placeholder: '目录，逗号分开；空 = 全部图片' });
+  const predDirs = el('input', { type: 'text', placeholder: '目录，以逗号分隔；留空表示全部图片' });
   const predConf = el('input', { type: 'text', value: '0.1' });
   return [el('h2', {}, '提交任务'), el('div', { class: 'forms' },
     form('评估', 'eval', [el('label', {}, '测试数据', evalData), el('label', {}, '目录', evalDirs)],
       () => ({ model: mv.ref, data: evalData.value.trim(), dirs: dirsOf(evalDirs) }),
-      '在 GPU 机上用 TensorRT 跑这个模型，用 aoi-deteval 算指标，结果登记成评估报告。快照写划分（:test），数据池可选目录。'),
+      ['在 GPU 机上使用 TensorRT 运行该模型，并用 aoi-deteval 计算指标，结果登记为评估报告。',
+        '测试数据为训练集快照时，须写明划分（如 :test）；为数据池版本时，可指定目录。']),
     form('预标注（推理）', 'predict', [el('label', {}, '数据', predData), el('label', {}, '目录', predDirs), el('label', {}, '最低分数 conf', predConf)],
       () => ({ model: mv.ref, data: predData.value.trim(), dirs: dirsOf(predDirs), conf: Number(predConf.value) }),
-      '对数据池版本的图片推理，结果存成预测集；同样的模型、推理环境、图片和 conf 已经跑过就直接用上次的。'))];
+      ['对数据池版本中的图片进行推理，结果保存为预测集。',
+        '若相同的模型版本、推理环境、图片和 conf 已有结果，将直接复用，不再重复运行。']))];
 }
 
 async function evalPage(id) {
@@ -1240,7 +1306,7 @@ async function evalComparePage(query) {
   show(crumbs('models', null, '比较评估'),
     el('h1', {}, '比较评估'),
     a.testset.ref !== b.testset.ref || a.dirs.join() !== b.dirs.join()
-      ? el('div', { class: 'error' }, '两份报告的测试集或目录不一样，数字不能直接比') : null,
+      ? el('div', { class: 'error' }, '两份报告的测试集或目录不同，指标不能直接比较。') : null,
     el('table', { class: 'narrow' }, el('tr', {}, el('th', {}, '指标'), el('th', {}, ...head(a)), el('th', {}, ...head(b)), el('th', {}, '变化')),
       keys.map((k) => el('tr', {}, el('td', { class: 'mono' }, k), el('td', { class: 'num' }, numberText(ma.get(k))),
         el('td', { class: 'num' }, numberText(mb.get(k))), delta(k)))));
@@ -1268,15 +1334,15 @@ async function jobsPage(query) {
   const pick = el('select', { onchange: (ev) => { location.hash = hrefOf(['jobs'], { status: ev.target.value }); } },
     [['', '全部'], ['queued', '排队'], ['running', '运行中'], ['done', '完成'], ['failed', '失败'], ['cancelled', '已取消']]
       .map(([v, t]) => el('option', { value: v, selected: v === status }, t)));
-  show(crumbs('jobs'), el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, '任务'), '状态', pick),
+  show(crumbs('jobs'), el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, '任务',
+    info('有排队或运行中的任务时，本页每 10 秒自动刷新。', '任务列表说明')), '状态', pick),
     rows.length ? el('table', {}, el('tr', {}, ['编号', '类型', '内容', '推理环境', '状态', '提交', '开始', '结束'].map((h) => el('th', {}, h))),
       rows.map((j) => el('tr', {},
         el('td', {}, jobLink(j.id)), el('td', {}, j.kind_text), el('td', {}, jobWhat(j)), el('td', {}, j.runner || '-'),
-        el('td', { class: STATUS_CLASS[j.status] }, j.status_text + (j.queued_ahead ? `（前面 ${j.queued_ahead} 个）` : '')
+        el('td', { class: STATUS_CLASS[j.status] }, j.status_text + (j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '')
           + (j.cancel_requested && j.status === 'running' ? '（正在取消）' : '')),
         el('td', {}, `${j.submitted_by}，${when(j.created_at)}`), el('td', {}, when(j.started_at)), el('td', {}, when(j.finished_at)))))
-      : el('p', { class: 'muted' }, '没有任务。'),
-    el('p', { class: 'muted' }, '每 10 秒自动刷新。'));
+      : el('p', { class: 'muted' }, '暂无任务。'));
   if (rows.some((j) => j.status === 'queued' || j.status === 'running')) refreshLater(() => jobsPage(query), 10000);
 }
 
@@ -1302,13 +1368,13 @@ async function jobPage(id, query) {
   } }, '取消任务');
   const paint = () => {
     status.replaceChildren(el('span', { class: STATUS_CLASS[j.status] }, j.status_text),
-      j.queued_ahead ? `（前面还有 ${j.queued_ahead} 个）` : '', j.cancel_requested && j.status === 'running' ? '（正在取消）' : '',
-      j.attempts ? `，第 ${j.attempts} 次领取（最多 ${j.max_attempts} 次）` : '', j.worker ? `，在 ${j.worker} 上` : '');
+      j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '', j.cancel_requested && j.status === 'running' ? '（正在取消）' : '',
+      j.attempts ? `，第 ${j.attempts} 次领取（最多 ${j.max_attempts} 次）` : '', j.worker ? `，执行机器 ${j.worker}` : '');
     result.replaceChildren(j.status === 'done' ? jobResult(j) : j.error ? el('span', { class: 'bad' }, j.error) : '-');
     cancel.hidden = !can('jobs.write') || !(j.status === 'queued' || j.status === 'running') || j.cancel_requested;
   };
   show(crumbs('jobs', null, `任务 ${j.id}`),
-    query.get('reused') ? el('p', { class: 'panel' }, '同样的模型版本、推理环境、图片和 conf 已经有一个任务，用的就是它，没有再跑。') : null,
+    query.get('reused') ? el('p', { class: 'panel' }, '已有使用相同模型版本、推理环境、图片和 conf 的任务，已直接复用该任务，未重新运行。') : null,
     el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, `任务 ${j.id}：${j.kind_text}`), cancel),
     el('dl', { class: 'kv' },
       el('dt', {}, '内容'), el('dd', {}, jobWhat(j) || '-'),
@@ -1325,7 +1391,7 @@ async function jobPage(id, query) {
       const got = await api.jobLog(j.id, j.attempts, after);
       for (const piece of got.pieces) { log.append(piece.text); after = piece.seq; }
     }
-    if (!log.textContent) log.textContent = j.status === 'queued' ? '排队中，还没有日志。' : '';
+    if (!log.textContent) log.textContent = j.status === 'queued' ? '排队中，暂无日志。' : '';
     if (j.status === 'queued' || j.status === 'running') {
       refreshLater(async () => {
         const before = j.attempts;
@@ -1340,7 +1406,7 @@ async function jobPage(id, query) {
 }
 
 function predictionTable(rows, withModel) {
-  if (!rows.length) return el('p', { class: 'muted' }, '还没有预测集。');
+  if (!rows.length) return el('p', { class: 'muted' }, '暂无预测集。');
   return el('table', {}, el('tr', {}, ['编号', withModel ? '模型版本' : null, '数据', '目录', 'conf', '图片', '框', '推理环境', '任务', '时间']
     .filter((h) => h !== null).map((h) => el('th', {}, h))),
   rows.map((p) => el('tr', {},
@@ -1354,8 +1420,8 @@ function predictionTable(rows, withModel) {
 async function predictionsPage() {
   const show = live();
   const rows = await api.predictionSets();
-  show(crumbs('predictions'), el('h1', {}, '预测集'),
-    el('p', { class: 'muted' }, '模型在数据池图片上的推理结果。下载成预标注：fw predict get <编号> <目录> --threshold 0.3。'),
+  show(crumbs('predictions'), el('h1', {}, '预测集', info(['预测集是模型在数据池图片上的推理结果。',
+    '下载为预标注：fw predict get <编号> <目录> --threshold 0.3。'], '预测集说明')),
     predictionTable(rows.slice().reverse(), true));
 }
 
@@ -1384,10 +1450,10 @@ async function predictionPage(id, query) {
       el('dt', {}, '数据'), el('dd', {}, vref(set.data.ref), set.dirs.length ? `（${set.dirs.join('、')}）` : ''),
       el('dt', {}, '推理环境'), el('dd', {}, set.runner, '，', jobLink(set.job_id)),
       el('dt', {}, '类别'), el('dd', {}, doc.classes.join('、')),
-      el('dt', {}, '存下的框'), el('dd', {}, `${set.boxes} 个（分数 ≥ ${numberText(set.conf)}），${set.images} 张图`),
+      el('dt', {}, '保存的框'), el('dd', {}, `${set.boxes} 个（分数 ≥ ${numberText(set.conf)}），${set.images} 张图片`),
       el('dt', {}, '下载预标注'), el('dd', { class: 'mono' }, `fw predict get ${set.id} <目录> --threshold ${numberText(threshold)}`)),
     el('div', { class: 'row panel' }, '阈值', slider, el('b', {}, numberText(threshold)),
-      el('span', {}, `：${total} 个框，${all.length - empty} 张图有框，${empty} 张没有`)),
+      el('span', {}, `：共 ${total} 个框；${all.length - empty} 张图片有框，${empty} 张无框`)),
     el('div', { class: 'grid', style: 'margin-top:12px' }, shown.map((p) => {
       const img = el('img', { alt: '' });
       const f = byPath.get(p);
@@ -1458,7 +1524,7 @@ async function hashAll(files, onProgress) {
         };
         w.postMessage({ id, file: files[id] });
       };
-      w.onerror = (e) => reject(new Error(e.message || '算哈希出错'));
+      w.onerror = (e) => reject(new Error(e.message || '计算哈希时出错'));
       give();
     })));
   } finally {
@@ -1528,8 +1594,8 @@ export async function readDropped(dir) {
 // is '' and every path starts with its folder's name, as if they had been in one folder chosen.
 function folderInput({ several = false } = {}) {
   const input = el('input', { type: 'file', webkitdirectory: true, multiple: true });
-  const status = el('span', {}, several ? '把目录拖到这里，几个目录可以一起拖' : '把目录拖到这里');
-  const box = el('div', { class: 'drop' }, icon('folder'), status, el('label', { class: 'choose' }, '或者选择目录', input));
+  const status = el('span', {}, several ? '将目录拖放到此处，可同时拖放多个目录' : '将目录拖放到此处');
+  const box = el('div', { class: 'drop' }, icon('folder'), status, el('label', { class: 'choose' }, '或选择目录', input));
   let disabled = false;
   let shown = [status.textContent, status.className];  // what to show again when a choice is cancelled
   let reads = 0;  // each choice or drop starts a new read; an older one that finishes later is dropped
@@ -1544,7 +1610,7 @@ function folderInput({ several = false } = {}) {
     Object.assign(box, { files, paths, folder, folders });
     box.classList.remove('reading');
     const what = folders.length ? `${folders.length} 个目录` : `${folder}/`;
-    say(files.length ? `${what} · ${files.length} 个文件` : `${what} 是空的`, files.length ? 'got' : 'bad');
+    say(files.length ? `${what} · ${files.length} 个文件` : `${what} 为空`, files.length ? 'got' : 'bad');
   };
   Object.assign(box, { files: [], paths: [], folder: '', folders: [] });
   Object.defineProperty(box, 'disabled', {
@@ -1574,11 +1640,11 @@ function folderInput({ several = false } = {}) {
     const items = [...((ev.dataTransfer && ev.dataTransfer.items) || [])].filter((i) => i.kind === 'file');
     const entries = items.map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
     if (!entries.length || entries.some((e) => !e.isDirectory)) {
-      say('拖进来的要是目录，不能是文件', 'bad');
+      say('请拖放目录，不支持拖放文件', 'bad');
       return;
     }
     if (entries.length > 1 && !several) {
-      say('这里一次只能拖一个目录', 'bad');
+      say('此处每次只能拖放一个目录', 'bad');
       return;
     }
     const mine = reading();
@@ -1586,7 +1652,7 @@ function folderInput({ several = false } = {}) {
       if (mine !== reads) return;
       const names = read.map((r) => r.folder);
       if (read.length > 1 && new Set(names.map((n) => n.toLowerCase())).size < names.length) {
-        throw new Error('拖进来的几个目录里有同名的');
+        throw new Error('拖放的目录中有同名目录');
       }
       if (read.length === 1) pick(read[0].files, read[0].paths, read[0].folder);
       else pick(read.flatMap((r) => r.files), read.flatMap((r) => r.paths.map((x) => `${r.folder}/${x}`)), '', names);
@@ -1594,7 +1660,7 @@ function folderInput({ several = false } = {}) {
     }).catch((e) => {
       if (mine !== reads) return;
       box.classList.remove('reading');
-      say(`读不了这个目录：${e.message}`, 'bad');
+      say(`无法读取该目录：${e.message}`, 'bad');
     });
   });
   return box;
@@ -1608,12 +1674,12 @@ if (typeof window !== 'undefined') {
 async function uploadPage(name) {
   const show = live();
   const d = await api.dataset(name);
-  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
+  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传。训练集快照请使用 fw trainset create 创建。`);
   const latest = d.latest;
   const picker = folderInput({ several: true });
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
-  const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
+  const note = el('input', { type: 'text', placeholder: '数据说明（来源、日期、批次），记入版本备注' });
   const result = el('div');
   let files = [];
   let paths = [];
@@ -1621,7 +1687,7 @@ async function uploadPage(name) {
   const listOf = (title, part, cls = '') => (part && part.count ? el('details', { class: cls },
     el('summary', {}, `${title}：${part.count}`),
     el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, Array.isArray(x) ? x.join('  ') : x))),
-    part.count > part.examples.length ? el('p', { class: 'muted' }, `只列出前 ${part.examples.length} 个`) : null) : null);
+    part.count > part.examples.length ? el('p', { class: 'muted' }, `仅列出前 ${part.examples.length} 项`) : null) : null);
 
   // Each pick or check box starts a new round; an answer, hashing or plan of an older round is dropped, and the
   // controls stay locked while hashing and uploading, so what is uploaded is always what was checked.
@@ -1633,7 +1699,7 @@ async function uploadPage(name) {
     const mine = ++round;
     const picked = files;
     const pickedPaths = paths;
-    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    result.replaceChildren(el('p', { class: 'muted' }, `正在检查 ${picked.length} 个文件…`));
     const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
     if (mine !== round) return;
     const junk = new Set(r.junk);
@@ -1641,21 +1707,21 @@ async function uploadPage(name) {
     const folder = picker.folders.length ? picker.folders.join('、') : picker.folder;
     const { dirs } = topDirs(pickedPaths);
     const report = [
-      el('p', { id: 'version-shape' }, picker.folders.length ? `这 ${picker.folders.length} 个目录（${namesText(picker.folders)}）成为新版本的全部内容，各用自己的目录名。`
-        : dirs.length ? `${picker.folder}/ 里面的东西成为新版本：${namesText(dirs)}目录原样保留，${picker.folder} 这一层不进版本。`
-          : `${picker.folder}/ 里面的文件成为新版本，${picker.folder} 这一层不进版本。`),
+      el('p', { id: 'version-shape' }, picker.folders.length ? `新版本的内容为这 ${picker.folders.length} 个目录（${namesText(picker.folders)}），各目录保留原名。`
+        : dirs.length ? `新版本的内容为 ${picker.folder}/ 下的全部文件：${namesText(dirs)}目录保留原名，不包含 ${picker.folder} 这一层。`
+          : `新版本的内容为 ${picker.folder}/ 下的全部文件，不包含 ${picker.folder} 这一层。`),
       el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
         + (r.junk.length ? `；系统文件 ${r.junk.length} 个不入库` : '')),
-      listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
+      listOf('文件名不可用', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
       listOf('同名不同扩展名的图片', r.same_stem_images, 'warn'), listOf('图片和标注以外的文件', r.others, 'warn'),
-      listOf('没有标注的图片（当正常图）', r.unlabeled_images), listOf('找不到图片的标注', r.orphan_labels),
-      listOf('不同目录里的同名图片（训练时把目录摊平会互相覆盖）', r.same_name_in_dirs), listOf('说明文件（一起入库）', r.meta)];
+      listOf('无标注的图片（按正常图处理）', r.unlabeled_images), listOf('无对应图片的标注', r.orphan_labels),
+      listOf('不同目录中的同名图片（训练时平铺目录会互相覆盖）', r.same_name_in_dirs), listOf('说明文件（一并入库）', r.meta)];
     if (r.reasons.length) {
       result.replaceChildren(...present([report, el('div', { class: 'error' }, '不能入库：\n' + r.reasons.join('\n'))]));
       return;
     }
     const go = el('button', { class: 'primary', onclick: () => hashAndCompare(mine, keep, folder, report)
-      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '算哈希，和最新版本比较');
+      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '计算哈希并与最新版本比较');
     result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
   };
 
@@ -1667,7 +1733,7 @@ async function uploadPage(name) {
     lock(true);
     let digests;
     try {
-      digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
+      digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `计算哈希 ${sizeText(a)} / ${sizeText(b)}`));
     } finally { uploading = false; lock(false); }
     if (mine !== round) return;
     const entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
@@ -1677,16 +1743,16 @@ async function uploadPage(name) {
     const old = latest ? await filesOf(latest) : [];
     const total = entries.reduce((a, e) => a + e.size, 0);
     if (latest && latest.manifest_sha256 === manifestDigest) {
-      result.replaceChildren(...present([report, el('p', { class: 'panel' }, `和 ${latest.ref} 完全一样，不用建新版本`)]));
+      result.replaceChildren(...present([report, el('p', { class: 'panel' }, `与 ${latest.ref} 完全相同，无需建立新版本。`)]));
       return;
     }
     const change = diffManifests(old, entries);
     const number = (latest ? latest.number : 0) + 1;
     if (mine !== round) return;
-    const start = el('button', { class: 'primary', onclick: () => send(mine, entries, manifest, manifestDigest, number, folder, report) }, `上传并建 ${d.name}@${number}`);
+    const start = el('button', { class: 'primary', onclick: () => send(mine, entries, manifest, manifestDigest, number, folder, report) }, `上传并建立 ${d.name}@${number}`);
     result.replaceChildren(...present([report,
-      el('p', {}, latest ? `相比 ${latest.ref}：新增 ${change.added.length}，删除 ${change.deleted.length}，修改 ${change.modified.length}` : `这是 ${d.name} 的第一个版本`),
-      change.deleted.length ? el('div', { class: 'error' }, `会删掉 ${latest.ref} 里的 ${change.deleted.length} 个文件（新版本只含这个目录里的文件），例如：\n`
+      el('p', {}, latest ? `与 ${latest.ref} 相比：新增 ${change.added.length}，删除 ${change.deleted.length}，修改 ${change.modified.length}` : `这是 ${d.name} 的第一个版本`),
+      change.deleted.length ? el('div', { class: 'error' }, `将删除 ${latest.ref} 中的 ${change.deleted.length} 个文件（新版本仅包含所选目录中的文件），例如：\n`
         + change.deleted.slice(0, 5).join('\n')) : null,
       el('p', {}, `新版本 ${d.name}@${number}：${entries.length} 个文件，${sizeText(total)}`),
       el('div', { class: 'row' }, start)]));
@@ -1710,7 +1776,7 @@ async function uploadPage(name) {
       const todo = all.filter((e) => missing.has(e.sha256));
       const bytes = todo.reduce((a, e) => a + e.size, 0);
       let sent = 0;
-      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${all.length - todo.length} 个服务器上已经有了）`);
+      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${all.length - todo.length} 个服务器上已存在）`);
       await inParallel(todo, 4, async (e) => {
         await api.putObject(e.sha256, e.file);
         sent += e.size;
@@ -1733,16 +1799,17 @@ async function uploadPage(name) {
   });
   for (const box of [allowOther, force]) box.addEventListener('change', () => check().catch((e) => result.replaceChildren(errorBox(e))));
   show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '上传'),
-    el('h1', {}, `上传到 ${d.name}`),
-    el('p', { class: 'muted' }, ['只想加一个新目录、不动池里原有的文件？用 ', el('a', { href: hrefOf(['add', d.name]) }, '上传新增目录'), '。']),
-    el('p', { class: 'muted' }, `选一个上层目录（比如 pool）：它里面的全部文件和子目录成为新版本，子目录名原样保留，上层目录这一层不进版本；也可以把几个子目录一起拖进来。（${latest ? `父版本 ${latest.ref}；这里没有的文件在新版本里就是删除` : '这是第一个版本'}）`
-      + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
-      + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
+    el('h1', {}, `上传到 ${d.name}`, info([
+      `以所选目录的全部内容建立新版本${latest ? `（父版本 ${latest.ref}）` : '（第一个版本）'}。选择上层目录（如 pool）时，其下的子目录保留原名，上层目录本身不计入版本；也可同时拖放多个子目录。`
+        + (latest ? '所选内容中不存在的文件，将从新版本中删除。' : ''),
+      '检查规则与 fw dataset import 相同；按哈希去重，服务器上已有的文件不再上传；版本建立后即冻结。',
+      '仅需追加目录、保留数据池中原有文件时，请使用「上传新增目录」。数据量较大（数万张）时，建议在服务器上使用 fw dataset import。',
+      '浏览器无法发现无权读取的子目录和链接（命令行会拦截），上传前请核对「将删除」的文件。'], '上传完整版本说明')),
     el('div', { class: 'panel form' },
       el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       el('label', {}, '备注', note),
-      el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
-      el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
+      checkRow(allowOther, '允许图片和标注以外的文件入库', '对应命令行选项 --allow-other-files。'),
+      checkRow(force, '允许同名不同扩展名的图片入库', '对应命令行选项 --force。同一目录中 a.png 与 a.jpg 这类图片会对应同一个标注文件，请确认后再勾选。')),
     result);
 }
 
@@ -1751,42 +1818,42 @@ function changeReport(p) {
   const list = (title, part, cls = '', fmt = (x) => (Array.isArray(x) ? x.join('  ') : x)) => (part && part.count ? el('details', { class: cls },
     el('summary', {}, `${title}：${part.count}`),
     el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, fmt(x)))),
-    part.count > part.examples.length ? el('p', { class: 'muted' }, `只列出前 ${part.examples.length} 个`) : null) : null);
-  const boxes = (n) => (n === null || n === undefined ? '没有标注' : `${n} 个目标`);
+    part.count > part.examples.length ? el('p', { class: 'muted' }, `仅列出前 ${part.examples.length} 项`) : null) : null);
+  const boxes = (n) => (n === null || n === undefined ? '无标注' : `${n} 个目标`);
   const dup = p.duplicates;
   return [
     el('ul', {}, p.ops.map((o) => el('li', {}, o.op === 'add' ? `新增 ${o.dir}/：${o.file_count} 个文件，${sizeText(o.total_bytes)}`
-      : o.op === 'replace' ? `替换 ${o.dir}/：原有 ${o.removed_count} 个文件换成这 ${o.file_count} 个，${sizeText(o.total_bytes)}`
+      : o.op === 'replace' ? `替换 ${o.dir}/：原有 ${o.removed_count} 个文件替换为 ${o.file_count} 个，${sizeText(o.total_bytes)}`
         : `去掉 ${o.dir}/：${o.removed_count} 个文件`))),
-    list('文件名用不了', p.checks.bad_paths, 'bad'), list('路径冲突', p.checks.collisions, 'bad'),
+    list('文件名不可用', p.checks.bad_paths, 'bad'), list('路径冲突', p.checks.collisions, 'bad'),
     list('同名不同扩展名的图片', p.checks.same_stem_images, 'warn'), list('图片和标注以外的文件', p.checks.others, 'warn'),
-    list('没有标注的图片（当正常图）', p.checks.unlabeled_images), list('找不到图片的标注', p.checks.orphan_labels),
-    list('说明文件（一起入库）', p.checks.meta),
-    list('提醒：和池里已有图片内容完全相同（只存一份，但各算一个样本）', dup.in_pool, 'warn', (x) => `${x.new} = ${x.existing}`),
-    list('提醒：新增的目录里内容完全相同的图片（组）', dup.in_new, 'warn'),
-    list('提醒：图片相同、标注不一样（训练时会互相矛盾）', dup.labels_differ, 'warn',
+    list('无标注的图片（按正常图处理）', p.checks.unlabeled_images), list('无对应图片的标注', p.checks.orphan_labels),
+    list('说明文件（一并入库）', p.checks.meta),
+    list('提醒：与数据池中已有图片内容相同（仅存储一份，但各计为一个样本）', dup.in_pool, 'warn', (x) => `${x.new} = ${x.existing}`),
+    list('提醒：新增目录中内容相同的图片（组）', dup.in_new, 'warn'),
+    list('提醒：图片相同但标注不同（训练时会相互矛盾）', dup.labels_differ, 'warn',
       (x) => `${x.new}（${boxes(x.new_boxes)}） 和 ${x.existing}（${boxes(x.existing_boxes)}）`),
-    dup.uncompared ? el('p', { class: 'muted' }, `还有 ${dup.uncompared} 对相同的图片太多，没有比较标注`) : null,
-    p.changes.deleted.count ? el('div', { class: 'error' }, `新版本里会少掉 ${p.parent} 的 ${p.changes.deleted.count} 个文件（${p.parent} 本身不变），例如：\n`
+    dup.uncompared ? el('p', { class: 'muted' }, `另有 ${dup.uncompared} 对相同图片因数量过多，未比较标注。`) : null,
+    p.changes.deleted.count ? el('div', { class: 'error' }, `新版本将不包含 ${p.parent} 中的 ${p.changes.deleted.count} 个文件（${p.parent} 本身不变），例如：\n`
       + p.changes.deleted.examples.slice(0, 5).join('\n')) : null,
-    p.reasons.length ? el('div', { class: 'error' }, '不能建版本：\n' + p.reasons.join('\n')) : null,
+    p.reasons.length ? el('div', { class: 'error' }, '无法建立版本：\n' + p.reasons.join('\n')) : null,
     el('p', {}, `新版本 ${p.ref}：${p.file_count} 个文件，${sizeText(p.total_bytes)}`
-      + (p.parent ? `（在 ${p.parent} 的基础上）` : '（第一个版本）'))];
+      + (p.parent ? `（基于 ${p.parent}）` : '（第一个版本）'))];
 }
 
 // Add one folder to the pool: only that folder is read and uploaded, the server builds the version.
 async function addPage(name) {
   const show = live();
   const d = await api.dataset(name);
-  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
+  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传。训练集快照请使用 fw trainset create 创建。`);
   const picker = folderInput({ several: true });
-  const target = el('input', { type: 'text', placeholder: '选了目录以后自动填目录名，可以改，例如 20261104 或 night/20261104' });
+  const target = el('input', { type: 'text', placeholder: '选择目录后自动填写，可修改，例如 20261104 或 night/20261104' });
   const inside = el('input', { type: 'checkbox', id: 'add-inside' });
-  const insideText = el('span', {}, '只加它里面的子目录：这一层不进池，每个子目录用自己的名字');
+  const insideText = el('span', {}, '仅添加所选目录下的子目录');
   const replace = el('input', { type: 'checkbox' });
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
-  const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
+  const note = el('input', { type: 'text', placeholder: '数据说明（来源、日期、批次），记入版本备注' });
   const result = el('div');
   let files = [];
   let paths = [];
@@ -1798,8 +1865,7 @@ async function addPage(name) {
   const split = () => picker.folders.length > 0 || inside.checked;
   const shape = () => {
     inside.disabled = !!picker.folders.length;
-    insideText.textContent = picker.folder ? `只加 ${picker.folder}/ 里面的子目录：${picker.folder} 这一层不进池，每个子目录用自己的名字`
-      : '只加它里面的子目录：这一层不进池，每个子目录用自己的名字';
+    insideText.textContent = picker.folder ? `仅添加 ${picker.folder}/ 下的子目录` : '仅添加所选目录下的子目录';
     target.disabled = split();
     if (split()) target.value = '';
     else if (!target.value && picker.folder) target.value = picker.folder;
@@ -1813,7 +1879,7 @@ async function addPage(name) {
     const mine = ++round;
     const picked = files;
     const pickedPaths = paths;
-    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    result.replaceChildren(el('p', { class: 'muted' }, `正在检查 ${picked.length} 个文件…`));
     const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
     if (mine !== round) return;
     const junk = new Set(r.junk);
@@ -1821,29 +1887,29 @@ async function addPage(name) {
     const report = [
       el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
         + (r.junk.length ? `；系统文件 ${r.junk.length} 个不入库` : '')),
-      listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
+      listOf('文件名不可用', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
       listOf('同名不同扩展名的图片', r.same_stem_images, 'warn'), listOf('图片和标注以外的文件', r.others, 'warn')];
     if (r.reasons.length) {
       result.replaceChildren(...present([report, el('div', { class: 'error' }, '不能入库：\n' + r.reasons.join('\n'))]));
       return;
     }
     if (!keep.length) {
-      result.replaceChildren(...present([report, el('div', { class: 'error' }, '目录里没有文件')]));
+      result.replaceChildren(...present([report, el('div', { class: 'error' }, '目录中没有文件。')]));
       return;
     }
     if (split()) {
       const { dirs, loose } = topDirs(keep.map(([, p]) => p));
-      const problem = loose.length ? `${picker.folder}/ 的最上层有 ${loose.length} 个文件不在子目录里（例如 ${loose.slice(0, 3).join('、')}），它们没有目录可放。`
-        + '把它们挪进一个子目录，或者不勾「只加里面的子目录」，整个目录作为一个目录加进去。'
-        : dirs.length > 100 ? `一次最多加 100 个目录，这里有 ${dirs.length} 个；分几次加，或者用 fw dataset add。` : null;
-      report.unshift(el('p', { id: 'add-dirs' }, `加进池的目录（${dirs.length} 个）：${namesText(dirs, 8)}`));
+      const problem = loose.length ? `${picker.folder}/ 的顶层有 ${loose.length} 个文件不在任何子目录中（例如 ${loose.slice(0, 3).join('、')}），无法确定其所属目录。`
+        + '请将这些文件移入子目录，或取消勾选「仅添加子目录」，将整个目录作为一个目录添加。'
+        : dirs.length > 100 ? `每次最多添加 100 个目录，当前为 ${dirs.length} 个。请分批添加，或使用 fw dataset add。` : null;
+      report.unshift(el('p', { id: 'add-dirs' }, `将加入数据池的目录（${dirs.length} 个）：${namesText(dirs, 8)}`));
       if (problem) {
         result.replaceChildren(...present([report, el('div', { class: 'error' }, problem)]));
         return;
       }
     }
     const go = el('button', { class: 'primary', onclick: () => hashAndPreview(mine, keep, report)
-      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '算哈希，预览新版本');
+      .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '计算哈希并预览新版本');
     result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
   };
 
@@ -1851,7 +1917,7 @@ async function addPage(name) {
     if (mine !== round) return;
     const dir = target.value.trim();
     const several = split();
-    if (!several && !dir) throw new Error('要写放在池里的哪个目录');
+    if (!several && !dir) throw new Error('请填写池中目录。');
     const progress = bar();
     result.replaceChildren(...present([report, progress]));
     uploading = true;
@@ -1860,7 +1926,7 @@ async function addPage(name) {
     let body;
     let plan;
     try {
-      const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
+      const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `计算哈希 ${sizeText(a)} / ${sizeText(b)}`));
       entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
       // each folder's file list, its paths inside that folder: the server needs them for the preview
       const groups = several ? topDirs(entries.map((e) => e.path)).dirs.map((top) => [top,
@@ -1890,7 +1956,7 @@ async function addPage(name) {
       }
     } finally { uploading = false; lock(false); }
     if (mine !== round) return;
-    const start = plan.reasons.length ? null : el('button', { class: 'primary', onclick: () => send(mine, entries, body, plan, report) }, `上传并建 ${plan.ref}`);
+    const start = plan.reasons.length ? null : el('button', { class: 'primary', onclick: () => send(mine, entries, body, plan, report) }, `上传并建立 ${plan.ref}`);
     result.replaceChildren(...present([report, changeReport(plan), start ? el('div', { class: 'row' }, start) : null]));
   };
 
@@ -1912,7 +1978,7 @@ async function addPage(name) {
       const todo = all.filter((e) => missing.has(e.sha256));
       const bytes = todo.reduce((a, e) => a + e.size, 0);
       let sent = 0;
-      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${all.length - todo.length} 个服务器上已经有了）`);
+      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${all.length - todo.length} 个服务器上已存在）`);
       await inParallel(todo, 4, async (e) => {
         await api.putObject(e.sha256, e.file);
         sent += e.size;
@@ -1944,18 +2010,19 @@ async function addPage(name) {
     typing = setTimeout(again, 400);
   });
   show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '上传新增目录'),
-    el('h1', {}, `往 ${d.name} 里加目录`),
-    el('p', { class: 'muted' }, `选一个目录，比如今天采集的那一天：只上传这个目录，新版本 = ${d.latest ? d.latest.ref : '空'} + 这个目录，池里原有的文件不动。`
-      + '几个目录可以一起拖进来，各用自己的名字；也可以选它们的上层目录（比如 pool），勾「只加里面的子目录」。'
-      + '池里已经有同名目录时会拦下，除非勾选「替换已有目录」。和池里重复的图片、标注不一致的重复图片只提醒，不拦。和 fw dataset add 是同一件事。'),
+    el('h1', {}, `向 ${d.name} 添加目录`, info([
+      `仅上传所选目录，并作为新目录加入数据池：新版本 = ${d.latest ? d.latest.ref : '空'} + 所选目录，数据池中原有文件保持不变。`,
+      '可同时拖放多个目录，各目录以原名加入；也可选择它们的上层目录（如 pool），并勾选「仅添加子目录」。',
+      '数据池中已有同名目录时将被拦截，除非勾选「替换已有目录」。与数据池中已有图片重复、或重复图片的标注不一致时，仅作提醒，不拦截。',
+      '功能与 fw dataset add 相同。'], '上传新增目录说明')),
     el('div', { class: 'panel form' },
       el('div', { class: 'label' }, el('span', {}, '目录'), picker),
-      el('label', { class: 'check' }, inside, insideText),
-      el('label', {}, '放在池里的目录', target),
+      checkRow(inside, insideText, '勾选后，所选目录本身不加入数据池，其下每个子目录以原名分别加入。例如选择 pool/ 时，加入的是 20261103/、20261104/ 等目录。'),
+      field('池中目录', target, '所选目录在数据池中的目录名，默认与所选目录同名，可修改，例如 night/20261104。同时添加多个目录时无需填写。'),
       el('label', {}, '备注', note),
-      el('label', { class: 'check' }, replace, '替换已有目录：池里已有同名目录时，整个换成这一份（--replace）'),
-      el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
-      el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
+      checkRow(replace, '替换已有目录', '数据池中已有同名目录时，以本次上传的内容整体替换。对应命令行选项 --replace。'),
+      checkRow(allowOther, '允许图片和标注以外的文件入库', '对应命令行选项 --allow-other-files。'),
+      checkRow(force, '允许同名不同扩展名的图片入库', '对应命令行选项 --force。同一目录中 a.png 与 a.jpg 这类图片会对应同一个标注文件，请确认后再勾选。')),
     result);
 }
 
@@ -1963,8 +2030,8 @@ async function addPage(name) {
 async function removePage(name) {
   const show = live();
   const d = await api.dataset(name);
-  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能改；快照用 fw trainset create 建`);
-  if (!d.latest) throw new Error(`${d.name} 还没有版本`);
+  if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能修改。训练集快照请使用 fw trainset create 创建。`);
+  if (!d.latest) throw new Error(`${d.name} 尚无版本。`);
   const latest = d.latest;
   const counts = new Map();
   for (const f of await filesOf(latest)) {
@@ -1973,8 +2040,8 @@ async function removePage(name) {
   }
   const boxes = [...counts.entries()].sort((x, y) => x[0].localeCompare(y[0]))
     .map(([dir, n]) => [dir, n, el('input', { type: 'checkbox', value: dir })]);
-  const deeper = el('input', { type: 'text', placeholder: '更里面的目录，例如 night/20261104；多个用逗号隔开（可不填）' });
-  const note = el('input', { type: 'text', placeholder: '为什么去掉，写进版本备注' });
+  const deeper = el('input', { type: 'text', placeholder: '更深层的目录，例如 night/20261104；多个以逗号分隔（选填）' });
+  const note = el('input', { type: 'text', placeholder: '去掉的原因，记入版本备注' });
   const result = el('div');
   let round = 0;
   const body = () => ({ add: [], remove: [...boxes.filter(([, , b]) => b.checked).map(([dir]) => dir),
@@ -1982,7 +2049,7 @@ async function removePage(name) {
   const preview = async () => {
     const mine = ++round;
     const asked = body();
-    if (!asked.remove.length) { result.replaceChildren(el('div', { class: 'error' }, '先选要去掉的目录')); return; }
+    if (!asked.remove.length) { result.replaceChildren(el('div', { class: 'error' }, '请先选择要去掉的目录。')); return; }
     const plan = await api.previewChange(d.name, asked);
     if (mine !== round) return;
     const go = plan.reasons.length ? null : el('button', { class: 'primary', onclick: async () => {
@@ -1992,16 +2059,16 @@ async function removePage(name) {
           source: '网页去掉目录', note: note.value.trim() });
         if (location.hash === here) location.hash = hrefOf(['v', d.name, String(made.version.number)]);
       } catch (e) { result.replaceChildren(errorBox(e)); }
-    } }, `建 ${plan.ref}`);
+    } }, `建立 ${plan.ref}`);
     result.replaceChildren(...present([changeReport(plan), go ? el('div', { class: 'row' }, go) : null]));
   };
   const run = () => preview().catch((e) => result.replaceChildren(errorBox(e)));
   show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '去掉目录'),
-    el('h1', {}, `从 ${d.name} 里去掉目录`),
-    el('p', { class: 'muted' }, `新版本 = ${latest.ref} 去掉选中的目录。${latest.ref} 和更早的版本不变，用它们建的训练集快照也不变，随时可以取回。和 fw dataset remove 是同一件事。`),
+    el('h1', {}, `从 ${d.name} 去掉目录`, info([`新版本 = ${latest.ref} 去掉所选目录。`,
+      `${latest.ref} 及更早的版本保持不变，基于它们建立的训练集快照也不受影响，可随时取回。`, '功能与 fw dataset remove 相同。'], '去掉目录说明')),
     el('div', { class: 'panel form' },
       boxes.length ? boxes.map(([dir, n, box]) => el('label', { class: 'check' }, box, `${dir}/（${n} 个文件）`))
-        : el('p', { class: 'muted' }, `${latest.ref} 的文件都在最上层，没有目录可以去掉`),
+        : el('p', { class: 'muted' }, `${latest.ref} 的文件均位于顶层，没有可去掉的目录。`),
       el('label', {}, '其他目录', deeper),
       el('label', {}, '备注', note),
       el('div', { class: 'row' }, el('button', { class: 'primary', onclick: run }, '预览'))),
@@ -2014,11 +2081,11 @@ const BATCH_CLASS = { open: '', review: 'warn', rejected: 'bad', approved: 'ok',
 const bref = (name) => el('a', { class: 'ref', href: hrefOf(['b', name]) }, name);
 
 export function boxChangeText(row) {
-  if (row.unreadable) return '标注读不出框，没有逐框比较';
+  if (row.unreadable) return '无法从标注中读取框，未逐框比较';
   const parts = [['added', '加框'], ['removed', '删框'], ['moved', '挪动'], ['relabeled', '改类别']]
     .filter(([k]) => row[k]).map(([k, t]) => `${t} ${row[k]}`);
   const text = parts.length ? `${parts.join('、')}（${row.old_boxes} → ${row.new_boxes} 个框）` : '';
-  return row.image_changed ? `图片本身换了${text ? `；${text}` : ''}` : text;
+  return row.image_changed ? `图片本身已更换${text ? `；${text}` : ''}` : text;
 }
 
 async function batchesPage(query) {
@@ -2036,15 +2103,15 @@ async function batchesPage(query) {
     el('td', {}, el('span', { class: `tag ${BATCH_CLASS[b.status]}` }, b.status_text)),
     el('td', {}, `${b.pool} / ${b.dir}/`), el('td', {}, `${b.file_count} 个文件，${sizeText(b.total_bytes)}`),
     el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), el('td', {}, when(b.updated_at))));
-  const empty = at.site || at.q ? '这里没有符合的批次。'
-    : { todo: '没有待你复核的批次。', mine: '你还没有上传过批次。', all: '还没有批次。' }[view];
-  show(crumbs('batches', at), el('h1', {}, '标注批次'),
-    el('p', { class: 'muted' }, '一个批次是一个要进数据池的目录：上传（每次上传都冻结成一版，不进数据池）、提交给复核人、退回或通过，通过以后由算法工程师入库。'),
-    browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '搜批次名称',
+  const empty = at.site || at.q ? '没有符合条件的批次。'
+    : { todo: '暂无待复核的批次。', mine: '本账号尚未上传批次。', all: '暂无批次。' }[view];
+  show(crumbs('batches', at), el('h1', {}, '标注批次', info([
+    '一个批次对应一个待加入数据池的目录。流程为：上传（每次上传冻结为一版，不进入数据池）、提交复核、退回或通过；通过后由算法工程师入库。',
+    '左侧现场 / 产线后的数字为在办批次数，即尚未入库且未关闭的批次。'], '标注批次说明')),
+    browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '按批次名称搜索',
       el('div', { class: 'row tabs' }, tabs, can('batches.write') ? el('a', { class: 'button primary', href: '#/batch-new' }, '上传新批次') : null),
       rows.length ? el('table', {}, el('tr', {}, ['批次', '版次', '状态', '入库到', '大小', '上传账号', '标注人', '复核人', '最近变化']
-        .map((h) => el('th', {}, h))), rows) : el('p', { class: 'muted' }, empty),
-      el('p', { class: 'muted small' }, '左边的数字是还在办的批次（没入库、没关闭的）。')));
+        .map((h) => el('th', {}, h))), rows) : el('p', { class: 'muted' }, empty)));
 }
 
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
@@ -2066,7 +2133,7 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
     const mine = ++round;
     const picked = files;
     const pickedPaths = paths;
-    result.replaceChildren(el('p', { class: 'muted' }, `检查 ${picked.length} 个文件…`));
+    result.replaceChildren(el('p', { class: 'muted' }, `正在检查 ${picked.length} 个文件…`));
     const r = await api.folderCheck(pickedPaths, allowOther.checked, force.checked);
     if (mine !== round) return;
     const junk = new Set(r.junk);
@@ -2074,10 +2141,10 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
     const report = [
       el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
         + (r.junk.length ? `；系统文件 ${r.junk.length} 个不上传` : '')
-        + (r.unlabeled_images.count ? `；没有标注的图片 ${r.unlabeled_images.count} 张` : '')),
-      listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
+        + (r.unlabeled_images.count ? `；无标注的图片 ${r.unlabeled_images.count} 张` : '')),
+      listOf('文件名不可用', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
       listOf('同名不同扩展名的图片', r.same_stem_images, 'warn'), listOf('图片和标注以外的文件', r.others, 'warn')];
-    const problem = r.reasons.length ? `不能上传：\n${r.reasons.join('\n')}` : !r.images.count ? '目录里没有图片' : null;
+    const problem = r.reasons.length ? `不能上传：\n${r.reasons.join('\n')}` : !r.images.count ? '目录中没有图片。' : null;
     if (problem) {
       result.replaceChildren(...present([report, el('div', { class: 'error' }, problem)]));
       return;
@@ -2095,7 +2162,7 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
     uploading = true;
     lock(true);
     try {
-      const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
+      const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `计算哈希 ${sizeText(a)} / ${sizeText(b)}`));
       const entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
       const unique = new Map();
       for (const e of entries) if (!unique.has(e.sha256)) unique.set(e.sha256, e);
@@ -2107,7 +2174,7 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
       const todo = every.filter((e) => missing.has(e.sha256));
       const bytes = todo.reduce((a, e) => a + e.size, 0);
       let sent = 0;
-      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${every.length - todo.length} 个服务器上已经有了）`);
+      progress.set(0, bytes, `上传 ${todo.length} 个文件（其余 ${every.length - todo.length} 个服务器上已存在）`);
       await inParallel(todo, 4, async (e) => {
         await api.putObject(e.sha256, e.file);
         sent += e.size;
@@ -2140,26 +2207,26 @@ async function batchUploadPage(name, query) {
   const approve = query.get('approve') === '1';
   const b = name ? await api.batch(name) : null;
   if (b && !b.actions.includes(approve ? 'approve' : 'revise')) {
-    throw new Error(`${b.name} 现在是「${b.status_text}」，或者不是你的批次，不能${approve ? '通过' : '上传新的一版'}`);
+    throw new Error(`${b.name} 当前状态为「${b.status_text}」，或不属于本账号，无法${approve ? '通过' : '上传新版次'}。`);
   }
   const pools = b ? [] : (await api.datasets()).filter((d) => d.kind !== 'trainset');
   const names = approve ? [] : await api.reviewers();
   const pool = el('select', { id: 'pool' }, pools.map((d) => el('option', { value: d.name }, d.name)));
   if (query.get('pool')) pool.value = query.get('pool');
   const batchName = el('input', { type: 'text', id: 'batch-name', placeholder: '字母、数字和 . _ -，例如 SES-TX-20261104' });
-  const dir = el('input', { type: 'text', id: 'batch-dir', placeholder: '入库后在池里的目录名，选了目录以后自动填' });
-  const labeler = el('input', { type: 'text', id: 'labeler', placeholder: approve ? '修改的人的姓名（必填）' : '标注人姓名（必填）' });
-  const reviewer = reviewerSelect(names, b && b.reviewer ? '先不提交复核' : '先不提交复核（比如还没标完）');
+  const dir = el('input', { type: 'text', id: 'batch-dir', placeholder: '入库后在数据池中的目录名，选择目录后自动填写' });
+  const labeler = el('input', { type: 'text', id: 'labeler', placeholder: approve ? '修改人姓名（必填）' : '标注人姓名（必填）' });
+  const reviewer = reviewerSelect(names, b && b.reviewer ? '暂不提交复核' : '暂不提交复核（例如尚未标注完成）');
   if (b && b.reviewer && names.includes(b.reviewer)) reviewer.value = b.reviewer;
-  const note = el('input', { type: 'text', placeholder: b ? '这一版改了什么' : '这批数据是什么（来源、日期）' });
-  const comment = el('input', { type: 'text', placeholder: '复核意见（可以不写）' });
+  const note = el('input', { type: 'text', placeholder: b ? '本版的修改内容' : '数据说明（来源、日期）' });
+  const comment = el('input', { type: 'text', placeholder: '复核意见（选填）' });
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
   const here = location.hash;
   const ready = () => {
-    if (!labeler.value.trim()) throw new Error(approve ? '要写修改的人的姓名' : '要写标注人姓名');
-    if (!b && !batchName.value.trim()) throw new Error('要写批次名称');
-    if (!b && !dir.value.trim()) throw new Error('要写池里的目录名');
+    if (!labeler.value.trim()) throw new Error(approve ? '请填写修改人姓名。' : '请填写标注人姓名。');
+    if (!b && !batchName.value.trim()) throw new Error('请填写批次名称。');
+    if (!b && !dir.value.trim()) throw new Error('请填写池中目录。');
   };
   const done = async (digest) => {
     const common = { manifest_sha256: digest, labeler: labeler.value.trim(), allow_other_files: allowOther.checked, force: force.checked };
@@ -2177,29 +2244,29 @@ async function batchUploadPage(name, query) {
     if (location.hash === here) location.hash = hrefOf(['b', made.name]);
   };
   const { picker, result } = folderSender({ controls: [pool, batchName, dir, labeler, reviewer, note, comment], allowOther, force,
-    label: approve ? '上传并通过' : b ? '上传新的一版' : '上传批次',
+    label: approve ? '上传并通过' : b ? '上传新版次' : '上传批次',
     onPick: b ? null : (folder) => {
       dir.value = folder;
       if (!batchName.value.trim()) batchName.value = `${pool.value}-${folder}`.replace(/[^A-Za-z0-9._-]/g, '');
     },
     ready, done });
-  const title = approve ? `通过 ${b.name}，并带上我修改后的内容` : b ? `给 ${b.name} 上传新的一版` : '上传新批次';
-  show(crumbs('batches', b, b ? [b.name, hrefOf(['b', b.name])] : null, approve ? '修改后通过' : b ? '新的一版' : '上传'),
-    el('h1', {}, title),
-    el('p', { class: 'muted' }, approve
-      ? `选你修改后的整个目录（${b.dir}/）：它成为第 ${b.revision + 1} 版，记下是你改的，并且直接通过。`
-      : b ? `选批次的整个目录现在的样子：冻结成第 ${b.revision + 1} 版，之前的各版都保留。没变的文件不会重新上传。`
-        : '选一个目录，原始图片或已经标注的都行：冻结成批次的第 1 版，不会进数据池；复核通过以后由算法工程师入库。'),
+  const title = approve ? `修改后通过 ${b.name}` : b ? `上传 ${b.name} 的新版次` : '上传新批次';
+  show(crumbs('batches', b, b ? [b.name, hrefOf(['b', b.name])] : null, approve ? '修改后通过' : b ? '新版次' : '上传'),
+    el('h1', {}, title, info(approve
+      ? `请选择修改后的完整目录（${b.dir}/）：它将成为第 ${b.revision + 1} 版，记录为复核人修改，并直接通过。`
+      : b ? `请选择批次目录当前的完整内容：它将冻结为第 ${b.revision + 1} 版，此前各版均保留。未变化的文件不会重复上传。`
+        : ['可选择原始图片目录，也可选择已标注的目录。上传后冻结为批次第 1 版，不会进入数据池；复核通过后由算法工程师入库。',
+          '选择目录后，批次名称和池中目录将自动填写，可修改。'], '上传说明')),
     el('div', { class: 'panel form' },
-      b ? null : el('label', {}, '进哪个数据池', pool),
+      b ? null : el('label', {}, '目标数据池', pool),
       el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       b ? null : el('label', {}, '批次名称', batchName),
-      b ? null : el('label', {}, '池里的目录名', dir),
+      b ? null : field('池中目录', dir, '批次入库后在数据池中的目录名。'),
       el('label', {}, approve ? '修改人姓名' : '标注人姓名', labeler),
       approve ? el('label', {}, '复核意见', comment) : el('label', {}, '复核人', reviewer),
       approve ? null : el('label', {}, '说明', note),
-      el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起上传'),
-      el('label', { class: 'check' }, force, '同名不同扩展名的图片也上传')),
+      checkRow(allowOther, '允许上传图片和标注以外的文件'),
+      checkRow(force, '允许上传同名不同扩展名的图片')),
     result);
 }
 
@@ -2210,13 +2277,13 @@ function compareTable(c, limit = 200) {
     el('td', {}, boxChangeText(r))));
   const f = c.files;
   return el('div', {},
-    el('p', {}, `${c.new} 相比 ${c.old}：文件新增 ${f.added.count}、修改 ${f.modified.count}、删除 ${f.deleted.count}、改名 ${f.renamed.count}；`
+    el('p', {}, `${c.new} 与 ${c.old} 相比：文件新增 ${f.added.count}、修改 ${f.modified.count}、删除 ${f.deleted.count}、改名 ${f.renamed.count}；`
       + `图片 ${c.images.old} → ${c.images.new} 张（新增 ${c.images.added}，去掉 ${c.images.removed}）。`),
     el('p', { id: 'box-changes' }, `标注有变化的图片 ${c.images.changed} 张：加框 ${c.boxes.added}、删框 ${c.boxes.removed}、挪动 ${c.boxes.moved}、改类别 ${c.boxes.relabeled}。`,
-      ' ', el('a', { href: hrefOf(['diff', name], { old: String(c.old_id), new: String(c.new_id) }) }, '看全部文件变化')),
+      ' ', el('a', { href: hrefOf(['diff', name], { old: String(c.old_id), new: String(c.new_id) }) }, '查看全部文件变化')),
     rows.length ? el('table', {}, el('tr', {}, ['图片', '标注变化'].map((h) => el('th', {}, h))), rows) : null,
-    c.images.changed > rows.length ? el('p', { class: 'muted' }, `只列了前 ${rows.length} 张；全部用 fw batch diff ${name} 看。`) : null,
-    c.uncompared ? el('p', { class: 'muted' }, `还有 ${c.uncompared} 张图片的标注太多，没有比较。`) : null);
+    c.images.changed > rows.length ? el('p', { class: 'muted' }, `仅列出前 ${rows.length} 张，完整结果请使用 fw batch diff ${name} 查看。`) : null,
+    c.uncompared ? el('p', { class: 'muted' }, `另有 ${c.uncompared} 张图片因标注过多，未比较。`) : null);
 }
 
 async function batchPage(name, query) {
@@ -2232,8 +2299,8 @@ async function batchPage(name, query) {
     const act = (fn) => async () => { try { msg.replaceChildren(); await fn(); await draw(); } catch (e) { say(e); } };
     const forms = [];
     if (has('revise')) {
-      forms.push(el('div', { class: 'row' }, el('a', { class: 'button', href: hrefOf(['batch-up', b.name]) }, '上传新的一版'),
-        el('span', { class: 'muted' }, `或者：fw batch get ${b.name}，用 LiteAnno 改好后 fw batch update ${b.name} <目录> --labeler <姓名>`)));
+      forms.push(el('div', { class: 'row' }, el('a', { class: 'button', href: hrefOf(['batch-up', b.name]) }, '上传新版次'),
+        info(`也可使用命令行：先用 fw batch get ${b.name} 取回，在 LiteAnno 中修改后，执行 fw batch update ${b.name} <目录> --labeler <姓名>。`, '命令行说明')));
     }
     const pre = await api.batchPrelabels(b.name);
     if (pre.prelabels.some((r) => ['queued', 'running'].includes(r.status))) {
@@ -2249,27 +2316,29 @@ async function batchPage(name, query) {
         placeholder: '模型版本，例如 det-ses@3' });
       const runner = el('select', { id: 'prelabel-runner' }, d.runners.map((r) => el('option', { value: r }, r)));
       const conf = el('input', { type: 'text', id: 'prelabel-conf', placeholder: '0.1', style: 'width:5em' });
-      forms.push(el('div', { class: 'panel form' },
-        el('p', { class: 'muted' }, `预标注：让模型先给第 ${b.revision} 版的图画框，在 GPU 机上排队跑；跑完用 fw batch get ${b.name} --prelabel 取到本地改。`
-          + (d.model ? `默认用 ${d.site}/${d.line} 现在发布的模型（${d.model.release}）。` : `${d.site}/${d.line} 还没有登记过发布，要写用哪个模型版本。`)),
+      forms.push(el('div', { class: 'panel form', id: 'prelabel-form' },
+        el('h3', {}, '预标注', info([`由模型为第 ${b.revision} 版的图片预先画框，任务在 GPU 机上排队运行；完成后，使用 fw batch get ${b.name} --prelabel 取回到本地修改。`,
+          d.model ? `默认使用 ${d.site}/${d.line} 当前发布的模型（${d.model.release}）。` : '',
+          '预标注结果不会自动写入批次，修改后需重新上传。'], '预标注说明')),
+        d.model ? null : el('p', { class: 'muted' }, `${d.site}/${d.line} 尚未登记发布，请填写模型版本。`),
         el('label', {}, '模型版本', model),
-        d.runners.length ? el('label', {}, '推理环境', runner) : el('p', { class: 'bad' }, '还没有能推理的推理环境，请算法工程师在 GPU 机上登记。'),
+        d.runners.length ? el('label', {}, '推理环境', runner) : el('p', { class: 'bad' }, '暂无可用的推理环境，请联系算法工程师在 GPU 机上登记。'),
         el('label', {}, '最低分数', conf),
         el('div', { class: 'row' }, el('button', { id: 'prelabel-go', disabled: !d.runners.length, onclick: act(async () => {
           const c = conf.value.trim();
-          if (c && !(Number(c) > 0 && Number(c) < 1)) throw new Error('最低分数要在 0 和 1 之间');
+          if (c && !(Number(c) > 0 && Number(c) < 1)) throw new Error('最低分数须在 0 和 1 之间。');
           await api.prelabelBatch(b.name, { model: model.value.trim() || null, runner: runner.value || null,
             conf: c ? Number(c) : null, revision: b.revision });
-        }) }, '跑预标注'))));
+        }) }, '运行预标注'))));
     }
     if (has('submit')) {
       const names = await api.reviewers();
-      const who = reviewerSelect(names, '选复核人');
+      const who = reviewerSelect(names, '选择复核人');
       if (b.reviewer && names.includes(b.reviewer)) who.value = b.reviewer;
       forms.push(el('div', { class: 'row' }, who, el('button', { class: 'primary', id: 'submit-review', onclick: act(async () => {
-        if (!who.value) throw new Error('要选复核人');
+        if (!who.value) throw new Error('请选择复核人。');
         await api.batchStep(b.name, 'submit', { reviewer: who.value, revision: b.revision });
-      }) }, `把第 ${b.revision} 版提交复核`)));
+      }) }, `提交第 ${b.revision} 版复核`)));
     }
     if (has('import')) {
       const replace = el('input', { type: 'checkbox', id: 'import-replace' });
@@ -2279,42 +2348,42 @@ async function batchPage(name, query) {
           const body = { replace: replace.checked };
           const plan = await api.batchStep(b.name, 'import/preview', body);
           const go = plan.reasons.length ? null : el('button', { class: 'primary', id: 'import-go', onclick: act(() => api.batchStep(b.name, 'import',
-            { ...body, expect_latest_id: plan.expect_latest_id })) }, `入库，建 ${plan.ref}`);
+            { ...body, expect_latest_id: plan.expect_latest_id })) }, `入库，建立 ${plan.ref}`);
           out.replaceChildren(...present([changeReport(plan), go ? el('div', { class: 'row' }, go) : null]));
         } catch (e) { out.replaceChildren(errorBox(e)); }
       };
       forms.push(el('div', { class: 'panel form' },
-        el('p', {}, `复核通过了。入库：把第 ${b.revision} 版作为 ${b.dir}/ 加进 ${b.pool}，和「上传新增目录」是同样的检查，文件不用再上传。`),
-        el('label', { class: 'check' }, replace, `替换已有目录：${b.pool} 里已有 ${b.dir}/ 时，整个换成这一份`),
+        el('p', {}, '复核已通过，可以入库。', info(`入库将第 ${b.revision} 版作为 ${b.dir}/ 加入 ${b.pool}，检查规则与「上传新增目录」相同，文件无需重新上传。`, '入库说明')),
+        checkRow(replace, '替换已有目录', `${b.pool} 中已有 ${b.dir}/ 时，以本批次的内容整体替换。`),
         el('div', { class: 'row' }, el('button', { id: 'import-preview', onclick: preview }, '预览入库')), out));
     }
     if (has('approve') || has('reject')) {
-      const comment = el('textarea', { id: 'review-comment', rows: 3, placeholder: '复核意见：退回时必填，写清楚哪里要改' });
-      const images = el('textarea', { id: 'review-images', rows: 3, class: 'mono', placeholder: '有问题的图片，一行一个（批次目录里的相对路径），可以不填' });
+      const comment = el('textarea', { id: 'review-comment', rows: 3, placeholder: '复核意见：退回时必填，请写明需要修改之处' });
+      const images = el('textarea', { id: 'review-images', rows: 3, class: 'mono', placeholder: '有问题的图片，每行一个（批次目录中的相对路径），选填' });
       forms.push(el('div', { class: 'panel form' },
-        el('p', { class: 'muted' }, has('approve') ? `复核第 ${b.revision} 版：` : `已经通过；入库之前发现问题还可以退回第 ${b.revision} 版：`, el('a', { href: hrefOf(['v', b.name, String(b.revision)]) }, '在网页里看图片和框'),
-          `，或者 fw batch get ${b.name} 取到本地用 LiteAnno 打开。`),
+        el('p', { class: 'muted' }, has('approve') ? `复核第 ${b.revision} 版：` : `已通过；入库前发现问题仍可退回第 ${b.revision} 版：`, el('a', { href: hrefOf(['v', b.name, String(b.revision)]) }, '在网页中查看图片和标注框'),
+          info(`也可使用 fw batch get ${b.name} 取回到本地，用 LiteAnno 打开。`, '命令行说明')),
         el('label', {}, '意见', comment), el('label', {}, '问题图片', images),
         el('div', { class: 'row' },
           has('approve') ? el('button', { class: 'primary', id: 'approve', onclick: act(() => api.batchStep(b.name, 'approve',
             { comment: comment.value.trim(), revision: b.revision })) }, '通过') : null,
-          has('approve') ? el('a', { class: 'button', href: hrefOf(['batch-up', b.name], { approve: '1' }) }, '我改过了：上传修改后的目录并通过') : null,
+          has('approve') ? el('a', { class: 'button', href: hrefOf(['batch-up', b.name], { approve: '1' }) }, '上传修改后的目录并通过') : null,
           el('button', { id: 'reject', onclick: act(() => api.batchStep(b.name, 'reject', { comment: comment.value.trim(),
             images: images.value.split('\n').map((x) => x.trim()).filter(Boolean), revision: b.revision })) }, '退回'))));
     }
     if (has('close')) {
       forms.push(el('div', { class: 'row' }, el('button', { id: 'close-batch', onclick: act(async () => {
-        const why = window.prompt(`关闭 ${b.name}？它不会再复核或入库，各版内容保留。可以写原因：`, '');
+        const why = window.prompt(`确认关闭 ${b.name}？关闭后不再复核或入库，各版内容保留。可填写原因：`, '');
         if (why === null) return;
         await api.batchStep(b.name, 'close', { comment: why.trim() });
-      }) }, '关闭这个批次')));
+      }) }, '关闭批次')));
     }
     const revisions = b.revisions.slice().reverse().map((r) => el('tr', {},
       el('td', {}, el('a', { href: hrefOf(['v', b.name, String(r.number)]) }, `第 ${r.number} 版`)),
       el('td', {}, `${r.file_count} 个文件，${sizeText(r.total_bytes)}`),
       el('td', {}, r.labeler + (r.by_reviewer ? '（复核人修改）' : '')), el('td', {}, r.created_by), el('td', {}, when(r.created_at)),
       el('td', { class: 'muted' }, r.note),
-      el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '和上一版比') : '')));
+      el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '与上一版比较') : '')));
     const steps = b.steps.map((s) => el('tr', {},
       el('td', {}, when(s.at)), el('td', {}, s.actor),
       el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.job_id ? `（任务 ${s.job_id}）` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
@@ -2323,23 +2392,23 @@ async function batchPage(name, query) {
         el('a', { href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i)))) : null)));
     show(crumbs('batches', b, b.name),
       el('h1', {}, b.name, ' ', el('span', { class: `tag ${BATCH_CLASS[b.status]}`, id: 'batch-status' }, b.status_text)),
-      el('p', {}, '入库后是 ', el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` 的 ${b.dir}/`,
+      el('p', {}, '入库目标：', el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` / ${b.dir}/`,
         b.imported ? ['；已入库为 ', vref(b.imported)] : null,
-        `。上传账号 ${b.owner}，复核人 ${b.reviewer || '还没有指定'}。`),
+        `。上传账号：${b.owner}；复核人：${b.reviewer || '未指定'}。`),
       msg, forms,
-      el('h2', {}, '各版'),
+      el('h2', {}, '各版次'),
       el('table', {}, el('tr', {}, ['版次', '大小', '标注人', '上传账号', '时间', '说明', ''].map((h) => el('th', {}, h))), revisions),
       pre.prelabels.length ? [el('h2', {}, '预标注'),
         el('table', { id: 'prelabels' }, el('tr', {}, ['版次', '模型版本', '状态', '图片', '框', '提交', '结果'].map((h) => el('th', {}, h))),
           pre.prelabels.map((r) => el('tr', {},
             el('td', {}, `第 ${r.revision} 版`), el('td', {}, can('models.read') ? mref(r.model) : r.model),
-            el('td', {}, r.status_text + (r.status === 'queued' ? `（前面还有 ${r.queued_ahead} 个）` : ''),
+            el('td', {}, r.status_text + (r.status === 'queued' ? `（前方排队 ${r.queued_ahead} 个）` : ''),
               r.error ? el('div', { class: 'bad' }, r.error) : null),
             el('td', {}, String(r.images)), el('td', {}, r.boxes == null ? '' : String(r.boxes)),
             el('td', {}, `${r.submitted_by}，${when(r.created_at)}`),
             el('td', {}, r.prediction_set ? [el('a', { href: hrefOf(['p', String(r.prediction_set)]) }, `预测集 #${r.prediction_set}`),
               r.revision === b.revision ? el('div', { class: 'mono muted' }, `fw batch get ${b.name} --prelabel`) : null] : ''))))] : null,
-      compare ? [el('h2', {}, '这一版改了什么'), compareTable(compare)] : null,
+      compare ? [el('h2', {}, '本版改动'), compareTable(compare)] : null,
       el('h2', {}, '经过'),
       el('table', {}, el('tr', {}, ['时间', '账号', '做了什么', '意见'].map((h) => el('th', {}, h))), steps));
   };
@@ -2347,11 +2416,11 @@ async function batchPage(name, query) {
 }
 
 function tokenTable(tokens, onRevoke) {
-  if (!tokens.length) return el('p', { class: 'muted' }, '还没有凭据');
+  if (!tokens.length) return el('p', { class: 'muted' }, '暂无凭据。');
   return el('table', {}, el('tr', {}, ['编号', '说明', '建立', '最近使用', '状态', ''].map((h) => el('th', {}, h))),
     tokens.map((t) => el('tr', {},
       el('td', {}, String(t.id)), el('td', {}, t.label || '-'), el('td', {}, when(t.created_at)),
-      el('td', {}, t.last_used_at ? when(t.last_used_at) : '没用过'),
+      el('td', {}, t.last_used_at ? when(t.last_used_at) : '未使用'),
       el('td', { class: t.revoked_at ? 'muted' : '' }, t.revoked_at ? `已吊销 ${when(t.revoked_at)}` : '有效'),
       el('td', {}, t.revoked_at ? null : el('button', { onclick: () => onRevoke(t) }, '吊销')))));
 }
@@ -2363,15 +2432,15 @@ async function usersPage() {
   const draw = async () => {
     const { users, roles } = await api.users();
     const people = Object.entries(roles).filter(([k]) => k !== 'worker');
-    const name = el('input', { type: 'text', placeholder: '账号名：字母、数字、. _ -，例如 zhangsan' });
+    const name = el('input', { type: 'text', placeholder: '账号名：字母、数字和 . _ -，例如 zhangsan' });
     const role = el('select', {}, Object.entries(roles).map(([k, v]) => el('option', { value: k }, v)));
     role.value = 'field';
     const detail = el('div');
     const openTokens = async (u) => {
-      const label = el('input', { type: 'text', placeholder: '给谁或哪台机器用，例如 训练机-01' });
+      const label = el('input', { type: 'text', placeholder: '用途说明（使用者或机器），例如：训练机-01' });
       const fresh = el('div');
       const list = async () => tokenTable(await api.userTokens(u.name), async (t) => {
-        if (!window.confirm(`吊销 ${u.name} 的凭据 ${t.id}（${t.label || '无说明'}）？用它登录的机器会立刻连不上。`)) return;
+        if (!window.confirm(`确认吊销 ${u.name} 的凭据 ${t.id}（${t.label || '无说明'}）？使用该凭据的机器将立即无法连接。`)) return;
         try { await api.revokeToken(t.id); await openTokens(u); } catch (e) { say(e); }
       });
       const make = async () => {
@@ -2379,29 +2448,29 @@ async function usersPage() {
           const made = await api.createToken(u.name, label.value.trim());
           const table = await list();
           detail.replaceChildren(el('h2', {}, `${u.name} 的凭据`), el('div', { class: 'panel' },
-            el('p', {}, `凭据 ${made.id} 只显示这一次，现在就复制给使用的人：`), el('pre', { class: 'mono', id: 'new-token' }, made.token),
-            el('p', { class: 'muted' }, `用法：fw login --server ${location.origin} --token <凭据>；网页登录时粘贴同一串。`)), table);
+            el('p', {}, `凭据 ${made.id} 只显示这一次，请立即复制并交给使用者：`), el('pre', { class: 'mono', id: 'new-token' }, made.token),
+            el('p', { class: 'muted' }, `命令行登录：fw login --server ${location.origin} --token <凭据>；网页登录时使用同一凭据。`)), table);
         } catch (e) { say(e); }
       };
       detail.replaceChildren(el('h2', {}, `${u.name} 的凭据`), await list(), fresh,
-        u.disabled_at ? el('p', { class: 'muted' }, '账号已停用，先启用才能发凭据')
-          : el('div', { class: 'row' }, label, el('button', { class: 'primary', onclick: make }, '发新凭据')));
+        u.disabled_at ? el('p', { class: 'muted' }, '账号已停用，启用后才能发放凭据。')
+          : el('div', { class: 'row' }, label, el('button', { class: 'primary', onclick: make }, '发放新凭据')));
     };
     const rows = users.map((u) => {
       const pick = el('select', {}, (u.role === 'worker' ? [['worker', roles.worker]] : people).map(([k, v]) => el('option', { value: k }, v)));
       pick.value = u.role;
       pick.disabled = u.role === 'worker' || !!u.disabled_at;
       pick.addEventListener('change', async () => {
-        if (!window.confirm(`把 ${u.name} 改成${roles[pick.value]}？下一次请求起生效，凭据不用重发。`)) { pick.value = u.role; return; }
+        if (!window.confirm(`确认将 ${u.name} 的角色改为${roles[pick.value]}？自下一次请求起生效，无需重新发放凭据。`)) { pick.value = u.role; return; }
         try { await api.setRole(u.name, pick.value); await draw(); } catch (e) { pick.value = u.role; say(e); }
       });
       const toggle = el('button', { onclick: async () => {
-        if (!u.disabled_at && !window.confirm(`停用 ${u.name}？它的全部凭据立刻失效；以后启用也要重新发凭据。`)) return;
+        if (!u.disabled_at && !window.confirm(`确认停用 ${u.name}？其全部凭据将立即失效，重新启用后需重新发放凭据。`)) return;
         try { await api.setDisabled(u.name, !u.disabled_at); await draw(); } catch (e) { say(e); }
       } }, u.disabled_at ? '启用' : '停用');
       return el('tr', { class: u.disabled_at ? 'muted' : '' },
         el('td', {}, u.name), el('td', {}, pick), el('td', {}, when(u.created_at)),
-        el('td', {}, u.disabled_at ? `已停用 ${when(u.disabled_at)}` : '在用'), el('td', {}, String(u.active_tokens)),
+        el('td', {}, u.disabled_at ? `已停用 ${when(u.disabled_at)}` : '正常'), el('td', {}, String(u.active_tokens)),
         el('td', {}, el('div', { class: 'row' }, el('button', { onclick: () => openTokens(u).catch(say) }, '凭据'), toggle)));
     });
     const add = async (ev) => {
@@ -2409,9 +2478,8 @@ async function usersPage() {
       try { await api.createUser(name.value.trim(), role.value); await draw(); } catch (e) { say(e); }
     };
     msg.replaceChildren();
-    show(crumbs('users'), el('h1', {}, '账号'),
-      el('p', { class: 'muted' }, '一人一个账号。管理员管账号；算法工程师能新建和修改数据集、模型、评估和任务；现场实施能看数据集和模型、下载文件、登记发布；GPU worker 是 GPU 机用的账号。'
-        + '每一次改动都记在「操作记录」里。'),
+    show(crumbs('users'), el('h1', {}, '账号', info(['每人使用一个账号。', '管理员：管理账号。', '算法工程师：新建和修改数据集、模型、评估和任务。',
+      '现场实施：查看数据集和模型、下载文件、登记发布。', 'GPU worker：供 GPU 机使用的账号。', '所有改动均记入「操作记录」。'], '账号与角色说明')),
       msg,
       el('table', {}, el('tr', {}, ['账号', '角色', '建立', '状态', '有效凭据', ''].map((h) => el('th', {}, h))), rows),
       el('h2', {}, '新建账号'),
@@ -2427,12 +2495,11 @@ async function mePage() {
   const msg = el('div');
   const draw = async () => {
     const tokens = await api.myTokens();
-    show(crumbs('me'), el('h1', {}, '我的凭据'),
-      el('p', { class: 'muted' }, `${me.name}（${me.role_text || me.role}）。现在登录用的是凭据 ${me.token_id}${me.token_label ? `（${me.token_label}）` : ''}。`
-        + '不再用的机器可以在这里吊销它的凭据；要新凭据找管理员。'),
+    show(crumbs('me'), el('h1', {}, '我的凭据', info('可在此吊销不再使用的机器的凭据。如需新凭据，请联系管理员。', '我的凭据说明')),
+      el('p', { class: 'muted' }, `${me.name}（${me.role_text || me.role}），当前登录使用凭据 ${me.token_id}${me.token_label ? `（${me.token_label}）` : ''}。`),
       msg,
       tokenTable(tokens, async (t) => {
-        if (!window.confirm(t.id === me.token_id ? '这是现在登录用的凭据，吊销后要重新登录。继续？' : `吊销凭据 ${t.id}（${t.label || '无说明'}）？`)) return;
+        if (!window.confirm(t.id === me.token_id ? '这是当前登录使用的凭据，吊销后需重新登录。确认吊销？' : `确认吊销凭据 ${t.id}（${t.label || '无说明'}）？`)) return;
         try { await api.revokeToken(t.id); if (t.id === me.token_id) { location.hash = '#/login'; return; } await draw(); } catch (e) { msg.replaceChildren(errorBox(e)); }
       }));
   };
@@ -2461,19 +2528,19 @@ async function eventsPage(query) {
     groups.map((g) => el('option', { value: g }, groupNames[g] || g)));
   action.value = (asked.action || '').split('.')[0];
   const actor = el('input', { type: 'text', placeholder: '账号', value: asked.actor || '' });
-  const q = el('input', { type: 'text', placeholder: '对象里的字，例如 SES-TX', value: asked.q || '' });
+  const q = el('input', { type: 'text', placeholder: '对象名称中的文字，例如 SES-TX', value: asked.q || '' });
   const filter = (ev) => { ev.preventDefault(); go({ action: action.value, actor: actor.value.trim(), q: q.value.trim() }); };
-  show(crumbs('events'), el('h1', {}, '操作记录'),
-    el('p', { class: 'muted' }, '谁在什么时候改了什么：建版本、登记模型和发布、提交和取消任务、账号和凭据的变动。和改动本身一起写入，只增不改。'),
+  show(crumbs('events'), el('h1', {}, '操作记录', info(['记录各账号在何时进行了哪些改动，包括建立版本、登记模型和发布、提交和取消任务，以及账号和凭据的变动。',
+    '记录与改动同时写入，只增不改。'], '操作记录说明')),
     el('form', { class: 'row', onsubmit: filter }, action, actor, q, el('button', { type: 'submit' }, '筛选')),
     r.events.length ? el('table', {}, el('tr', {}, ['时间', '账号', '操作', '对象', '细节'].map((h) => el('th', {}, h))),
       r.events.map((e) => el('tr', {},
         el('td', {}, when(e.at)), el('td', {}, e.by_server ? '服务器命令行' : e.actor), el('td', {}, e.action_text),
         el('td', {}, e.object), el('td', { class: 'muted mono' }, detailText(e.detail)))))
-      : el('p', { class: 'muted' }, '没有符合的记录'),
+      : el('p', { class: 'muted' }, '没有符合条件的记录。'),
     el('div', { class: 'row', style: 'margin-top:12px' },
-      asked.before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q }) }, '回到最新') : null,
-      r.next_before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q, before: r.next_before }) }, '更早的') : null));
+      asked.before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q }) }, '返回最新') : null,
+      r.next_before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q, before: r.next_before }) }, '更早的记录') : null));
 }
 
 // A site's or line's code with the name shown next to it.
@@ -2484,7 +2551,7 @@ function placeText(p) {
 // Two selects, the registered sites and the lines of the one chosen: a pool or model only takes those.
 // optional: a first choice 「不属于哪条产线」 (none, returned too) for what may belong to no line.
 function placePicker(tree, at = { site: '', line: '' }, optional = false) {
-  const none = optional ? el('option', { value: '' }, '不属于哪条产线') : null;
+  const none = optional ? el('option', { value: '' }, '不属于任何产线') : null;
   const site = el('select', { id: 'site' }, none, tree.sites.map((x) => el('option', { value: x.code }, placeText(x))));
   const line = el('select', { id: 'line' });
   const fill = () => {
@@ -2504,14 +2571,15 @@ function placePicker(tree, at = { site: '', line: '' }, optional = false) {
 // Registering a site or a line of it (codes are for good; the shown name can change later).
 function newPlaceForm(done) {
   const ref = el('input', { id: 'place-ref', type: 'text', placeholder: '现场/产线，例如 SES/TX' });
-  const name = el('input', { id: 'place-name', type: 'text', placeholder: '产线的显示名（可不写），例如 贴片线' });
+  const name = el('input', { id: 'place-name', type: 'text', placeholder: '显示名（选填），例如：贴片线' });
   const msg = el('div');
   const go = async (ev) => {
     ev.preventDefault();
     try { await api.addSite(ref.value.trim(), name.value.trim()); await done(); } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
-  return el('form', { class: 'panel form narrow', onsubmit: go }, el('h2', {}, '登记现场 / 产线'), msg,
-    el('p', { class: 'muted small' }, '代号只能用汉字、字母、数字、_ 和 .。写 SES/TX 登记 SES 现场的 TX 产线（SES 还没登记就一起登记），只写 SES 就只登记现场。'),
+  return el('form', { class: 'panel form narrow', onsubmit: go }, el('h2', {}, '登记现场 / 产线', info([
+    '代号只能使用汉字、字母、数字、_ 和 .，登记后不能修改。',
+    '填写 SES/TX 登记 SES 现场的 TX 产线（SES 尚未登记时一并登记）；仅填写 SES 则只登记现场。'], '登记说明')), msg,
     el('label', {}, '现场 / 产线', ref), el('label', {}, '显示名', name),
     el('div', { class: 'label' }, el('span'), el('div', {}, el('button', { id: 'place-go', class: 'primary', type: 'submit' }, '登记'))));
 }
@@ -2519,19 +2587,16 @@ function newPlaceForm(done) {
 // A new dataset: a pool (always of a line) or a test or regression set (of a line or of none), then its upload.
 async function datasetNewPage(query) {
   const show = live();
-  if (!can('datasets.write')) throw new Error('这个账号不能新建数据集：请管理员或算法工程师来建。');  // say so before the form, not on submit
+  if (!can('datasets.write')) throw new Error('当前账号不能新建数据集，请联系管理员或算法工程师。');  // say so before the form, not on submit
   const at = scopeOf(query);
   const tree = await api.sites();
-  const kinds = { pool: '数据池：一条产线采集的数据，以后一批批加目录', test: '测试集：评估模型用，可以不属于哪条产线',
-    regression: '回归集：每次发布前都要过的一批图，可以不属于哪条产线', other: '其他' };
-  const kind = el('select', { id: 'dataset-kind' }, Object.keys(kinds).map((k) => el('option', { value: k }, KIND_NAMES[k])));
-  const about = el('p', { class: 'muted small' });
+  const kinds = ['pool', 'test', 'regression', 'other'];
+  const kind = el('select', { id: 'dataset-kind' }, kinds.map((k) => el('option', { value: k }, KIND_NAMES[k])));
   const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX 或 SES-TX-test' });
   const { site, line, none } = placePicker(tree, at, true);
-  const note = el('input', { id: 'dataset-note', type: 'text', placeholder: '备注（可不写）' });
+  const note = el('input', { id: 'dataset-note', type: 'text', placeholder: '备注（选填）' });
   const msg = el('div');
   const sync = () => {
-    about.textContent = kinds[kind.value];
     none.disabled = kind.value === 'pool';  // a pool belongs to a line
     if (none.disabled && !site.value && site.options.length > 1) { site.selectedIndex = 1; site.dispatchEvent(new Event('change')); }
   };
@@ -2545,14 +2610,15 @@ async function datasetNewPage(query) {
     } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
   const noLines = !tree.sites.some((x) => x.lines.length);
-  show(crumbs('datasets', at, '新建数据集'), el('h1', {}, '新建数据集'),
+  show(crumbs('datasets', at, '新建数据集'), el('h1', {}, '新建数据集',
+    info(['新建的数据集为空，创建后转到上传页面，上传第一个版本。', '功能与 fw dataset create 相同。'], '新建数据集说明')),
     el('form', { class: 'panel form narrow', onsubmit: go }, msg,
-      noLines ? el('p', { class: 'muted' }, '还没有登记产线：数据池要建在登记过的产线下。',
-        can('sites.write') ? el('a', { href: '#/places' }, '去登记现场和产线') : '请管理员或算法工程师先登记。') : null,
-      el('label', {}, '类型', kind), el('div', { class: 'label' }, el('span'), about),
+      noLines ? el('p', { class: 'muted' }, '尚未登记产线，数据池只能建在已登记的产线下。',
+        can('sites.write') ? el('a', { href: '#/places' }, '登记现场和产线') : '请联系管理员或算法工程师登记。') : null,
+      field('类型', kind, ['数据池：一条产线采集的数据，此后按批次追加目录。', '测试集：用于评估模型，可不属于任何产线。',
+        '回归集：每次发布前必须通过的一组图片，可不属于任何产线。', '其他：不属于以上类型的数据。']),
       el('label', {}, '名称', name), el('label', {}, '现场', site), el('label', {}, '产线', line), el('label', {}, '备注', note),
-      el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '建好后上传'),
-        el('span', { class: 'muted small' }, '建好是空的，下一步上传第一个版本。')))));
+      el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '创建并上传')))));
 }
 
 // The registered sites and lines, their shown names and how much each holds; register a new one, rename one.
@@ -2565,8 +2631,8 @@ async function placesPage() {
   const pools = can('datasets.write');
   const rename = (ref, p) => {  // the name cell, and in place of it an editor
     const cell = el('td', { class: 'place-name' });
-    const view = () => cell.replaceChildren(el('span', {}, p.name || el('span', { class: 'muted' }, '（没有）')), ' ',
-      write ? el('button', { class: 'link rename', 'data-ref': ref, onclick: edit }, '改显示名') : null);
+    const view = () => cell.replaceChildren(el('span', {}, p.name || el('span', { class: 'muted' }, '（无）')), ' ',
+      write ? el('button', { class: 'link rename', 'data-ref': ref, onclick: edit }, '修改显示名') : null);
     const edit = () => {
       const input = el('input', { type: 'text', class: 'rename-text', value: p.name || '', size: 18, placeholder: '显示名' });
       const err = el('span', { class: 'bad' });
@@ -2588,11 +2654,11 @@ async function placesPage() {
     ...s.lines.map((x) => el('tr', {}, el('td', { class: 'indent' }, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${s.code} / ${x.code}`)),
       rename(`${s.code}/${x.code}`, x), ...counts.map((k) => el('td', { class: 'num' }, String(x[k] || 0))),
       pools ? el('td', {}, el('a', { class: 'small new-pool', href: hrefOf(['dataset-new'], { site: s.code, line: x.code }) }, '新建数据池')) : null))]);
-  show(crumbs('places', null), el('h1', {}, '现场和产线'),
-    el('p', { class: 'muted' }, '数据池、模型和发布只能建在登记过的现场和产线下。代号（SES、TX）登记后不能改，它在训练集快照的目录和发布编号里；显示名只是给人看的，随时能改。'),
+  show(crumbs('places', null), el('h1', {}, '现场和产线', info(['数据池、模型和发布只能建在已登记的现场和产线下。',
+    '代号（如 SES、TX）登记后不能修改，它用于训练集快照的目录和发布编号；显示名仅用于展示，可随时修改。'], '现场和产线说明')),
     write ? newPlaceForm(again) : null,
     rows.length ? el('table', { id: 'places-table' }, el('tr', {}, ['代号', '显示名', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数', pools ? '' : null]
-      .filter((h) => h !== null).map((h, i) => el('th', { class: i > 1 && h ? 'num' : '' }, h))), rows) : el('p', { class: 'muted' }, '还没有登记现场和产线。'));
+      .filter((h) => h !== null).map((h, i) => el('th', { class: i > 1 && h ? 'num' : '' }, h))), rows) : el('p', { class: 'muted' }, '尚未登记现场和产线。'));
 }
 
 // --- the overview of a line --------------------------------------------------------------------------------
@@ -2626,9 +2692,9 @@ function lineTable(tree, at) {
   const all = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
   const lines = (list) => list.reduce((n, s) => n + s.lines.length, 0);
   const missing = at.site ? lines(all) - lines(sites) : shown.hidden;  // of what this page would list
-  const left = missing ? el('p', { class: 'muted small' }, `有 ${missing} 个${at.site ? '产线' : '现场 / 产线'}没显示：在左边点「选择」勾上。`) : null;
+  const left = missing ? el('p', { class: 'muted small' }, `${missing} 个${at.site ? '产线' : '现场 / 产线'}未显示，可在左侧点击「选择」恢复显示。`) : null;
   if (!rows.length) {
-    return [el('p', { class: 'muted' }, at.site ? '这个现场没有要显示的产线。' : tree.sites.length ? '没有要显示的产线。' : ['还没有登记现场和产线。', can('sites.write') ? el('a', { href: '#/places' }, '去登记') : null]), left];
+    return [el('p', { class: 'muted' }, at.site ? '该现场没有可显示的产线。' : tree.sites.length ? '没有可显示的产线。' : ['尚未登记现场和产线。', can('sites.write') ? el('a', { href: '#/places' }, '前往登记') : null]), left];
   }
   return [el('table', { id: 'lines' }, el('tr', {}, ['现场 / 产线', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数'].map((h, i) => el('th', { class: i ? 'num' : '' }, h))), rows), left];
 }
@@ -2713,7 +2779,7 @@ async function copyRef(ref, menu, close) {
     toast(`已复制 ${ref}`);
   } catch {
     const field = el('input', { class: 'copy-field mono', type: 'text', readonly: true, value: ref, 'aria-label': '版本号' });
-    menu.replaceChildren(el('p', { class: 'small' }, '浏览器不让这个页面写剪贴板，按 Ctrl+C 复制：'), field);
+    menu.replaceChildren(el('p', { class: 'small' }, '浏览器不允许本页面写入剪贴板，请按 Ctrl+C 复制：'), field);
     field.focus();
     field.select();
     let copied = false;
@@ -2751,9 +2817,9 @@ async function overviewPage(query) {
   const side = placeTree(tree, at, null, (site, line) => hrefOf([], { site, line }));
   const site = tree.sites.find((s) => s.code.toLowerCase() === at.site.toLowerCase());
   if (!at.line) {
-    show(at.site ? crumbs(null, at) : el('nav', { class: 'crumbs' }, sideToggle()), el('h1', {}, at.site ? (site ? placeText(site) : at.site) : '概览'), side,
-      el('div', { class: 'browse' }, el('div', { class: 'list' },
-        el('p', { class: 'muted' }, '点一条产线，看它现在发布的模型、最近的评估、训练集快照、数据池和在办的批次。'), lineTable(tree, at))));
+    show(at.site ? crumbs(null, at) : el('nav', { class: 'crumbs' }, sideToggle()), el('h1', {}, at.site ? (site ? placeText(site) : at.site) : '概览',
+      info('点击产线，可查看其当前发布的模型、最近评估、训练集快照、数据池和在办批次。', '概览说明')), side,
+      el('div', { class: 'browse' }, el('div', { class: 'list' }, lineTable(tree, at))));
     return;
   }
   const where = { site: at.site, line: at.line };
@@ -2762,7 +2828,7 @@ async function overviewPage(query) {
     api.datasets(where), api.models(where), api.currentRelease(at.site, at.line).catch(none),
     can('batches.read') ? api.batches(where).then((r) => batchesUnderWay(r.batches)) : null]);
   const evals = lastEvalByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat());
-  const head = (id, text, parts, link, ...more) => el('div', { class: 'section-head' }, el('h2', { id }, text),
+  const head = (id, text, parts, link, ...more) => el('div', { class: 'section-head' }, el('h2', { id }, ...[].concat(text)),
     el('div', { class: 'links' }, ...more,
       el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link)));
   const newData = can('datasets.write') ? el('a', { id: 'data-new', class: 'small with-icon', href: hrefOf(['dataset-new'], where) }, icon('plus'), '新建数据集') : null;
@@ -2779,8 +2845,8 @@ async function overviewPage(query) {
       el('a', { class: 'button primary go', href: mvHref(release.model_version.ref) }, '查看模型版本', icon('arrow')))
     : el('section', { id: 'release', class: 'release none', 'aria-label': '当前发布' },
       el('div', { class: 'chip' }, icon('chip')),
-      el('div', { class: 'what' }, el('div', { class: 'label' }, '当前发布'),
-        el('p', { class: 'muted' }, '这条产线还没有登记过发布；部署成功后用 fw release register 登记。')));
+      el('div', { class: 'what' }, el('div', { class: 'label' }, '当前发布', info('部署成功后，使用 fw release register 登记发布。', '发布说明')),
+        el('p', { class: 'muted' }, '该产线尚未登记发布。')));
 
   const modelTable = models.length ? el('table', { class: 'models' },
     el('tr', {}, ['模型', '版本', ...KEY_METRICS].map((h, i) => el('th', { class: i > 1 ? 'num' : '' }, h)), el('th', { class: 'act' })),
@@ -2788,40 +2854,40 @@ async function overviewPage(query) {
       const e = evals[m.name];
       const row = modelRow(m, e);
       const shown = e ? Object.fromEntries(keyMetrics(e.metrics)) : {};
-      return el('tr', { title: e ? `评估 #${e.id}：${e.model_version.ref} 在 ${e.testset.ref} 上，${when(e.created_at)}` : '这个模型还没有评估' },
+      return el('tr', { title: e ? `评估 #${e.id}：${e.model_version.ref}，测试集 ${e.testset.ref}，${when(e.created_at)}` : '该模型尚无评估' },
         el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
         el('td', {}, row.ref ? el('a', { href: mvHref(row.ref) }, `@${row.number}`) : '-'),
         ...KEY_METRICS.map((k) => el('td', { class: `num${shown[k] ? '' : ' muted'}` }, shown[k] || '—')),
         el('td', { class: 'act' }, row.items.length ? moreMenu(row.ref, row.items) : null));
-    })) : el('p', { class: 'muted' }, '这条产线还没有模型。');
+    })) : el('p', { class: 'muted' }, '该产线暂无模型。');
 
   const sorted = data.slice().sort((a, b) => DATA_ORDER.indexOf(a.kind) - DATA_ORDER.indexOf(b.kind));
   const dataTable = sorted.length ? el('table', { class: 'data' },
     el('tr', {}, el('th', {}, '名称'), el('th', {}, '类型'), el('th', { class: 'num' }, '大小'), el('th', { class: 'act' })),
-    sorted.map((d) => el('tr', { title: d.latest ? `${d.latest.file_count} 个文件，最新版本 ${when(d.latest.created_at)}` : '还没有版本' },
+    sorted.map((d) => el('tr', { title: d.latest ? `${d.latest.file_count} 个文件，最新版本 ${when(d.latest.created_at)}` : '尚无版本' },
       el('td', {}, el('span', { class: 'with-icon' }, icon('folder'),
         d.latest ? el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref) : el('a', { href: hrefOf(['d', d.name]) }, d.name), labelChips(d.latest || {}))),
       el('td', {}, d.kind === 'trainset' ? '训练集快照' : KIND_NAMES[d.kind] || d.kind),
       el('td', { class: 'num' }, d.latest ? sizeText(d.latest.total_bytes) : '—'),
       el('td', { class: 'act' }, el('a', { class: 'tool go', href: hrefOf(['d', d.name]), title: `打开 ${d.name}`, 'aria-label': `打开 ${d.name}` }, icon('right'))))))
-    : el('p', { class: 'muted' }, '这条产线还没有数据池和训练集快照。',
-      can('datasets.write') ? [' ', el('a', { href: hrefOf(['dataset-new'], where) }, '新建一个数据池'), '，建好后上传目录。'] : null);
+    : el('p', { class: 'muted' }, '该产线暂无数据池和训练集快照。',
+      can('datasets.write') ? [' ', el('a', { href: hrefOf(['dataset-new'], where) }, '新建数据池')] : null);
 
   const batchList = batches === null ? null : batches.length ? el('table', { class: 'batches' },
     batches.map((b) => el('tr', {},
       el('td', {}, bref(b.name), el('div', { class: 'small muted sub', title: `入库到 ${b.pool} / ${b.dir}/，上传账号 ${b.owner}` }, `${b.dir}/ · ${b.owner}`)),
       el('td', { class: 'state' }, el('span', { class: `dot ${BATCH_DOT[b.status] || 'gray'}` }), b.status_text))))
-    : el('p', { class: 'muted' }, '没有在办的批次（没入库、没关闭的）。');
+    : el('p', { class: 'muted' }, '暂无在办批次。');
 
   show(crumbs(null, at),
     el('h1', {}, line ? [line.code, line.name].filter(Boolean).join(' ') : at.line), side,
     el('div', { class: 'browse' }, el('div', { class: 'list' },
-      line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是登记过的产线，下面是名字对得上的东西。`),
+      line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是已登记的产线，以下为名称匹配的内容。`),
       card,
       el('div', { class: `cols${batchList ? '' : ' one'}` },
         el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型'), modelTable,
           head('data', '数据池与快照', ['datasets'], '全部数据集', newData), dataTable),
-        batchList ? el('div', { class: 'col right' }, head('batches', '在办的批次', ['batches'], '全部批次'), batchList) : null))));
+        batchList ? el('div', { class: 'col right' }, head('batches', ['在办的批次', info('在办批次指尚未入库且未关闭的批次。', '在办批次说明')], ['batches'], '全部批次'), batchList) : null))));
 }
 
 // --- frame and routing ------------------------------------------------------------------------------------
@@ -2870,6 +2936,7 @@ async function render() {
   clearTimeout(timer);
   keyNav = null;
   closeMenu();
+  hideTip();
   const show = live();
   const { parts, query } = route(location.hash);
   renderNav();
@@ -2908,10 +2975,10 @@ async function render() {
     else if (parts[0] === 'events') await eventsPage(query);
     else if (parts[0] === 'me') await mePage();
     else if (parts[0] === 'remove' && parts[1]) await removePage(parts[1]);
-    else show(el('h1', {}, '没有这个页面'), el('a', { href: '#/' }, '回首页'));
+    else show(el('h1', {}, '页面不存在'), el('a', { href: '#/' }, '返回首页'));
   } catch (e) {
     if (e.status === 401) return;
-    show(errorBox(e.status === 403 ? `${e.message}（换一个有权限的账号登录）` : e));
+    show(errorBox(e.status === 403 ? `${e.message}（请使用有权限的账号登录）` : e));
   }
 }
 
@@ -2925,11 +2992,13 @@ async function start() {
     window.addEventListener(kind, (ev) => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) ev.preventDefault(); });
   }
   document.addEventListener('keydown', (ev) => {  // one listener; the page shown now sets keyNav
+    if (ev.key === 'Escape' && tip) { hideTip(); return; }
     if (ev.key === 'Escape' && openMenu) { closeMenu(true); return; }
     if (keyNav && !ev.target.closest('input, select, textarea')) keyNav(ev.key);
   });
-  document.addEventListener('pointerdown', (ev) => {  // a click outside the open menu closes it
+  document.addEventListener('pointerdown', (ev) => {  // a click outside the open menu, or the ⓘ text, closes it
     if (openMenu && !openMenu.wrap.contains(ev.target)) closeMenu();
+    if (tip && !tip.node.contains(ev.target) && !tip.button.contains(ev.target)) hideTip();
   });
   await render();
 }

@@ -45,29 +45,29 @@ const { dropOn } = require('./drop.cjs');
 
   // two folders dragged in at once: each under its own name
   await page.goto(`${url}#/add/${pool}`);
-  await page.waitForFunction((n) => document.querySelector('main h1')?.textContent === `往 ${n} 里加目录`, pool);
+  await page.waitForFunction((n) => document.querySelector('main h1')?.textContent === `向 ${n} 添加目录`, pool);
   await dropOn(page, [day3, day4]);
   await page.waitForSelector('#add-dirs');
   seen.two = { dirs: await page.textContent('#add-dirs'), box: await page.textContent('.drop > span'),
-    target: await page.$eval('input[placeholder^="选了目录"]', (i) => [i.value, i.disabled]), inside: await page.$eval('#add-inside', (i) => i.disabled) };
+    target: await page.$eval('input[placeholder^="选择目录后"]', (i) => [i.value, i.disabled]), inside: await page.$eval('#add-inside', (i) => i.disabled) };
   seen.two.plan = await plan();
 
   // the folders inside a "pool" folder, without that level
   await page.goto(`${url}#/add/${pool}`);
-  await page.waitForFunction((n) => document.querySelector('main h1')?.textContent === `往 ${n} 里加目录`, pool);
+  await page.waitForFunction((n) => document.querySelector('main h1')?.textContent === `向 ${n} 添加目录`, pool);
   await page.setInputFiles('input[type=file]', parent);
   await page.waitForSelector('button:has-text("算哈希")');
-  seen.inside = { target: await page.inputValue('input[placeholder^="选了目录"]'), label: await page.textContent('label:has(#add-inside)') };
+  seen.inside = { target: await page.inputValue('input[placeholder^="选择目录后"]'), label: await page.textContent('label:has(#add-inside)') };
   await page.check('#add-inside');
   await page.waitForSelector('#add-dirs');
   seen.inside.dirs = await page.textContent('#add-dirs');
-  seen.inside.targetAfter = await page.$eval('input[placeholder^="选了目录"]', (i) => [i.value, i.disabled]);
+  seen.inside.targetAfter = await page.$eval('input[placeholder^="选择目录后"]', (i) => [i.value, i.disabled]);
   await page.screenshot({ path: `${out}/folders-inside.png`, fullPage: true });
   seen.inside.plan = await plan();
 
   // a file right in the "pool" folder has no folder to go to
   await page.goto(`${url}#/add/${pool}`);
-  await page.waitForFunction((n) => document.querySelector('main h1')?.textContent === `往 ${n} 里加目录`, pool);
+  await page.waitForFunction((n) => document.querySelector('main h1')?.textContent === `向 ${n} 添加目录`, pool);
   await page.setInputFiles('input[type=file]', loose);
   await page.waitForSelector('button:has-text("算哈希")');
   await page.check('#add-inside');
@@ -81,7 +81,7 @@ const { dropOn } = require('./drop.cjs');
   await page.waitForSelector('#version-shape');
   seen.wholeParent = await page.textContent('#version-shape');
   await dropOn(page, [day3, day4]);
-  await page.waitForFunction(() => document.querySelector('#version-shape')?.textContent.startsWith('这 2 个目录'));
+  await page.waitForFunction(() => document.querySelector('#version-shape')?.textContent.startsWith('新版本的内容为这 2 个目录'));
   seen.wholeTwo = await page.textContent('#version-shape');
   await page.screenshot({ path: `${out}/folders-whole.png`, fullPage: true });
 

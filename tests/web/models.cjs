@@ -45,7 +45,7 @@ const { chromium } = require('playwright');
     await h1(model);
     await page.check('table tr:nth-child(2) input[type=checkbox]');
     await page.check('table tr:nth-child(3) input[type=checkbox]');
-    await page.click('button:has-text("比较选中的两个")');
+    await page.click('button:has-text("比较所选的两份报告")');
     await h1('比较评估');
     seen.compare = await page.$$eval('table tr td:first-child', (tds) => tds.map((t) => t.textContent));
     await page.screenshot({ path: `${out}/eval-compare.png` });

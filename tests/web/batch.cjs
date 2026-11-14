@@ -66,10 +66,10 @@ const { dropOn } = require('./drop.cjs');
   await algo.waitForFunction(() => document.querySelector('#batch-status')?.textContent === '已退回');
 
   await field.reload();
-  await field.waitForSelector('a:has-text("上传新的一版")');
+  await field.waitForSelector('a:has-text("上传新版次")');
   seen.rejected = await field.textContent('main');
   seen.prelabel = await field.locator('#prelabel-go').count();  // the owner may have a rejected batch pre-labelled
-  await field.click('a:has-text("上传新的一版")');
+  await field.click('a:has-text("上传新版次")');
   await field.waitForSelector('#labeler');
   await dropOn(field, [fixed], { asFiles: true });  // a file, not a folder, is refused in the box itself
   seen.droppedFile = await field.textContent('.drop > span.bad');

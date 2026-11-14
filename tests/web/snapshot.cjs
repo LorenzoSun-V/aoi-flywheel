@@ -19,7 +19,8 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/v/${encodeURIComponent(name)}/1`);
   await page.waitForSelector('.folders');
   seen.top = await folders();
-  seen.note = await page.textContent('main p.muted');
+  await page.click('main h1 button.info');  // the layout is told behind the ⓘ of the title
+  seen.note = await page.textContent('#tip');
   await page.screenshot({ path: `${out}/snapshot.png` });
   await page.click('.folders a:has-text("train") >> nth=-1');
   await page.waitForFunction(() => document.querySelector('h1').textContent.endsWith('· train'));

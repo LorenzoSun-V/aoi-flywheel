@@ -22,7 +22,7 @@ const { chromium } = require('playwright');
   await page.fill('#dataset-name', name);
   await page.selectOption('#site', 'SES');
   await page.selectOption('#line', 'TX');
-  await page.click('button:has-text("建好后上传")');
+  await page.click('button:has-text("创建并上传")');
   await page.waitForFunction((n) => document.querySelector('h1') && document.querySelector('h1').textContent === `上传到 ${n}`, name);
 
   await page.setInputFiles('input[type=file]', first);
@@ -34,7 +34,7 @@ const { chromium } = require('playwright');
     await page.screenshot({ path: `${out}/upload-failed.png`, fullPage: true });
     throw e;
   });
-  await page.fill('input[placeholder^="这批数据"]', '第一批');
+  await page.fill('input[placeholder^="数据说明"]', '第一批');
   await page.click('button:has-text("算哈希")');
   await page.waitForSelector('button:has-text("上传并建")');
   seen.plan = await page.textContent('main > div:last-child');
