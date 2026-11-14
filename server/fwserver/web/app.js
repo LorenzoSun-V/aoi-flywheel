@@ -343,8 +343,14 @@ function field(name, control, more = null) {
 }
 
 // A check box with what it does, and an ⓘ when there is more to say (such as the matching fw option).
+let checkWords = 0;
 function checkRow(box, text, more = null) {
-  return el('label', { class: 'check' }, box, el('span', {}, text), more ? info(more, typeof text === 'string' ? `${text}的说明` : '说明') : null);
+  const words = el('span', {}, text);
+  if (more) {  // the mark sits in the label too: name the box by its words alone, not by the mark's label
+    words.id = `check-words-${++checkWords}`;
+    box.setAttribute('aria-labelledby', words.id);
+  }
+  return el('label', { class: 'check' }, box, words, more ? info(more, `${words.textContent}的说明`) : null);
 }
 
 // --- pages ------------------------------------------------------------------------------------------------

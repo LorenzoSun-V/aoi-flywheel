@@ -619,6 +619,10 @@ def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, t
     assert seen['escaped'] is None and seen['secondClick'] is None and seen['elsewhere'] is None
     assert 'fw dataset add' in seen['focused'] and seen['blurred'] is None
     assert seen['box'] == {'ticked': False, 'text': seen['box']['text']} and '20261103/' in seen['box']['text']
+    assert not [x for x in seen['controls'] if '的说明' in x], seen['controls']  # the mark does not join their names
+    assert '- checkbox "替换已有目录"' in seen['controls'], seen['controls']
+    assert '- checkbox "仅添加所选目录下的子目录"' in seen['controls'], seen['controls']
+    assert any(x.startswith('- textbox "池中目录"') for x in seen['controls']), seen['controls']
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

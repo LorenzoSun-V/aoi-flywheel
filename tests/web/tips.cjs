@@ -70,6 +70,9 @@ const LONG = 60;  // a grey line longer than this on a page is a hint that belon
     await page.click('label:has(#add-inside) button.info');
     seen.box = { ticked: await page.isChecked('#add-inside'), text: await tipText() };
     await page.screenshot({ path: `${out}/tips-check.png` });
+    // a mark is not part of the name a screen reader gives its field or box
+    seen.controls = (await page.locator('main').ariaSnapshot()).split('\n').map((x) => x.trim())
+      .filter((x) => /^- (checkbox|textbox)/.test(x));
   } catch (e) {
     await page.screenshot({ path: `${out}/tips-failed.png`, fullPage: true }).catch(() => {});
     throw new Error(`${e.message}\npage: ${await page.textContent('main').catch(() => '')}`);
