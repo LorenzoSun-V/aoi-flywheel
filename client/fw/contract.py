@@ -267,8 +267,9 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
 #   6  the register of sites and lines (fw site ..., /sites); lists narrowed by site, line and text
 #   7  /sites also says what the lists of datasets show on a line, a site and in all (snapshots, listed, unplaced)
 #   8  /trainsets?source=<pool>: the snapshots that took data from that pool
+#   9  /models?trainset=<snapshot>: the models trained on that snapshot
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 8
+API_LEVEL = 9
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 

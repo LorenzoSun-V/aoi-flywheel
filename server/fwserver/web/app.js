@@ -1670,6 +1670,7 @@ async function submitForms(mv) {
 // hashed, uploaded and registered with the snapshot it was trained on, the same requests fw model register sends.
 // The platform runs only the ONNX (through TensorRT); weights are kept with the version and never loaded.
 // trainset=<snapshot>@<version>: the snapshot (from its page); model=<name>: the model (from its page).
+const NEW_MODEL = '+';  // the model select's value for a new model: no model name starts with +
 async function modelRegisterPage(query) {
   const show = live();
   if (!can('models.write')) throw new Error('当前账号不能登记模型版本，请联系管理员或算法工程师。');
@@ -1690,11 +1691,17 @@ async function modelRegisterPage(query) {
   }
 
   // the snapshot it was trained on: a snapshot and one of its versions
-  const tsName = el('select', { id: 'mv-trainset', 'aria-label': '训练集快照' }, snapshots.map((d) => el('option', { value: d.name }, d.name)));
+  const tsName = el('select', { id: 'mv-trainset', 'aria-label': '训练集快照' }, el('option', { value: '' }, '请选择训练集快照'),
+    snapshots.map((d) => el('option', { value: d.name }, d.name)));
   const tsVersion = el('select', { id: 'mv-trainset-version', 'aria-label': '快照版本' });
   const versionsOf = new Map();
   const fillVersions = async (number) => {
     const chosen = tsName.value;
+    tsVersion.disabled = !chosen;
+    if (!chosen) {
+      tsVersion.replaceChildren(el('option', { value: '' }, '请先选择训练集快照'));
+      return;
+    }
     if (!versionsOf.has(chosen)) versionsOf.set(chosen, api.versions(chosen));
     const list = (await versionsOf.get(chosen)).slice().reverse();
     if (tsName.value !== chosen) return;
@@ -1703,23 +1710,27 @@ async function modelRegisterPage(query) {
     tsVersion.value = String((hit || list[0]).number);
   };
   // the model: one of those there are, or a new one (of a registered site and line)
-  const model = el('select', { id: 'mv-model', 'aria-label': '模型' }, models.map((m) => el('option', { value: m.name }, `${m.name}（${m.site} / ${m.line}）`)),
-    el('option', { value: '' }, '新建模型…'));
+  const model = el('select', { id: 'mv-model', 'aria-label': '模型' }, el('option', { value: '' }, '请选择模型'),
+    models.map((m) => el('option', { value: m.name }, `${m.name}（${m.site} / ${m.line}）`)), el('option', { value: NEW_MODEL }, '新建模型…'));
   const newName = el('input', { id: 'mv-new-name', type: 'text', placeholder: '例如 SES-TX-detr' });
   const { site, line } = placePicker(tree, { site: '', line: '' });
   const newRows = [field('模型名称', newName, '名称只能使用字母、数字和 . _ -，建立后不能修改。同一产线可以有多个模型，例如不同的网络结构。'),
     el('label', {}, '现场', site), el('label', {}, '产线', line)];
-  const place = async () => {  // a new model defaults to the line of the snapshot's first source
+  const poolOf = async () => {  // the pool of the chosen snapshot's first source
+    if (!tsName.value) return null;
     const t = await api.trainset(tsName.value, tsVersion.value || 'latest');
     const first = splitRef(t.trainset.sources[0]);
-    const pool = first && all.find((d) => same(d.name, first.name));
-    if (!pool || !pool.site) return;
+    return (first && all.find((d) => same(d.name, first.name) && d.site)) || null;
+  };
+  const place = async () => {  // a new model defaults to the line of the snapshot's first source
+    const pool = await poolOf();
+    if (!pool) return;
     const s = [...site.options].find((o) => same(o.value, pool.site));
     if (s) { site.value = s.value; site.dispatchEvent(new Event('change')); }
     const l = [...line.options].find((o) => same(o.value, pool.line));
     if (l) line.value = l.value;
   };
-  const shape = () => { for (const r of newRows) r.hidden = model.value !== ''; };
+  const shape = () => { for (const r of newRows) r.hidden = model.value !== NEW_MODEL; };
 
   const onnx = el('input', { id: 'mv-onnx', type: 'file', accept: '.onnx' });
   const metrics = el('input', { id: 'mv-metrics', type: 'file', accept: '.json,application/json' });
@@ -1757,9 +1768,11 @@ async function modelRegisterPage(query) {
     go.disabled = true;
     result.replaceChildren();  // an error left from the last try is not this one's
     try {
+      if (!tsName.value || !tsVersion.value) throw new Error('请选择训练所用的训练集快照及其版本。');
+      if (!model.value) throw new Error('请选择模型；登记新模型时请选择「新建模型…」。');
+      const name = model.value === NEW_MODEL ? newName.value.trim() : model.value;
+      if (!name) throw new Error('请填写新模型的名称。');
       const items = await files();
-      const name = model.value || newName.value.trim();
-      if (!name) throw new Error('请选择模型，或填写新模型的名称。');
       if (repo.value.trim() && !commit.value.trim()) throw new Error('填写了训练代码仓库时，请同时填写提交号。');
       const t = await api.trainset(tsName.value, tsVersion.value);
       result.replaceChildren(progress);
@@ -1777,7 +1790,7 @@ async function modelRegisterPage(query) {
         sent += size;
       }
       progress.set(1, 1, '登记…');
-      if (!model.value) {  // made once: a retry after a refused version registers on it, not a second new model
+      if (model.value === NEW_MODEL) {  // made once: a retry after a refused version registers on it, not a second new model
         const m = await api.createModel({ name, site: site.value, line: line.value, task: 'det', note: '' });
         model.insertBefore(el('option', { value: m.name }, `${m.name}（${m.site} / ${m.line}）`), model.lastElementChild);
         model.value = m.name;
@@ -1792,32 +1805,32 @@ async function modelRegisterPage(query) {
     } finally { go.disabled = false; }
   });
 
-  // defaults: the snapshot asked for, else the model's latest one's; the model asked for, else the one that was
-  // trained on this snapshot before, else the only one on its line, else a new one
-  let tsDefault = want;
-  if (!tsDefault && askedModel && askedModel.latest) {
-    tsDefault = splitRef((await api.modelVersion(askedModel.name, 'latest')).trainset.ref);
-  }
-  const hit = tsDefault && snapshots.find((d) => same(d.name, tsDefault.name));
+  // defaults, never a guess: a version registered on the wrong snapshot cannot be re-pointed. The snapshot only
+  // from trainset= (its version page); the model from model=, else the one model trained on the chosen snapshot
+  // before, else a new one when the snapshot's line has no model yet; otherwise both are chosen by hand.
+  const hit = want && snapshots.find((d) => same(d.name, want.name));
   if (want && !hit) throw new Error(`${want.name} 不是训练集快照。模型版本须引用训练所用的训练集快照。`);
   if (hit) tsName.value = hit.name;
-  await fillVersions(hit ? tsDefault.number : 'latest');
+  await fillVersions(hit ? want.number : 'latest');
+  let picked = !!askedModel;  // a model chosen by the link or by hand stays when the snapshot changes
   if (askedModel) model.value = askedModel.name;
-  else {
-    const t = await api.trainset(tsName.value, tsVersion.value);
-    const first = splitRef(t.trainset.sources[0]);
-    const pool = first && all.find((d) => same(d.name, first.name));
-    const near = pool ? models.filter((m) => same(m.site, pool.site) && same(m.line, pool.line)) : [];
-    let pick = '';
-    for (const m of near.filter((x) => x.latest).slice(0, 10)) {
-      if (same(splitRef((await api.modelVersion(m.name, 'latest')).trainset.ref).name, tsName.value)) { pick = m.name; break; }
-    }
-    model.value = pick || (near.length === 1 ? near[0].name : '');
-  }
-  if (!model.value) await place();
-  shape();
-  tsName.addEventListener('change', () => { fillVersions('latest').then(() => (model.value ? null : place())).catch((e) => result.replaceChildren(errorBox(e))); });
-  model.addEventListener('change', () => { shape(); if (!model.value) place().catch(() => {}); });
+  const propose = async () => {
+    const chosen = tsName.value;
+    if (picked || !chosen) return;
+    const [trained, pool] = await Promise.all([api.models({ trainset: chosen }), poolOf()]);
+    if (picked || tsName.value !== chosen) return;
+    const onLine = pool ? models.filter((m) => same(m.site, pool.site) && same(m.line, pool.line)) : [];
+    const known = trained.length === 1 && [...model.options].find((o) => same(o.value, trained[0].name));
+    model.value = known ? known.value : pool && !onLine.length ? NEW_MODEL : '';
+  };
+  const chose = async () => {
+    await propose();
+    shape();
+    if (model.value === NEW_MODEL) await place();
+  };
+  await chose();
+  tsName.addEventListener('change', () => { fillVersions('latest').then(chose).catch((e) => result.replaceChildren(errorBox(e))); });
+  model.addEventListener('change', () => { picked = true; chose().catch((e) => result.replaceChildren(errorBox(e))); });
 
   show(head, el('div', { class: 'panel form', id: 'mv-form' },
     el('div', { class: 'label' }, el('span', { class: 'name' }, '训练集快照', info('训练所用的训练集快照版本，即训练前 fw get 取回的版本。模型的类别表取自该快照。', '训练集快照的说明')),

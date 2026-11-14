@@ -665,18 +665,20 @@ def test_a_model_version_is_registered_from_the_browser(service, tokens, api, tm
     src = pool(api, tmp_path, files, site='WEB', line=line)
     snap = f'{src}-det'
     make(api, snap, [f'{src}@1'], CLASSES)
+    other = f'{src}-b'
+    make(api, other, [f'{src}@1'], CLASSES)                                    # no model is trained on this one
     run = write_tree(tmp_path / 'run', {'best.onnx': onnx_bytes(f'web {seed}'), 'best.pt': b'PK\x03\x04 weights',
                                         'metrics.json': json.dumps({'mAP50': 0.91}).encode(),
                                         'external.onnx': onnx_model(ld(5, tensor('w', EXTERNAL)))})
     name = f'WEB-{line}-detr'
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(['node', str(WEB_TESTS / 'register.cjs'), service.url + '/', tokens['algo'], tokens['field'], snap, name,
-                        str(run), str(shots)], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    r = subprocess.run(['node', str(WEB_TESTS / 'register.cjs'), service.url + '/', tokens['algo'], tokens['field'], snap, other,
+                        name, str(run), str(shots)], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
-    assert seen['first'] == {'trainset': f'{snap}@1', 'model': '', 'newShown': True, 'place': f'WEB/{line}'}
+    assert seen['first'] == {'trainset': f'{snap}@1', 'model': '+', 'newShown': True, 'place': f'WEB/{line}'}  # no model on the line
     assert '不是 ONNX 文件' in seen['notOnnx']
     assert 'external data' in seen['external'] and seen['afterRefusal'] == name
     assert seen['sent'] is None and seen['page']['hash'] == f'#/mv/{name}/1' and seen['page']['title'].startswith(f'{name}@1')
@@ -687,10 +689,13 @@ def test_a_model_version_is_registered_from_the_browser(service, tokens, api, tm
     mv = api.model_version(name, 1)
     assert mv['trainset']['ref'] == f'{snap}@1' and mv['code_commit'] == 'a' * 40 and mv['note'] == '网页登记'
     assert mv['metrics'] == {'mAP50': 0.91} and api.model_versions(name)[-1]['number'] == 1
-    assert seen['again'] == {'trainset': f'{snap}@1', 'model': name, 'newShown': False, 'place': seen['again']['place']}
+    # no snapshot unless the link names one: a version on the wrong snapshot cannot be re-pointed
+    assert (seen['again']['trainset'], seen['again']['model']) == ('@', name) and '请选择训练所用的训练集快照' in seen['noSnapshot']
+    assert seen['models'] == '#/model-register' and (seen['bare']['trainset'], seen['bare']['model']) == ('@', '')
+    assert (seen['other']['trainset'], seen['other']['model']) == (f'{other}@1', '')   # not the line's only model
+    assert (seen['picked']['trainset'], seen['picked']['model']) == (f'{snap}@1', name)  # the model trained on it
     assert seen['againSent'] is None and f'已登记为 {name}@1' in seen['toast'] and seen['againHash'] == f'#/mv/{name}/1'
     assert len(api.model_versions(name)) == 1                                  # the same ONNX: no second version
-    assert seen['models'] == '#/model-register'
     assert seen['fieldButtons'] == 0 and '不能登记模型版本' in seen['fieldPage']
 
 

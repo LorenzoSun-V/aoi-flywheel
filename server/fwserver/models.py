@@ -242,9 +242,14 @@ def _model(r: dict) -> dict:
             'latest': f'{r["name"]}@{r["latest"]}' if r['latest'] is not None else None}
 
 
-def list_models(conn, site: str = '', line: str = '', q: str = '') -> List[dict]:
-    """site, line: only the models of that site or line; q: text in the name."""
+def list_models(conn, site: str = '', line: str = '', q: str = '', trainset: str = '') -> List[dict]:
+    """site, line: only the models of that site or line; q: text in the name; trainset: only the models a version
+    of which was trained on a version of the snapshot of that name."""
     where, args = datasets.where_place(site, line, q, 'm')
+    if trainset:
+        where.append('EXISTS (SELECT 1 FROM model_versions mv JOIN versions tv ON tv.id = mv.trainset_id '
+                     'JOIN datasets td ON td.id = tv.dataset_id WHERE mv.model_id = m.id AND lower(td.name) = lower(%s))')
+        args.append(trainset)
     return [_model(r) for r in conn.execute(_MODEL + (' WHERE ' + ' AND '.join(where) if where else '')
                                             + ' ORDER BY lower(m.name)', args).fetchall()]
 
