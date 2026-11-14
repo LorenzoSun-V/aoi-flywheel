@@ -95,6 +95,28 @@ def yolo_line(cid, x1=10, y1=20, x2=50, y2=60, w=W, h=H) -> str:
 
 
 # --- the split itself (no database) -------------------------------------------------------------------
+def test_snapshots_are_listed_by_the_pool_they_took_data_from(api, make_api, tmp_path):
+    """/trainsets?source=<pool>: the snapshots any version of which took data from that pool (the web continues
+    the newest of them when a snapshot is built from the pool)."""
+    a = pool(api, tmp_path / 'a', sample_files('2026-09', 3))
+    b = pool(api, tmp_path / 'b', sample_files('2026-10', 3))  # another folder: the two can go into one snapshot
+    only_a = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{a}@1'])['dataset']
+    only_b = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{b}@1'])['dataset']
+    later = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{b}@1'])['dataset']
+    make(api, later, [f'{b}@1', f'{a}@1'])                       # its second version took data from a as well
+
+    def names(rows):
+        return sorted(r['name'] for r in rows)
+    assert names(api.get('/trainsets', source=a)) == sorted([only_a, later])
+    assert names(api.get('/trainsets', source=b.lower())) == sorted([only_b, later])  # names are not case-sensitive
+    assert names(api.get('/trainsets', source=a, q=later[2:])) == [later]
+    assert api.get('/trainsets', source=f'P-{uuid.uuid4().hex[:8]}') == []        # no such pool: none, not an error
+    assert api.get('/trainsets', source=only_a) == []                              # a snapshot is no pool
+    with pytest.raises(ApiError) as e:
+        make_api('worker').get('/trainsets', source=a)
+    assert e.value.status == 403
+
+
 def test_cut_is_fixed_by_keys_ratio_and_seed():
     keys = [f'SES/TX/{i}.png' for i in range(1000)]
     a = trainsets._cut(keys, 0.2, 0)

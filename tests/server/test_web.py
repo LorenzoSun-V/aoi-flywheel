@@ -592,6 +592,66 @@ def test_a_pool_is_filled_from_folders_the_way_they_were_collected(service, toke
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, api, tmp_path):
+    """The web builds a snapshot the way fw trainset create does: from a pool version, refusing a class outside
+    the table, then the next version from the pool's next version, on the first one's split and classes."""
+    from test_trainsets import add_version
+    seed = int.from_bytes(os.urandom(2), 'big')
+    first = {}
+    for i in range(10):
+        first[f'A/img{i}.png'] = real_png(200, 100, seed + i)
+        first[f'A/img{i}.json'] = label('scratch' if i % 2 else 'dent')
+    first['A/neg0.png'] = real_png(200, 100, seed + 20)
+    first['A/neg1.png'] = real_png(200, 100, seed + 21)
+    older = pool(api, tmp_path / 'older', {'A/old.png': real_png(200, 100, seed + 40)}, name=f'0{os.urandom(3).hex()}')
+    name = pool(api, tmp_path, first)  # the line's newest pool, though not the first by name
+    both = dict(first, **{f'B/b{i}.png': real_png(200, 100, seed + 30 + i) for i in range(3)},
+                **{f'B/b{i}.json': label('scratch') for i in range(3)})
+    add_version(api, tmp_path, name, both)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'trainset.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, str(shots)],
+                       capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    snap = f'{name}-det'
+    assert seen['overview'] == '#/trainset-new?site=SES&line=TX'
+    assert seen['first'] == {'name': snap, 'mode': f'将建立 {snap}@1', 'sources': [f'{name}@1'], 'classes': '',
+                             'val': '0.2', 'test': '0.1', 'newTo': None}
+    assert "'dent' 不在类别表里" in seen['missing']['error'] and seen['missing']['create'] == 0  # refused, nothing to make
+    assert seen['cleared'] == 0
+    counts = {row[0]: row[1:] for row in seen['preview']['counts'][1:]}
+    assert [sum(map(int, counts['图片'])), sum(map(int, counts['其中无标注框']))] == [12, 2]
+    assert counts['0 scratch（框）'] and counts['1 dent（框）']
+    assert seen['preview']['create'] == f'建立 {snap}@1' and '12 个样本' in seen['preview']['total']
+    assert seen['made']['command'] == f'fw get {snap}@1 --to {snap}@1'
+    assert '0 scratch、1 dent' in seen['made']['info'] and f'{name}@1' in seen['made']['info']
+    assert '按比例划分（val 20%，test 10%，随机种子 0）' in seen['made']['info']
+    assert seen['made']['next'] == f'#/trainset-new?name={snap}'
+    assert '复制' in seen['copied']                                          # copied, or selected for Ctrl+C
+    one = api.trainset(snap, 1)['trainset']
+    assert one['classes'] == ['scratch', 'dent'] and one['sources'] == [f'{name}@1'] and one['based_on'] is None
+    assert (one['rule']['val'], one['rule']['test']) == (0.2, 0.1)
+    assert [one['counts'][s]['samples'] for s in ('train', 'val', 'test')] == [9, 2, 1]  # 7:2:1 of the 10 labelled, the 2 bare cut apart
+
+    assert seen['second'] == {'name': snap, 'mode': f'将接着 {snap}@1 的划分建立 {snap}@2', 'sources': [f'{name}@2'],
+                              'classes': 'scratch\ndent', 'val': '0.2', 'test': '0.1', 'newTo': 'test'}
+    assert '新增 3 个样本' in seen['secondPreview']['changes'] and seen['secondPreview']['create'] == f'建立 {snap}@2'
+    two = api.trainset(snap, 2)['trainset']
+    assert two['based_on'] == f'{snap}@1' and two['sources'] == [f'{name}@2']
+    assert two['counts']['test']['samples'] == one['counts']['test']['samples'] + 3  # new samples go to test
+    assert f'接着 {snap}@1' in seen['secondMade']
+    assert seen['next']['mode'] == f'将接着 {snap}@2 的划分建立 {snap}@3' and seen['next']['sources'] == [f'{name}@latest']
+    assert seen['line']['sources'] == [f'{name}@latest'] and seen['line']['name'] == snap and older < name
+    # previewed as the next version of the name typed, on its classes: the same as its @2, so nothing to build
+    assert seen['typed']['mode'] == f'将接着 {snap}@2 的划分建立 {snap}@3' and seen['typed']['classes'] == 'scratch\ndent'
+    assert f'和 {snap}@2 完全一样' in seen['typed']['error'] and seen['typed']['create'] == ''
+    assert '已经是一个数据集的名称' in seen['taken']
+    assert seen['fieldButtons'] == 0 and '不能建立训练集快照' in seen['fieldPage']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, tmp_path):
     """No page carries long grey hints; they are behind an ⓘ, which shows its text while pointed at or focused,
     keeps it after a click until Esc, a second click or a click elsewhere, and never ticks the box it sits by."""
@@ -610,7 +670,8 @@ def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, t
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert seen['long'] == {}                                                  # no long hint left on any page
-    for hash in ('#/', f'#/add/{name}', f'#/upload/{name}', f'#/remove/{name}', '#/dataset-new', '#/places', '#/batches',
+    for hash in ('#/', f'#/add/{name}', f'#/upload/{name}', f'#/remove/{name}', '#/dataset-new', f'#/trainset-new?from={name}@1',
+                 '#/places', '#/batches',
                  '#/batch-new', '#/predictions', '#/events', '#/me', '#/users'):
         assert seen['marks'][hash] >= 1, hash
     assert 'fw dataset add' in seen['hovered'] and seen['label'] == '上传新增目录说明'

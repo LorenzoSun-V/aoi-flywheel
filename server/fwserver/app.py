@@ -849,9 +849,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- training-set snapshots ------------------------------------------------------------------
     @app.get('/api/v1/trainsets')
-    def list_trainsets(site: str = '', line: str = '', q: str = '', user: dict = Depends(data_reader)):
+    def list_trainsets(site: str = '', line: str = '', q: str = '', source: str = '', user: dict = Depends(data_reader)):
         with conn() as c:
-            return trainsets.list_trainsets(c, site, line, q)
+            return trainsets.list_trainsets(c, site, line, q, source)
 
     @app.post('/api/v1/trainsets/{name}/preview')
     def preview_trainset(name: str, body: TrainsetBody, user: dict = Depends(data_user)):

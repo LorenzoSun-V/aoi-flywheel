@@ -799,6 +799,7 @@ def layout(conn, name: str, number: str) -> dict:
             'problems': problems[:EXAMPLES], 'problem_count': len(problems)}
 
 
-def list_trainsets(conn, site: str = '', line: str = '', q: str = '') -> List[dict]:
-    """site, line: the snapshots that took data from that site or line; q: text in the name."""
-    return datasets.list_datasets(conn, site, line, q, kind='trainset')
+def list_trainsets(conn, site: str = '', line: str = '', q: str = '', source: str = '') -> List[dict]:
+    """site, line: the snapshots that took data from that site or line; q: text in the name; source: the
+    snapshots that took data from that pool (in any of their versions)."""
+    return datasets.list_datasets(conn, site, line, q, kind='trainset', source=source)
