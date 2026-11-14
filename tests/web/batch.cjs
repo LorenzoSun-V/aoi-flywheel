@@ -6,20 +6,20 @@ const { chromium } = require('playwright');
 
 // Drops a folder of this machine on the page's folder box, the way a browser hands a dragged folder over
 // (FileSystemDirectoryEntry), or (asFolder false) drops the folder's first file only.
-async function dropOn(page, folder, asFolder) {
+async function dropOn(page, folder, asFolder, slow = 0) {
   const fs = require('fs');
   const path = require('path');
   const walk = (dir, rel) => fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))
     .flatMap((d) => (d.isDirectory() ? walk(path.join(dir, d.name), `${rel}/${d.name}`)
       : [[`${rel}/${d.name}`, fs.readFileSync(path.join(dir, d.name)).toString('base64')]]));
   const top = `/${path.basename(folder)}`;
-  await page.$eval('.drop', (box, [top, files, asFolder]) => {
+  await page.$eval('.drop', (box, [top, files, asFolder, slow]) => {
     const dirs = new Map();
     const dir = (fullPath) => {
       if (!dirs.has(fullPath)) {
         const kids = [];
         dirs.set(fullPath, { isDirectory: true, isFile: false, name: fullPath.slice(fullPath.lastIndexOf('/') + 1), fullPath, kids,
-          createReader() { let given = false; return { readEntries(ok) { setTimeout(() => { ok(given ? [] : kids); given = true; }); } }; } });
+          createReader() { let given = false; return { readEntries(ok) { setTimeout(() => { ok(given ? [] : kids); given = true; }, slow); } }; } });
         const up = fullPath.slice(0, fullPath.lastIndexOf('/'));
         if (up) dir(up).kids.push(dirs.get(fullPath));
       }
@@ -36,7 +36,7 @@ async function dropOn(page, folder, asFolder) {
     const entry = asFolder ? dir(top) : leaves[0];
     Object.defineProperty(ev, 'dataTransfer', { value: { types: ['Files'], items: [{ kind: 'file', webkitGetAsEntry: () => entry }] } });
     box.dispatchEvent(ev);
-  }, [top, walk(folder, top), asFolder]);
+  }, [top, walk(folder, top), asFolder, slow]);
 }
 
 (async () => {
@@ -106,8 +106,10 @@ async function dropOn(page, folder, asFolder) {
   await field.waitForSelector('#labeler');
   await dropOn(field, fixed, false);  // a file, not a folder, is refused in the box itself
   seen.droppedFile = await field.textContent('.drop > span.bad');
-  await dropOn(field, fixed, true);   // the fixed folder is dragged in instead of chosen
+  await dropOn(field, folder, true, 400);  // a slow first drag, then the fixed folder: the first one, done last, is not used
+  await dropOn(field, fixed, true);
   await field.waitForSelector('#send-folder');
+  await field.waitForTimeout(1200);
   seen.dropped = await field.textContent('.drop > span');
   await field.fill('#labeler', '李四');
   seen.sameReviewer = await field.inputValue('#reviewer');

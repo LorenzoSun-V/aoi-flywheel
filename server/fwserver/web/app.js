@@ -1409,16 +1409,17 @@ export async function readDropped(dir) {
 // folder holds. The box's files / paths / folder hold what was given; a 'change' event says new ones came.
 function folderInput() {
   const input = el('input', { type: 'file', webkitdirectory: true, multiple: true });
-  const status = el('span', { class: 'muted' }, '或者把目录拖到这里');
-  const box = el('div', { class: 'drop' }, el('label', { class: 'button choose' }, icon('folder'), '选择目录', input), status);
+  const status = el('span', {}, '把目录拖到这里');
+  const box = el('div', { class: 'drop' }, icon('folder'), status, el('label', { class: 'choose' }, '或者选择目录', input));
   let disabled = false;
   let shown = status.textContent;
-  const say = (text, cls = 'muted') => { status.textContent = text; status.className = cls; };
-  const reading = () => { shown = status.textContent; box.classList.add('reading'); say('正在读取目录…'); };
+  let reads = 0;  // each choice or drop starts a new read; an older one that finishes later is dropped
+  const say = (text, cls = '') => { status.textContent = text; status.className = cls; };
+  const reading = () => { shown = status.textContent; box.classList.add('reading'); say('正在读取目录…'); return ++reads; };
   const pick = (files, paths, folder) => {
     Object.assign(box, { files, paths, folder });
     box.classList.remove('reading');
-    say(files.length ? `${folder}/ · ${files.length} 个文件` : `${folder}/ 是空的`, files.length ? '' : 'bad');
+    say(files.length ? `${folder}/ · ${files.length} 个文件` : `${folder}/ 是空的`, files.length ? 'got' : 'bad');
   };
   Object.assign(box, { files: [], paths: [], folder: '' });
   Object.defineProperty(box, 'disabled', {
@@ -1428,6 +1429,7 @@ function folderInput() {
   input.addEventListener('click', reading);
   input.addEventListener('cancel', () => { box.classList.remove('reading'); say(shown); });
   input.addEventListener('change', () => {  // then the event goes on up to the box, where the page listens
+    reads++;
     const files = [...input.files];
     pick(files, relPaths(files), files.length ? (files[0].webkitRelativePath || '').split('/')[0] : '');
   });
@@ -1446,11 +1448,16 @@ function folderInput() {
       say('拖进来的要是一个目录：不是文件，也不是几个目录一起', 'bad');
       return;
     }
-    reading();
+    const mine = reading();
     readDropped(entries[0]).then(({ folder, files, paths }) => {
+      if (mine !== reads) return;
       pick(files, paths, folder);
       box.dispatchEvent(new Event('change'));
-    }).catch((e) => { box.classList.remove('reading'); say(`读不了这个目录：${e.message}`, 'bad'); });
+    }).catch((e) => {
+      if (mine !== reads) return;
+      box.classList.remove('reading');
+      say(`读不了这个目录：${e.message}`, 'bad');
+    });
   });
   return box;
 }
