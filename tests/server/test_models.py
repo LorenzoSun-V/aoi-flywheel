@@ -59,6 +59,31 @@ def register(api, model, snapshot, run, **kw):
                               files=[run / 'best.pt'], echo=quiet, **kw)
 
 
+def test_models_are_listed_by_the_snapshot_they_were_trained_on(api, make_api, snapshot, tmp_path):
+    """/models?trainset=<snapshot>: the models a version of which was trained on a version of that snapshot (the
+    web proposes the model to register on only when exactly one was)."""
+    other = make(api, f'T-{uuid.uuid4().hex[:8]}', api.trainset(snapshot['dataset'], 1)['trainset']['sources'], test_dirs=['2026-10'])
+    a, b, c = (f'M-{uuid.uuid4().hex[:8]}' for _ in range(3))
+    for m in (a, b, c):
+        api.create_model(m, 'SES', 'TX', 'det', '')
+    register(api, a, snapshot, files_in(tmp_path, f'by-ts-a-{uuid.uuid4().hex}'))
+    register(api, b, other, files_in(tmp_path, f'by-ts-b-{uuid.uuid4().hex}'))
+    register(api, c, other, files_in(tmp_path, f'by-ts-c1-{uuid.uuid4().hex}'))
+    register(api, c, snapshot, files_in(tmp_path, f'by-ts-c2-{uuid.uuid4().hex}'))   # its second version
+
+    def names(rows):
+        return sorted(r['name'] for r in rows)
+    ts = snapshot['dataset']
+    assert names(api.get('/models', trainset=ts)) == sorted([a, c])
+    assert names(api.get('/models', trainset=other['dataset'].lower())) == sorted([b, c])  # names are not case-sensitive
+    assert names(api.get('/models', trainset=ts, q=c)) == [c]
+    assert api.get('/models', trainset=ts, line='TY') == []
+    assert api.get('/models', trainset=f'T-{uuid.uuid4().hex[:8]}') == []          # no such snapshot: none, not an error
+    with pytest.raises(ApiError) as e:
+        make_api('worker').get('/models', trainset=ts)
+    assert e.value.status == 403
+
+
 # --- model versions ------------------------------------------------------------------------------------------
 def test_register_and_get_a_model_version(api, model, snapshot, tmp_path, cache, make_api):
     run = files_in(tmp_path)
@@ -260,6 +285,20 @@ def test_the_server_checks_weights_and_code(api, model, snapshot, tmp_path):
     for body in ({'code_repo': 'https://g/x.git'}, {'code_dirty': True}):
         with pytest.raises(ApiError, match='就要写训练代码的提交号'):
             api.register_model_version(model, dict(base, files=[rows[0]], **body))
+
+
+def test_the_server_refuses_an_onnx_with_external_data_too(api, model, snapshot, tmp_path):
+    # The web registers a model version without fw, so the server makes the check fw makes before sending.
+    from helpers import EXTERNAL, ld, onnx_model, tensor
+    bad = write(tmp_path / 'ext', 'model.onnx', onnx_model(ld(5, tensor('w', EXTERNAL))))
+    rows = ops._send_files(api, [('model.onnx', bad)], 2, quiet)
+    with pytest.raises(ApiError, match='external data'):
+        api.register_model_version(model, {'trainset_id': snapshot['id'], 'files': rows})
+    broken = write(tmp_path / 'broken', 'model.onnx', b'\x08\x07\x12\xff')  # starts like ONNX, does not parse
+    rows = ops._send_files(api, [('model.onnx', broken)], 2, quiet)
+    with pytest.raises(ApiError, match='不完整'):
+        api.register_model_version(model, {'trainset_id': snapshot['id'], 'files': rows})
+    assert api.model_versions(model) == []
 
 
 def test_tags(api, model, snapshot, tmp_path, sql):

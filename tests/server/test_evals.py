@@ -281,14 +281,18 @@ def test_an_engine_that_does_not_load_is_built_again_once(api, gpu, model, snaps
 
 def test_an_onnx_with_external_data_is_never_built(api, gpu, model, snapshot, tmp_path, monkeypatch):  # noqa: F811
     """Review of PR #13 round 4 (P2-2): TensorRT's ONNX parser reads a tensor's external data from the path the
-    model names, on the worker. fw model register refuses such an ONNX, and the worker refuses it again (a
-    model registered some other way) before onnx2engine sees it."""
+    model names, on the worker. fw model register refuses such an ONNX, so does the server (the web sends
+    without fw), and the worker refuses it again (a model registered some other way, or before the server
+    checked) before onnx2engine sees it."""
     from helpers import LOCATION, ld, onnx_model, tensor
     bad = write(tmp_path / 'ext', 'best.onnx', onnx_model(ld(5, tensor('w', LOCATION))))
     with pytest.raises(ops.FwError, match='external data'):
         ops.register_model(api, model, bad, snapshot['ref'], echo=quiet)
     with monkeypatch.context() as m:
         m.setattr('fw.onnx_check.check_self_contained', lambda path: None)
+        with pytest.raises(ApiError, match='external data'):          # past fw, the server refuses it
+            ops.register_model(api, model, bad, snapshot['ref'], echo=quiet)
+        m.setattr('fwserver.models.check_self_contained', lambda path: None)
         mv = ops.register_model(api, model, bad, snapshot['ref'], echo=quiet)
     r = add_runner(gpu)
     job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})

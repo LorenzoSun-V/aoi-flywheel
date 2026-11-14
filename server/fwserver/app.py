@@ -880,9 +880,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
 
     # --- models, evaluations, releases -------------------------------------------------------------
     @app.get('/api/v1/models')
-    def list_models(site: str = '', line: str = '', q: str = '', user: dict = Depends(model_reader)):
+    def list_models(site: str = '', line: str = '', q: str = '', trainset: str = '', user: dict = Depends(model_reader)):
         with conn() as c:
-            return models.list_models(c, site, line, q)
+            return models.list_models(c, site, line, q, trainset)
 
     @app.post('/api/v1/models', status_code=201)
     def create_model(body: ModelBody, user: dict = Depends(model_writer)):

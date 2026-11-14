@@ -9,13 +9,19 @@ const { chromium } = require('playwright');
 (async () => {
   const [url, token, field, pool, out] = process.argv.slice(2);
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const errors = [];
-  page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => { if (m.type() === 'error' && !/40[049]/.test(m.text())) errors.push(m.text()); });  // the refusals asked for below
-  await page.goto(url);
-  await page.evaluate((t) => localStorage.setItem('fw-token', t), token);
-  await page.reload();
+  // a page (and browser context) of its own for each account: a request the page of the last account still makes
+  // goes out as that account, not as the next one
+  const open = async (t) => {
+    const p = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    p.on('pageerror', (e) => errors.push(String(e)));
+    p.on('console', (m) => { if (m.type() === 'error' && !/40[049]/.test(m.text())) errors.push(m.text()); });  // the refusals asked for below
+    await p.goto(url);
+    await p.evaluate((x) => localStorage.setItem('fw-token', x), t);
+    await p.reload();
+    return p;
+  };
+  let page = await open(token);
   const seen = {};
   const snapshot = `${pool}-det`;
   const form = async () => {
@@ -107,9 +113,8 @@ const { chromium } = require('playwright');
     create: await page.$$eval('#ts-create', (x) => x.map((e) => e.textContent).join('')) };
 
   // a field account sees the snapshot but nothing that builds one
-  await page.evaluate((t) => localStorage.setItem('fw-token', t), field);
+  page = await open(field);
   await page.goto(`${url}#/v/${encodeURIComponent(pool)}/1`);
-  await page.reload();
   await page.waitForSelector('main .kv');
   seen.fieldButtons = await page.$$eval('#trainset-from, #trainset-next', (x) => x.length);
   await page.goto(`${url}#/trainset-new?from=${encodeURIComponent(`${pool}@1`)}`);
