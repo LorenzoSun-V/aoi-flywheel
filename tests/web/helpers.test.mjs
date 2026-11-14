@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  shortWhen, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
+  shortWhen, listWhen, sourceText, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
@@ -203,6 +203,27 @@ test('a release is dated without the year when it is this year', () => {
   assert.equal(shortWhen(null, now), '');
 });
 
+test('a list says today, yesterday, a day of this year, or the day of another year', () => {
+  const now = new Date(2026, 10, 14, 9, 30);
+  assert.equal(listWhen(new Date(2026, 10, 14, 0, 5).toISOString(), now), '今天 00:05');
+  assert.equal(listWhen(new Date(2026, 10, 13, 22, 9).toISOString(), now), '昨天 22:09');
+  assert.equal(listWhen(new Date(2026, 10, 12, 17, 25).toISOString(), now), '11月12日 17:25');
+  assert.equal(listWhen(new Date(2026, 0, 1, 8, 0).toISOString(), new Date(2026, 0, 1, 23, 59)), '今天 08:00');
+  assert.equal(listWhen(new Date(2025, 11, 31, 23, 0).toISOString(), new Date(2026, 0, 1, 1, 0)), '昨天 23:00');
+  assert.equal(listWhen(new Date(2025, 5, 2, 8, 0).toISOString(), now), '2025-06-02');
+  assert.equal(listWhen(null, now), '');
+});
+
+test('a source is shown by how the version was made and the names of its folders', () => {
+  assert.equal(sourceText('fw dataset import trainer-01:/data/aoi/pool'), 'fw dataset import · pool');
+  assert.equal(sourceText('fw dataset add pc7:/data/a/20261103、/data/a/20261104/'), 'fw dataset add · 20261103、20261104');
+  assert.equal(sourceText('fw batch upload LAB-PC:C:\\标注\\SES-TX-1104'), 'fw batch upload · SES-TX-1104');
+  assert.equal(sourceText('fw dataset remove trainer-01'), 'fw dataset remove');
+  assert.equal(sourceText('fw trainset create'), 'fw trainset create');
+  assert.equal(sourceText('网页上传新增目录 20261103'), '网页上传新增目录 20261103');
+  assert.equal(sourceText(''), '');
+});
+
 test('a model row shows the version its numbers belong to, and its menu leads to that version and report', () => {
   const e = { id: 7, model_version: { ref: 'SES-TX-detr@12' } };
   const row = modelRow({ name: 'SES-TX-detr', latest: 'SES-TX-detr@13' }, e);
@@ -270,7 +291,7 @@ test('a class table is read as typed or from a classes.txt, and a snapshot is to
   assert.equal(ruleText({ mode: 'continue', val: 0.2, seed: 3, new_to: 'test', test_dirs: ['2026-10'], merge_test: false }),
     '接着上一版的划分；新样本全部进入 test；2026-10 中的新样本进入 test');
   assert.equal(ruleText({ mode: 'continue', val: 0.25, test: 0, seed: 0, new_to: 'trainval', merge_test: true, class_map: { DL1: 'DL', others: '' } }),
-    '接着上一版的划分；新样本按比例划分（val 25%，test 0%，随机种子 0）；上一版 test 中的样本重新划分到 train 和 val；类别映射 DL1→DL、others→去掉');
+    '接着上一版的划分；新样本按比例划分（val 25%，test 0%，随机种子 0）；上一版 test 中的样本重新划分到 train 和 val；类别映射 DL1→DL、others→移除');
   assert.equal(ruleText({ mode: 'split-file', split_count: 12 }), '按划分清单划分（12 个样本）');
 });
 

@@ -50,7 +50,7 @@ const { chromium } = require('playwright');
   await page.reload();
   await page.waitForSelector('h2:has-text("版本")');
   seen.fieldNav = await page.$$eval('#nav a', (as) => as.map((a) => a.textContent));
-  seen.fieldWho = await page.textContent('#who a');
+  seen.fieldWho = [await page.textContent('#who .who-name'), await page.textContent('#who .who-role')];
   seen.fieldButtons = await page.$$eval('main a.button', (as) => as.map((a) => a.textContent));
   await page.goto(`${url}#/users`);
   await page.waitForSelector('main .error');

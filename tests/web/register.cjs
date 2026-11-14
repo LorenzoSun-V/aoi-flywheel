@@ -67,6 +67,7 @@ const { chromium } = require('playwright');
   seen.sent = await send();
   await page.waitForFunction(() => document.querySelector('main h1') && document.querySelector('main h1').textContent.includes('@'));
   seen.page = { hash: await page.evaluate(() => location.hash), title: await page.textContent('main h1'), info: await page.textContent('main .kv'),
+    hashes: await page.$$eval('main .kv .hash', (h) => h.map((x) => x.title)),
     files: await page.$$eval('main table tr td:first-child', (c) => c.map((x) => x.textContent)) };
   await page.screenshot({ path: `${out}/register-done.png`, fullPage: true });
 

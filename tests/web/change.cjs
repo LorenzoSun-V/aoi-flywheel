@@ -41,7 +41,7 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/remove/${name}`);
   await page.waitForSelector(`input[type=checkbox][value="${gone}"]`);
   await page.check(`input[type=checkbox][value="${gone}"]`);
-  await page.fill('input[placeholder^="去掉的原因"]', '拍糊了');
+  await page.fill('input[placeholder^="移除的原因"]', '拍糊了');
   await page.click('button:has-text("预览")');
   await page.waitForSelector('button:has-text("建立 ")');
   seen.removal = await page.textContent('main > div:last-child');

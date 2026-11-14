@@ -32,7 +32,7 @@ const { chromium } = require('playwright');
     const bytes = fs.readFileSync(await got.path());
     return { name: got.suggestedFilename(), sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   };
-  const row = (path) => `main table tr:has(td:text-is("${path}")) button`;
+  const row = (path) => `main table tr:has(td:text-is("${path}")) button:has-text("下载")`;
   try {
 
   await open(1);
