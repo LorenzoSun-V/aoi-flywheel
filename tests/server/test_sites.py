@@ -28,7 +28,7 @@ def test_sites_and_lines_are_registered_once(api, make_api):
     assert status_of(lambda: field.add_site(site)) == 403
     tree = api.add_site(site, '苏州厂')
     [s] = [s for s in tree['sites'] if s['code'] == site]
-    assert s == {'code': site, 'name': '苏州厂', 'lines': []}
+    assert s == {'code': site, 'name': '苏州厂', 'lines': [], 'listed': {'datasets': 0, 'trainsets': 0}}
     assert status_of(lambda: api.add_site(site.lower())) == 409       # one site in any case of letters
     api.add_site(f'{site.lower()}/TX', '贴片线')                       # a line of it, however the site is typed
     assert status_of(lambda: api.add_site(f'{site}/tx')) == 409
@@ -36,7 +36,7 @@ def test_sites_and_lines_are_registered_once(api, make_api):
     admin.add_site(f'{other}/L1')                                      # a new site comes with its first line
     tree = field.sites()
     assert line_of(tree, site, 'TX') == {'code': 'TX', 'name': '贴片线', 'datasets': 0, 'trainsets': 0, 'models': 0,
-                                         'batches': 0, 'releases': 0}
+                                         'batches': 0, 'releases': 0, 'snapshots': 0}
     assert line_of(tree, other, 'L1')['name'] == ''
     for bad in ('', 'A-B', 'A/B-C', 'A/B/C', 'A B', 'a@b', '/TX', 'A/', 'x' * 65):
         assert status_of(lambda: api.add_site(bad)) == 400, bad
@@ -77,7 +77,39 @@ def test_pools_models_and_releases_take_registered_lines_only(api, make_api, sna
     assert status_of(lambda: deploy.register_release(dict(body, site=new_site(), line='TX'))) == 400
     assert deploy.register_release(dict(body, site=site.lower(), line='tx'))['ref'] == f'{site}-TX-r1'
     assert line_of(api.sites(), site, 'TX') == {'code': 'TX', 'name': '', 'datasets': 1, 'trainsets': 0, 'models': 1,
-                                                'batches': 0, 'releases': 1}
+                                                'batches': 0, 'releases': 1, 'snapshots': 0}
+
+
+def test_the_numbers_of_the_tree_are_the_rows_of_the_lists(api, sql, tmp_path):
+    """Found in review of the browse pages: a snapshot from two lines was listed on both and counted on none,
+    and a dataset of a site without a line was listed under its site and counted under no site."""
+    site = new_site()
+    before = api.sites()
+    a = pool(api, tmp_path / 'a', {**sample_files('2026-09', 4), **sample_files('2026-10', 2)}, site=site, line='TX')
+    b = pool(api, tmp_path / 'b', {**sample_files('2026-07', 4), **sample_files('2026-08', 2)}, site=site, line='TY')
+    one = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{a}@1'], test_dirs=['2026-10'])['dataset']
+    two = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{a}@1', f'{b}@1'], test_dirs=['2026-10', '2026-08'])['dataset']
+    old = api.create_dataset(f'R-{uuid.uuid4().hex[:8]}', site, 'TX', 'test', '')['name']
+    sql.execute("UPDATE datasets SET line = '' WHERE name = %s", (old,))       # as before lines were registered: of the site, of no line
+    api.create_dataset(f'R-{uuid.uuid4().hex[:8]}', '', '', 'test', '')        # of no site
+    tree = api.sites()
+    [s] = [s for s in tree['sites'] if s['code'] == site]
+    for line in ('TX', 'TY'):
+        x = line_of(tree, site, line)
+        rows = api.datasets(site=site, line=line)
+        assert x['datasets'] + x['snapshots'] == len(rows)
+        assert x['snapshots'] == len([r for r in rows if r['kind'] == 'trainset'])
+    assert line_of(tree, site, 'TX')['snapshots'] == 2 and line_of(tree, site, 'TY')['snapshots'] == 1
+    assert line_of(tree, site, 'TX')['trainsets'] == 1                          # what it meant before: its own alone
+    rows = api.datasets(site=site)
+    assert sorted(r['name'] for r in rows if r['kind'] == 'trainset') == sorted([one, two])   # each once
+    assert s['listed'] == {'datasets': 3, 'trainsets': 2} and len(rows) == 5
+    everything = api.datasets()
+    assert tree['listed'] == {'datasets': len([r for r in everything if r['kind'] != 'trainset']),
+                              'trainsets': len([r for r in everything if r['kind'] == 'trainset'])}
+    # under no registered site: the one test set; the snapshot from two lines is under its lines' site
+    assert tree['unplaced']['datasets'] == before['unplaced']['datasets'] + 1
+    assert tree['unplaced']['trainsets'] == before['unplaced']['trainsets']
 
 
 def test_lists_are_narrowed_by_site_line_and_text(api, tmp_path, monkeypatch, capsys):

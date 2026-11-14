@@ -230,6 +230,26 @@ def test_a_lost_lease_goes_back_to_the_queue_and_its_token_is_refused(api, make_
     algo.close()
 
 
+def test_a_lost_claim_is_taken_back_though_nobody_looks(api, make_service, make_worker, fake_conda, sql):
+    """Found reading the code before the real-machine tests: leases were only checked when someone asked for
+    a job, the list or a claim; with the only worker gone and nobody looking, the job stayed 'running'."""
+    svc = make_service(job_lease_seconds=1)
+    w = make_worker(svc)
+    r = runner(w, fake_conda)
+    algo = Api(svc.url, api.http.headers['authorization'].split(' ', 1)[1])
+    job = algo.submit_job('check', runner=r['runner'])
+    algo.close()
+    assert w.claim()['id'] == job['id']
+    state = None
+    for _ in range(80):  # nothing is asked of the service meanwhile
+        time.sleep(0.1)
+        state = sql.execute('SELECT j.status, a.outcome FROM jobs j JOIN job_attempts a ON a.job_id = j.id '
+                            'WHERE j.id = %s', (job['id'],)).fetchone()
+        if state['status'] != 'running':
+            break
+    assert state == {'status': 'queued', 'outcome': 'lost'}
+
+
 def test_tried_too_often_fails(api, make_service, make_worker, fake_conda):
     svc = make_service(job_lease_seconds=1)
     w = make_worker(svc)
@@ -880,6 +900,36 @@ def test_the_folders_a_killed_worker_left_are_removed_by_the_next_worker(make_wo
         monkeypatch.setenv('FW_KEEP_WORK', '1')
         worker.run_worker(make_worker(), said.append, once=True)
         assert (jobs / 'job-9-1').is_dir()
+    finally:
+        dead.kill()
+        live.kill()
+        live.wait(10)
+
+
+def test_a_half_built_engine_a_killed_worker_left_is_removed_by_the_next_worker(make_worker, tmp_path, monkeypatch):
+    """A worker killed while onnx2engine runs leaves engines/build-<key>-<pid> with a copy of the ONNX (the
+    size of the model, each time). The next worker removes those no running worker holds; engines stay."""
+    monkeypatch.setenv('FW_CACHE', str(tmp_path / 'cache'))
+    monkeypatch.setenv('FW_WORK_DIR', str(tmp_path / 'jobs'))
+    engines = tmp_path / 'cache' / 'engines'
+    engines.mkdir(parents=True)
+    key = 'ab' * 32
+    (engines / f'{key}.engine').write_bytes(b'engine')
+    (engines / f'{key}.engine.sha256').write_text('x\n')
+    dead = subprocess.Popen([sys.executable, '-c', HOLD, str(engines / f'build-{key}-11')], stdout=subprocess.PIPE)
+    live = subprocess.Popen([sys.executable, '-c', HOLD, str(engines / f'build-{key}-12')], stdout=subprocess.PIPE)
+    try:
+        assert dead.stdout.readline() == b'held\n' and live.stdout.readline() == b'held\n'
+        dead.kill()
+        dead.wait(10)
+        (engines / f'build-{key}-13').mkdir()   # left by a worker older than this rule
+        (engines / f'build-{key}-13' / 'model.onnx').write_bytes(b'onnx')
+        monkeypatch.setenv('FW_KEEP_WORK', '1')  # keeps job folders to look into; half an engine is never kept
+        said = []
+        assert worker.run_worker(make_worker(), said.append, once=True) == 0
+        assert sorted(p.name for p in engines.iterdir()) == [f'{key}.engine', f'{key}.engine.sha256',
+                                                             f'build-{key}-12', f'build-{key}-12.lock']
+        assert any('2 个建到一半的引擎目录' in line for line in said)
     finally:
         dead.kill()
         live.kill()

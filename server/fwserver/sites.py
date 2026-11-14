@@ -58,23 +58,57 @@ SELECT lower(site) AS site, lower(line) AS line, what, count(*) AS n FROM (
 """
 WHAT = ('datasets', 'trainsets', 'models', 'batches', 'releases')
 
+# Where each dataset is listed: on its own site and line, and a training snapshot also on every line one of
+# its versions took data from (= the rule of datasets.list_datasets, which the counts of the tree must follow).
+_LISTED = """
+SELECT d.id, lower(d.site) AS site, lower(d.line) AS line FROM datasets d WHERE d.kind <> 'batch' AND d.site <> ''
+UNION
+SELECT d.id, lower(sd.site), lower(sd.line) FROM datasets d
+  JOIN versions v ON v.dataset_id = d.id JOIN trainset_sources ts ON ts.version_id = v.id
+  JOIN versions sv ON sv.id = ts.source_id JOIN datasets sd ON sd.id = sv.dataset_id
+  WHERE d.kind <> 'batch' AND sd.site <> ''
+"""
+
 
 def tree(conn) -> dict:
     """Every registered site with its lines, by code, and how much each line holds: data pools and test sets
     (datasets), training snapshots of that line alone (trainsets), models, labelling batches still under way
-    (batches), releases. 'other': what names a site or line that is not registered, or none."""
+    (batches), releases. 'other': what names a site or line that is not registered, or none.
+
+    And what the lists of datasets show there, so that a number next to a site or line is the number of rows
+    one gets by choosing it: 'snapshots' of a line (the training snapshots listed on it: its own and those that
+    took data from it), 'listed' of a site and of the whole ({'datasets', 'trainsets'}, each dataset once),
+    'unplaced' (listed under no registered site at all)."""
     counts: dict = {}
     for r in conn.execute(_COUNTS):
         counts.setdefault((r['site'], r['line']), {})[r['what']] = r['n']
+    snapshot = {r['id']: r['snap'] for r in conn.execute(
+        "SELECT id, kind = 'trainset' AS snap FROM datasets WHERE kind <> 'batch'")}
+    on_line: dict = {}
+    on_site: dict = {}
+    for r in conn.execute(_LISTED):
+        on_site.setdefault(r['site'], set()).add(r['id'])
+        if snapshot[r['id']]:
+            on_line.setdefault((r['site'], r['line']), set()).add(r['id'])
+
+    def split(ids) -> dict:
+        snaps = sum(1 for i in ids if snapshot[i])
+        return {'datasets': len(ids) - snaps, 'trainsets': snaps}
+
     out: List[dict] = []
     lines = {}
+    placed: set = set()
     for s in conn.execute('SELECT id, code, name FROM sites ORDER BY lower(code)').fetchall():
-        site = {'code': s['code'], 'name': s['name'], 'lines': []}
+        here = on_site.get(s['code'].lower(), set())
+        placed |= here
+        site = {'code': s['code'], 'name': s['name'], 'lines': [], 'listed': split(here)}
         lines[s['id']] = site
         out.append(site)
     for r in conn.execute('SELECT site_id, code, name FROM lines ORDER BY lower(code)').fetchall():
         site = lines[r['site_id']]
-        n = counts.pop((site['code'].lower(), r['code'].lower()), {})
-        site['lines'].append(dict({'code': r['code'], 'name': r['name']}, **{k: n.get(k, 0) for k in WHAT}))
+        key = (site['code'].lower(), r['code'].lower())
+        n = counts.pop(key, {})
+        site['lines'].append(dict({'code': r['code'], 'name': r['name']}, **{k: n.get(k, 0) for k in WHAT},
+                                  snapshots=len(on_line.get(key, ()))))
     other = {k: sum(n.get(k, 0) for n in counts.values()) for k in WHAT}
-    return {'sites': out, 'other': other}
+    return {'sites': out, 'other': other, 'listed': split(set(snapshot)), 'unplaced': split(set(snapshot) - placed)}

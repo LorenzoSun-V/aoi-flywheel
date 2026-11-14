@@ -316,22 +316,35 @@ export function scopeQuery(at, more = {}) {
     .filter(([, v]) => v !== '' && v !== undefined && v !== null && v !== false));
 }
 
-// The tree of sites and lines with a count per line (counts: the keys of a line summed up; none: no counts).
+// How many rows choosing a place gives, for the tree: {line(x), site(s), all, loose} (loose: what is under
+// no registered place and so only in "all"). By keys: the lists that take a thing on its own line only.
+export function countsBy(tree, keys) {
+  const n = (x) => keys.reduce((sum, k) => sum + (x[k] || 0), 0);
+  const site = (s) => s.lines.reduce((t, x) => t + n(x), 0);
+  return { line: n, site, loose: n(tree.other), all: tree.sites.reduce((t, s) => t + site(s), 0) + n(tree.other) };
+}
+
+// The datasets list: a training snapshot is listed on every line it took data from, a dataset of a site
+// without a line under its site; the server counts by that rule (listed, snapshots, unplaced).
+export function datasetCounts(tree) {
+  const both = (x) => x.datasets + x.trainsets;
+  return { line: (x) => x.datasets + x.snapshots, site: (s) => both(s.listed), loose: both(tree.unplaced), all: both(tree.listed) };
+}
+
+// The tree of sites and lines with a count next to each (counts: see countsBy; null: no counts).
 // link(site, line): where a choice leads.
 function placeTree(tree, at, counts, link) {
-  const n = (line) => counts.reduce((sum, k) => sum + (line[k] || 0), 0);
   const a = (site, line, text, count, on) => el('a', { href: link(site, line), class: on ? 'on' : '' }, text,
-    counts.length ? el('span', { class: 'count' }, String(count)) : null);
-  const total = tree.sites.reduce((sum, s) => sum + s.lines.reduce((t, x) => t + n(x), 0), 0) + n(tree.other);
+    counts ? el('span', { class: 'count' }, String(count())) : null);
   const same = (x, y) => x.toLowerCase() === y.toLowerCase();
-  const items = [el('li', {}, a('', '', '全部', total, !at.site))];
+  const items = [el('li', {}, a('', '', '全部', () => counts.all, !at.site))];
   for (const s of tree.sites) {
     const here = same(s.code, at.site);
-    items.push(el('li', { class: 'site' }, a(s.code, '', placeText(s), s.lines.reduce((t, x) => t + n(x), 0), here && !at.line)),
-      ...s.lines.map((x) => el('li', { class: 'line' }, a(s.code, x.code, placeText(x), n(x), here && same(x.code, at.line)))));
+    items.push(el('li', { class: 'site' }, a(s.code, '', placeText(s), () => counts.site(s), here && !at.line)),
+      ...s.lines.map((x) => el('li', { class: 'line' }, a(s.code, x.code, placeText(x), () => counts.line(x), here && same(x.code, at.line)))));
   }
   return el('aside', { id: 'places' }, el('div', { class: 'muted' }, '现场 / 产线'), el('ul', {}, items),
-    counts.length && n(tree.other) ? el('p', { class: 'muted small' }, `另有 ${n(tree.other)} 个没有归到登记的产线下（跨产线的快照、没写现场产线的测试集），只在「全部」里。`) : null);
+    counts && counts.loose ? el('p', { class: 'muted small' }, `另有 ${counts.loose} 个不在任何登记的现场下（没写现场产线的测试集、现场没登记的旧数据），只在「全部」里。`) : null);
 }
 
 // The tree, the search box, and the list itself next to them. parts, keep: the page's address and the query
@@ -371,7 +384,7 @@ async function datasetsPage(query) {
   const snapshots = rows.filter((d) => d.kind === 'trainset');
   const narrowed = at.site || at.q;
   show(el('h1', {}, '数据集'),
-    browse(tree, at, [], {}, ['datasets', 'trainsets'], '搜名称',
+    browse(tree, at, [], {}, datasetCounts(tree), '搜名称',
       el('h2', { id: 'pools' }, `数据池和测试集（${pools.length}）`),
       pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的数据池。'
         : '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
@@ -761,7 +774,7 @@ async function modelsPage(query) {
   renderNav();
   const [rows, tree] = await Promise.all([api.models(scopeQuery(at)), api.sites()]);
   show(el('h1', {}, '模型'),
-    browse(tree, at, ['models'], {}, ['models'], '搜名称',
+    browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '搜名称',
       rows.length ? el('table', {}, el('tr', {}, ['名称', '现场 / 产线', '任务', '版本数', '最新', '建立', '备注'].map((h) => el('th', {}, h))),
         rows.map((m) => el('tr', {},
           el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
@@ -1556,7 +1569,7 @@ async function batchesPage(query) {
     : { todo: '没有待你复核的批次。', mine: '你还没有上传过批次。', all: '还没有批次。' }[view];
   show(el('h1', {}, '标注批次'),
     el('p', { class: 'muted' }, '一个批次是一个要进数据池的目录：上传（每次上传都冻结成一版，不进数据池）、提交给复核人、退回或通过，通过以后由算法工程师入库。'),
-    browse(tree, at, ['batches'], { view }, ['batches'], '搜批次名称',
+    browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '搜批次名称',
       el('div', { class: 'row tabs' }, tabs, can('batches.write') ? el('a', { class: 'button primary', href: '#/batch-new' }, '上传新批次') : null),
       rows.length ? el('table', {}, el('tr', {}, ['批次', '版次', '状态', '入库到', '大小', '上传账号', '标注人', '复核人', '最近变化']
         .map((h) => el('th', {}, h))), rows) : el('p', { class: 'muted' }, empty),
@@ -2075,7 +2088,7 @@ function lineTable(tree, at) {
   const sites = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
   const rows = sites.flatMap((s) => s.lines.map((x) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['overview'], { site: s.code, line: x.code }) }, `${placeText(s)} / ${placeText(x)}`)),
-    ...['datasets', 'trainsets', 'models', 'batches', 'releases'].map((k) => el('td', { class: 'num' }, String(x[k] || 0))))));
+    ...['datasets', 'snapshots', 'models', 'batches', 'releases'].map((k) => el('td', { class: 'num' }, String(x[k] || 0))))));
   if (!rows.length) return el('p', { class: 'muted' }, at.site ? '这个现场还没有登记产线。' : '还没有登记现场和产线：在「数据集」页最下面登记。');
   return el('table', { id: 'lines' }, el('tr', {}, ['现场 / 产线', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数'].map((h, i) => el('th', { class: i ? 'num' : '' }, h))), rows);
 }
@@ -2086,7 +2099,7 @@ async function overviewPage(query) {
   scope = at;
   renderNav();
   const tree = await api.sites();
-  const side = placeTree(tree, at, [], (site, line) => hrefOf(['overview'], { site, line }));
+  const side = placeTree(tree, at, null, (site, line) => hrefOf(['overview'], { site, line }));
   if (!at.line) {
     show(el('h1', {}, '概览'),
       el('div', { class: 'browse' }, side, el('div', { class: 'list' },
