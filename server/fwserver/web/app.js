@@ -1485,6 +1485,23 @@ function bar() {
   return node;
 }
 
+// The first-level folders of paths inside a folder (sorted, each once) and the files right at its top.
+export function topDirs(paths) {
+  const dirs = new Set();
+  const loose = [];
+  for (const p of paths) {
+    const i = p.indexOf('/');
+    if (i < 0) loose.push(p); else dirs.add(p.slice(0, i));
+  }
+  return { dirs: [...dirs].sort(), loose };
+}
+
+// Names in a sentence: the first few, then how many in all.
+export function namesText(names, few = 3, suffix = '/') {
+  const shown = names.slice(0, few).map((n) => `${n}${suffix}`).join('、');
+  return names.length > few ? `${shown} 等 ${names.length} 个` : shown;
+}
+
 // The files of a folder dragged onto the page, from its FileSystemDirectoryEntry: the folder's name, the
 // files and their paths inside the folder (what relPaths gives for a picked folder).
 export async function readDropped(dir) {
@@ -1507,9 +1524,11 @@ export async function readDropped(dir) {
 // Where a folder is given: dragged onto the box, or chosen with the button. Dragging skips the browser's
 // folder dialog and its "upload N files?" prompt, which on some Windows machines take seconds whatever the
 // folder holds. The box's files / paths / folder hold what was given; a 'change' event says new ones came.
-function folderInput() {
+// several: a few folders may be dragged in at once (choosing takes one); then folders lists their names, folder
+// is '' and every path starts with its folder's name, as if they had been in one folder chosen.
+function folderInput({ several = false } = {}) {
   const input = el('input', { type: 'file', webkitdirectory: true, multiple: true });
-  const status = el('span', {}, '把目录拖到这里');
+  const status = el('span', {}, several ? '把目录拖到这里，几个目录可以一起拖' : '把目录拖到这里');
   const box = el('div', { class: 'drop' }, icon('folder'), status, el('label', { class: 'choose' }, '或者选择目录', input));
   let disabled = false;
   let shown = [status.textContent, status.className];  // what to show again when a choice is cancelled
@@ -1521,12 +1540,13 @@ function folderInput() {
     say('正在读取目录…');
     return ++reads;
   };
-  const pick = (files, paths, folder) => {
-    Object.assign(box, { files, paths, folder });
+  const pick = (files, paths, folder, folders = []) => {
+    Object.assign(box, { files, paths, folder, folders });
     box.classList.remove('reading');
-    say(files.length ? `${folder}/ · ${files.length} 个文件` : `${folder}/ 是空的`, files.length ? 'got' : 'bad');
+    const what = folders.length ? `${folders.length} 个目录` : `${folder}/`;
+    say(files.length ? `${what} · ${files.length} 个文件` : `${what} 是空的`, files.length ? 'got' : 'bad');
   };
-  Object.assign(box, { files: [], paths: [], folder: '' });
+  Object.assign(box, { files: [], paths: [], folder: '', folders: [] });
   Object.defineProperty(box, 'disabled', {
     get: () => disabled,
     set: (on) => { disabled = on; input.disabled = on; box.classList.toggle('off', on); },
@@ -1553,14 +1573,23 @@ function folderInput() {
     if (disabled) return;
     const items = [...((ev.dataTransfer && ev.dataTransfer.items) || [])].filter((i) => i.kind === 'file');
     const entries = items.map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
-    if (entries.length !== 1 || !entries[0].isDirectory) {
-      say('拖进来的要是一个目录：不是文件，也不是几个目录一起', 'bad');
+    if (!entries.length || entries.some((e) => !e.isDirectory)) {
+      say('拖进来的要是目录，不能是文件', 'bad');
+      return;
+    }
+    if (entries.length > 1 && !several) {
+      say('这里一次只能拖一个目录', 'bad');
       return;
     }
     const mine = reading();
-    readDropped(entries[0]).then(({ folder, files, paths }) => {
+    Promise.all(entries.map(readDropped)).then((read) => {
       if (mine !== reads) return;
-      pick(files, paths, folder);
+      const names = read.map((r) => r.folder);
+      if (read.length > 1 && new Set(names.map((n) => n.toLowerCase())).size < names.length) {
+        throw new Error('拖进来的几个目录里有同名的');
+      }
+      if (read.length === 1) pick(read[0].files, read[0].paths, read[0].folder);
+      else pick(read.flatMap((r) => r.files), read.flatMap((r) => r.paths.map((x) => `${r.folder}/${x}`)), '', names);
       box.dispatchEvent(new Event('change'));
     }).catch((e) => {
       if (mine !== reads) return;
@@ -1581,7 +1610,7 @@ async function uploadPage(name) {
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
   const latest = d.latest;
-  const picker = folderInput();
+  const picker = folderInput({ several: true });
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
   const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
@@ -1609,8 +1638,12 @@ async function uploadPage(name) {
     if (mine !== round) return;
     const junk = new Set(r.junk);
     const keep = picked.map((f, i) => [f, pickedPaths[i]]).filter(([, p]) => !junk.has(p));
-    const folder = (picked[0].webkitRelativePath || '').split('/')[0];
+    const folder = picker.folders.length ? picker.folders.join('、') : picker.folder;
+    const { dirs } = topDirs(pickedPaths);
     const report = [
+      el('p', { id: 'version-shape' }, picker.folders.length ? `这 ${picker.folders.length} 个目录（${namesText(picker.folders)}）成为新版本的全部内容，各用自己的目录名。`
+        : dirs.length ? `${picker.folder}/ 里面的东西成为新版本：${namesText(dirs)}目录原样保留，${picker.folder} 这一层不进版本。`
+          : `${picker.folder}/ 里面的文件成为新版本，${picker.folder} 这一层不进版本。`),
       el('p', {}, `${r.files} 个文件：图片 ${r.images.count}，标注 ${r.labels.count}，说明文件 ${r.meta.count}，其他 ${r.others.count}`
         + (r.junk.length ? `；系统文件 ${r.junk.length} 个不入库` : '')),
       listOf('文件名用不了', r.bad_paths, 'bad'), listOf('路径冲突', r.collisions, 'bad'),
@@ -1702,7 +1735,7 @@ async function uploadPage(name) {
   show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '上传'),
     el('h1', {}, `上传到 ${d.name}`),
     el('p', { class: 'muted' }, ['只想加一个新目录、不动池里原有的文件？用 ', el('a', { href: hrefOf(['add', d.name]) }, '上传新增目录'), '。']),
-    el('p', { class: 'muted' }, `选一个目录：目录里的全部文件成为新版本（${latest ? `父版本 ${latest.ref}；目录里没有的文件在新版本里就是删除` : '第一个版本'}）。`
+    el('p', { class: 'muted' }, `选一个上层目录（比如 pool）：它里面的全部文件和子目录成为新版本，子目录名原样保留，上层目录这一层不进版本；也可以把几个子目录一起拖进来。（${latest ? `父版本 ${latest.ref}；这里没有的文件在新版本里就是删除` : '这是第一个版本'}）`
       + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
       + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
     el('div', { class: 'panel form' },
@@ -1746,8 +1779,10 @@ async function addPage(name) {
   const show = live();
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
-  const picker = folderInput();
+  const picker = folderInput({ several: true });
   const target = el('input', { type: 'text', placeholder: '选了目录以后自动填目录名，可以改，例如 20261104 或 night/20261104' });
+  const inside = el('input', { type: 'checkbox', id: 'add-inside' });
+  const insideText = el('span', {}, '只加它里面的子目录：这一层不进池，每个子目录用自己的名字');
   const replace = el('input', { type: 'checkbox' });
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
@@ -1756,8 +1791,19 @@ async function addPage(name) {
   let files = [];
   let paths = [];
   let round = 0;  // as on the upload page: an answer of an older round is dropped
-  const controls = [picker, target, replace, allowOther, force];
-  const lock = (on) => { for (const c of controls) c.disabled = on; };
+  const controls = [picker, target, inside, replace, allowOther, force];
+  const lock = (on) => { for (const c of controls) c.disabled = on; if (!on) shape(); };
+  // One folder under the name typed, or each first-level folder under its own name: several dragged in at once,
+  // or (inside) the folders inside the one given, such as the dated folders of a pool folder.
+  const split = () => picker.folders.length > 0 || inside.checked;
+  const shape = () => {
+    inside.disabled = !!picker.folders.length;
+    insideText.textContent = picker.folder ? `只加 ${picker.folder}/ 里面的子目录：${picker.folder} 这一层不进池，每个子目录用自己的名字`
+      : '只加它里面的子目录：这一层不进池，每个子目录用自己的名字';
+    target.disabled = split();
+    if (split()) target.value = '';
+    else if (!target.value && picker.folder) target.value = picker.folder;
+  };
   const listOf = (title, part, cls = '') => (part && part.count ? el('details', { class: cls },
     el('summary', {}, `${title}：${part.count}`),
     el('ul', { class: 'mono' }, part.examples.map((x) => el('li', {}, Array.isArray(x) ? x.join('  ') : x)))) : null);
@@ -1785,6 +1831,17 @@ async function addPage(name) {
       result.replaceChildren(...present([report, el('div', { class: 'error' }, '目录里没有文件')]));
       return;
     }
+    if (split()) {
+      const { dirs, loose } = topDirs(keep.map(([, p]) => p));
+      const problem = loose.length ? `${picker.folder}/ 的最上层有 ${loose.length} 个文件不在子目录里（例如 ${loose.slice(0, 3).join('、')}），它们没有目录可放。`
+        + '把它们挪进一个子目录，或者不勾「只加里面的子目录」，整个目录作为一个目录加进去。'
+        : dirs.length > 100 ? `一次最多加 100 个目录，这里有 ${dirs.length} 个；分几次加，或者用 fw dataset add。` : null;
+      report.unshift(el('p', { id: 'add-dirs' }, `加进池的目录（${dirs.length} 个）：${namesText(dirs, 8)}`));
+      if (problem) {
+        result.replaceChildren(...present([report, el('div', { class: 'error' }, problem)]));
+        return;
+      }
+    }
     const go = el('button', { class: 'primary', onclick: () => hashAndPreview(mine, keep, report)
       .catch((e) => { if (mine === round) result.replaceChildren(...present([report, errorBox(e)])); }) }, '算哈希，预览新版本');
     result.replaceChildren(...present([report, el('div', { class: 'row' }, go)]));
@@ -1793,7 +1850,8 @@ async function addPage(name) {
   const hashAndPreview = async (mine, keep, report) => {
     if (mine !== round) return;
     const dir = target.value.trim();
-    if (!dir) throw new Error('要写放在池里的哪个目录');
+    const several = split();
+    if (!several && !dir) throw new Error('要写放在池里的哪个目录');
     const progress = bar();
     result.replaceChildren(...present([report, progress]));
     uploading = true;
@@ -1804,11 +1862,17 @@ async function addPage(name) {
     try {
       const digests = await hashAll(keep.map(([f]) => f), (a, b) => progress.set(a, b, `算哈希 ${sizeText(a)} / ${sizeText(b)}`));
       entries = keep.map(([f, p], i) => ({ path: p, sha256: digests[i], size: f.size, file: f }));
-      const manifest = new Blob([manifestText(entries)]);
-      const [manifestDigest] = await hashAll([manifest], () => {});
-      await api.putObject(manifestDigest, manifest);  // the folder's file list: the server needs it for the preview
-      body = { add: [{ dir, manifest_sha256: manifestDigest, replace: replace.checked }], remove: [],
-        allow_other_files: allowOther.checked, force: force.checked };
+      // each folder's file list, its paths inside that folder: the server needs them for the preview
+      const groups = several ? topDirs(entries.map((e) => e.path)).dirs.map((top) => [top,
+        entries.filter((e) => e.path.startsWith(`${top}/`)).map((e) => ({ ...e, path: e.path.slice(top.length + 1) }))]) : [[dir, entries]];
+      const add = [];
+      for (const [name, list] of groups) {
+        const manifest = new Blob([manifestText(list)]);
+        const [manifestDigest] = await hashAll([manifest], () => {});
+        await api.putObject(manifestDigest, manifest);
+        add.push({ dir: name, manifest_sha256: manifestDigest, replace: replace.checked });
+      }
+      body = { add, remove: [], allow_other_files: allowOther.checked, force: force.checked };
       plan = await api.previewChange(d.name, body);
       if (plan.duplicates.not_uploaded) {  // same images whose labels the server lacks: send the labels, ask again
         const labels = entries.filter((e) => ['.json', '.txt'].includes(ext(e.path)));
@@ -1855,7 +1919,7 @@ async function addPage(name) {
         progress.set(sent, bytes, `上传 ${sizeText(sent)} / ${sizeText(bytes)}`);
       });
       const made = await api.createChange(d.name, { ...body, expect_latest_id: plan.expect_latest_id,
-        source: `网页上传新增目录 ${body.add[0].dir}`, note: note.value.trim() });
+        source: `网页上传新增目录 ${namesText(body.add.map((a) => a.dir), 5, '')}`, note: note.value.trim() });
       uploading = false;
       if (location.hash === here) location.hash = hrefOf(['v', d.name, String(made.version.number)]);
     } catch (e) {
@@ -1867,10 +1931,12 @@ async function addPage(name) {
   picker.addEventListener('change', () => {
     files = picker.files;
     paths = picker.paths;
-    if (files.length) target.value = picker.folder;
+    target.value = picker.folder;
+    shape();
     again();
   });
   for (const box of [replace, allowOther, force]) box.addEventListener('change', again);
+  inside.addEventListener('change', () => { shape(); again(); });
   let typing = null;  // the name is typed letter by letter: check once it rests, not on every key
   target.addEventListener('input', () => {
     round++;  // what is shown belongs to the old name
@@ -1878,14 +1944,16 @@ async function addPage(name) {
     typing = setTimeout(again, 400);
   });
   show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '上传新增目录'),
-    el('h1', {}, `往 ${d.name} 里加一个目录`),
+    el('h1', {}, `往 ${d.name} 里加目录`),
     el('p', { class: 'muted' }, `选一个目录，比如今天采集的那一天：只上传这个目录，新版本 = ${d.latest ? d.latest.ref : '空'} + 这个目录，池里原有的文件不动。`
+      + '几个目录可以一起拖进来，各用自己的名字；也可以选它们的上层目录（比如 pool），勾「只加里面的子目录」。'
       + '池里已经有同名目录时会拦下，除非勾选「替换已有目录」。和池里重复的图片、标注不一致的重复图片只提醒，不拦。和 fw dataset add 是同一件事。'),
     el('div', { class: 'panel form' },
       el('div', { class: 'label' }, el('span', {}, '目录'), picker),
+      el('label', { class: 'check' }, inside, insideText),
       el('label', {}, '放在池里的目录', target),
       el('label', {}, '备注', note),
-      el('label', { class: 'check' }, replace, '替换已有目录：池里已有这个目录时，整个换成这一份（--replace）'),
+      el('label', { class: 'check' }, replace, '替换已有目录：池里已有同名目录时，整个换成这一份（--replace）'),
       el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
       el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
     result);
@@ -2494,6 +2562,7 @@ async function placesPage() {
   const write = can('sites.write');
   const again = () => placesPage();
   const counts = ['datasets', 'snapshots', 'models', 'batches', 'releases'];
+  const pools = can('datasets.write');
   const rename = (ref, p) => {  // the name cell, and in place of it an editor
     const cell = el('td', { class: 'place-name' });
     const view = () => cell.replaceChildren(el('span', {}, p.name || el('span', { class: 'muted' }, '（没有）')), ' ',
@@ -2515,14 +2584,15 @@ async function placesPage() {
   };
   const rows = tree.sites.flatMap((s) => [
     el('tr', { class: 'site-row' }, el('td', {}, el('a', { href: hrefOf([], { site: s.code }) }, s.code)), rename(s.code, s),
-      el('td', { class: 'muted', colspan: String(counts.length) }, `${s.lines.length} 条产线`)),
+      el('td', { class: 'muted', colspan: String(counts.length + (pools ? 1 : 0)) }, `${s.lines.length} 条产线`)),
     ...s.lines.map((x) => el('tr', {}, el('td', { class: 'indent' }, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${s.code} / ${x.code}`)),
-      rename(`${s.code}/${x.code}`, x), ...counts.map((k) => el('td', { class: 'num' }, String(x[k] || 0)))))]);
+      rename(`${s.code}/${x.code}`, x), ...counts.map((k) => el('td', { class: 'num' }, String(x[k] || 0))),
+      pools ? el('td', {}, el('a', { class: 'small new-pool', href: hrefOf(['dataset-new'], { site: s.code, line: x.code }) }, '新建数据池')) : null))]);
   show(crumbs('places', null), el('h1', {}, '现场和产线'),
     el('p', { class: 'muted' }, '数据池、模型和发布只能建在登记过的现场和产线下。代号（SES、TX）登记后不能改，它在训练集快照的目录和发布编号里；显示名只是给人看的，随时能改。'),
     write ? newPlaceForm(again) : null,
-    rows.length ? el('table', { id: 'places-table' }, el('tr', {}, ['代号', '显示名', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数']
-      .map((h, i) => el('th', { class: i > 1 ? 'num' : '' }, h))), rows) : el('p', { class: 'muted' }, '还没有登记现场和产线。'));
+    rows.length ? el('table', { id: 'places-table' }, el('tr', {}, ['代号', '显示名', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数', pools ? '' : null]
+      .filter((h) => h !== null).map((h, i) => el('th', { class: i > 1 && h ? 'num' : '' }, h))), rows) : el('p', { class: 'muted' }, '还没有登记现场和产线。'));
 }
 
 // --- the overview of a line --------------------------------------------------------------------------------
@@ -2692,8 +2762,10 @@ async function overviewPage(query) {
     api.datasets(where), api.models(where), api.currentRelease(at.site, at.line).catch(none),
     can('batches.read') ? api.batches(where).then((r) => batchesUnderWay(r.batches)) : null]);
   const evals = lastEvalByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat());
-  const head = (id, text, parts, link) => el('div', { class: 'section-head' }, el('h2', { id }, text),
-    el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link));
+  const head = (id, text, parts, link, ...more) => el('div', { class: 'section-head' }, el('h2', { id }, text),
+    el('div', { class: 'links' }, ...more,
+      el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link)));
+  const newData = can('datasets.write') ? el('a', { id: 'data-new', class: 'small with-icon', href: hrefOf(['dataset-new'], where) }, icon('plus'), '新建数据集') : null;
   const line = site && site.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
   const mvHref = (ref) => { const [n, k] = ref.split('@'); return hrefOf(['mv', n, k]); };
 
@@ -2732,7 +2804,8 @@ async function overviewPage(query) {
       el('td', {}, d.kind === 'trainset' ? '训练集快照' : KIND_NAMES[d.kind] || d.kind),
       el('td', { class: 'num' }, d.latest ? sizeText(d.latest.total_bytes) : '—'),
       el('td', { class: 'act' }, el('a', { class: 'tool go', href: hrefOf(['d', d.name]), title: `打开 ${d.name}`, 'aria-label': `打开 ${d.name}` }, icon('right'))))))
-    : el('p', { class: 'muted' }, '这条产线还没有数据池和训练集快照。');
+    : el('p', { class: 'muted' }, '这条产线还没有数据池和训练集快照。',
+      can('datasets.write') ? [' ', el('a', { href: hrefOf(['dataset-new'], where) }, '新建一个数据池'), '，建好后上传目录。'] : null);
 
   const batchList = batches === null ? null : batches.length ? el('table', { class: 'batches' },
     batches.map((b) => el('tr', {},
@@ -2747,7 +2820,7 @@ async function overviewPage(query) {
       card,
       el('div', { class: `cols${batchList ? '' : ' one'}` },
         el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型'), modelTable,
-          head('data', '数据池与快照', ['datasets'], '全部数据集'), dataTable),
+          head('data', '数据池与快照', ['datasets'], '全部数据集', newData), dataTable),
         batchList ? el('div', { class: 'col right' }, head('batches', '在办的批次', ['batches'], '全部批次'), batchList) : null))));
 }
 

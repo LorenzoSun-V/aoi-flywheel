@@ -28,7 +28,7 @@ const { chromium } = require('playwright');
   await page.setInputFiles('input[type=file]', first);
   await page.waitForSelector('main .error');
   seen.refused = await page.textContent('main .error');
-  seen.report = await page.textContent('main > div:last-child p');
+  seen.report = await page.textContent('main > div:last-child');
   await page.check('input[type=checkbox] >> nth=0');
   await page.waitForSelector('button:has-text("算哈希")', { timeout: 5000 }).catch(async (e) => {
     await page.screenshot({ path: `${out}/upload-failed.png`, fullPage: true });

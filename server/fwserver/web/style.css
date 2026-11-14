@@ -108,6 +108,9 @@ button.danger:hover { background: var(--del); }
 form.panel.narrow { max-width: 720px; margin-bottom: 20px; }
 form.panel.narrow h2 { margin-top: 0; }
 ul.plain { list-style: none; margin: 0; padding: 0; }
+.section-head .links { display: flex; align-items: center; gap: 14px; }
+.section-head .links .icon { width: 14px; height: 14px; }
+.section-head .links .with-icon { gap: 4px; }
 table#labels { margin-top: 12px; }
 td.indent { padding-left: 28px; }
 td.place-name form { margin: 0; flex-wrap: nowrap; }

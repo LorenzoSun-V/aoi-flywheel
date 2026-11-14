@@ -551,6 +551,47 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_pool_is_filled_from_folders_the_way_they_were_collected(service, tokens, api, tmp_path):
+    """A new pool starts from its line; two folders dragged in at once, or the folders inside a "pool" folder
+    without that level, each go in under their own names; a loose file there is refused; the whole-version
+    upload says what it makes of a "pool" folder and of folders dragged in; a field account gets no new-pool links."""
+    seed = int.from_bytes(os.urandom(2), 'big')
+    img = lambda k: real_png(16, 8 + k // 256, seed + k)  # noqa: E731  (all different)
+    parent = write_tree(tmp_path / 'p' / 'pool', {'20261101/a.png': img(1), '20261101/a.json': label('scratch'),
+                                                  '20261102/b.png': img(2)})
+    day3 = write_tree(tmp_path / 'd' / '20261103', {'c.png': img(3)})
+    day4 = write_tree(tmp_path / 'd' / '20261104', {'d.png': img(4), 'night/e.png': img(5)})
+    loose = write_tree(tmp_path / 'l' / 'pool', {'x.png': img(6), '20261105/f.png': img(7)})
+    pool = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '')
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'folders.cjs'), service.url + '/', tokens['algo'], pool, str(shots),
+                        str(parent), str(day3), str(day4), str(loose), tokens['field']],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['overviewNew'] == '#/dataset-new?site=SES&line=TX' and '#/dataset-new?site=SES&line=TX' in seen['placesNew']
+    assert seen['fieldOverview'] == {'newData': 0, 'links': 0} and seen['fieldPlaces'] == 0  # a field account cannot start one
+    two = seen['two']
+    assert two['box'] == '2 个目录 · 3 个文件' and '20261103/、20261104/' in two['dirs']
+    assert two['target'] == ['', True] and two['inside']
+    assert '新增 20261103/' in two['plan']['text'] and '新增 20261104/' in two['plan']['text'] and two['plan']['at'] == f'/v/{pool}/1'
+    inside = seen['inside']
+    assert inside['target'] == 'pool' and '只加 pool/ 里面的子目录' in inside['label']
+    assert '20261101/、20261102/' in inside['dirs'] and inside['targetAfter'] == ['', True]
+    assert inside['plan']['at'] == f'/v/{pool}/2' and 'pool/' not in inside['plan']['text']
+    assert '最上层有 1 个文件不在子目录里' in seen['loose'] and 'x.png' in seen['loose']
+    assert '20261101/、20261102/目录原样保留，pool 这一层不进版本' in seen['wholeParent']
+    assert seen['wholeTwo'].startswith('这 2 个目录（20261103/、20261104/）成为新版本的全部内容')
+    versions = {v['number']: v for v in api.versions(pool)}
+    assert [(o['op'], o['dir']) for o in versions[1]['ops']] == [('add', '20261103'), ('add', '20261104')]
+    assert [(o['op'], o['dir']) for o in versions[2]['ops']] == [('add', '20261101'), ('add', '20261102')]
+    assert versions[2]['file_count'] == 6 and versions[1]['source'] == '网页上传新增目录 20261103、20261104'
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_path):
     from fw import ops
     from helpers import quiet
@@ -667,8 +708,9 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert seen['errors'] == []
     assert '标注批次' in seen['fieldNav'] and '操作记录' not in seen['fieldNav']
     assert seen['reading'] == '正在读取目录…' and seen['picked'] == {'text': '20261104/ · 3 个文件', 'reading': 0}
-    assert '要是一个目录' in seen['droppedFile'] and seen['dropped'] == '20261104/ · 4 个文件'
-    assert seen['cancelled'] == {'text': seen['droppedFile'], 'reading': 0}   # choosing, then cancelling, mid-read
+    assert '要是目录' in seen['droppedFile'] and seen['dropped'] == '20261104/ · 4 个文件'
+    assert '一次只能拖一个目录' in seen['droppedTwo']
+    assert seen['cancelled'] == {'text': seen['droppedTwo'], 'reading': 0}   # choosing, then cancelling, mid-read
     assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']

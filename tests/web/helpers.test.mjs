@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  shortWhen, modelRow, downloadText, readDropped, diffListText,
+  shortWhen, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -245,4 +245,13 @@ test('the list of changes saved from a comparison is the one fw dataset diff --l
   const d = { added: ['a/1.png', 'a/2.png'], modified: ['b.json'], deleted: ['c.png'], renamed: [['old.png', 'new.png']] };
   assert.equal(diffListText(d), '新增\ta/1.png\n新增\ta/2.png\n修改\tb.json\n删除\tc.png\n改名\told.png\tnew.png\n');
   assert.equal(diffListText({ added: [], modified: [], deleted: [], renamed: [] }), '');
+});
+
+test('the first-level folders of a folder, and how a few names are said', () => {
+  assert.deepEqual(topDirs(['20261102/b.png', '20261101/a.png', '20261101/x/a.json', 'readme.txt']),
+    { dirs: ['20261101', '20261102'], loose: ['readme.txt'] });
+  assert.deepEqual(topDirs([]), { dirs: [], loose: [] });
+  assert.equal(namesText(['a', 'b']), 'a/、b/');
+  assert.equal(namesText(['a', 'b', 'c', 'd']), 'a/、b/、c/ 等 4 个');
+  assert.equal(namesText(['a', 'b', 'c'], 2, ''), 'a、b 等 3 个');
 });
