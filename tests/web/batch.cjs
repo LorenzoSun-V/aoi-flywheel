@@ -107,6 +107,8 @@ async function dropOn(page, folder, asFolder, slow = 0) {
   await dropOn(field, fixed, false);  // a file, not a folder, is refused in the box itself
   seen.droppedFile = await field.textContent('.drop > span.bad');
   await dropOn(field, folder, true, 400);  // a slow first drag, then the fixed folder: the first one, done last, is not used
+  await field.$eval('.drop input', (i) => { i.dispatchEvent(new Event('click')); i.dispatchEvent(new Event('cancel')); });
+  seen.cancelled = { text: await field.textContent('.drop > span'), reading: await field.locator('.drop.reading').count() };
   await dropOn(field, fixed, true);
   await field.waitForSelector('#send-folder');
   await field.waitForTimeout(1200);

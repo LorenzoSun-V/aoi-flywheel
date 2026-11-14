@@ -1412,10 +1412,15 @@ function folderInput() {
   const status = el('span', {}, '把目录拖到这里');
   const box = el('div', { class: 'drop' }, icon('folder'), status, el('label', { class: 'choose' }, '或者选择目录', input));
   let disabled = false;
-  let shown = status.textContent;
+  let shown = [status.textContent, status.className];  // what to show again when a choice is cancelled
   let reads = 0;  // each choice or drop starts a new read; an older one that finishes later is dropped
   const say = (text, cls = '') => { status.textContent = text; status.className = cls; };
-  const reading = () => { shown = status.textContent; box.classList.add('reading'); say('正在读取目录…'); return ++reads; };
+  const reading = () => {
+    if (!box.classList.contains('reading')) shown = [status.textContent, status.className];
+    box.classList.add('reading');
+    say('正在读取目录…');
+    return ++reads;
+  };
   const pick = (files, paths, folder) => {
     Object.assign(box, { files, paths, folder });
     box.classList.remove('reading');
@@ -1427,7 +1432,11 @@ function folderInput() {
     set: (on) => { disabled = on; input.disabled = on; box.classList.toggle('off', on); },
   });
   input.addEventListener('click', reading);
-  input.addEventListener('cancel', () => { box.classList.remove('reading'); say(shown); });
+  input.addEventListener('cancel', () => {  // an older read still going was dropped by the click: show what was before it
+    reads++;
+    box.classList.remove('reading');
+    say(...shown);
+  });
   input.addEventListener('change', () => {  // then the event goes on up to the box, where the page listens
     reads++;
     const files = [...input.files];
