@@ -28,8 +28,12 @@ const { chromium } = require('playwright');
   await field.click('a:has-text("上传新批次")');
   await field.waitForSelector('#pool');
   await field.selectOption('#pool', pool);
-  await field.setInputFiles('input[type=file]', folder);
+  // while the browser reads the picked folder the page says what it is waiting for, and stops once it has it
+  const [chooser] = await Promise.all([field.waitForEvent('filechooser'), field.click('input[type=file]')]);
+  seen.waiting = await field.textContent('main .waiting');
+  await chooser.setFiles(folder);
   await field.waitForSelector('#send-folder');
+  seen.waitingAfter = await field.locator('main .waiting').count();
   seen.dir = await field.inputValue('#batch-dir');
   await field.fill('#batch-name', batch);
   await field.click('#send-folder');                       // no labeler yet: refused before anything is made

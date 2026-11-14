@@ -931,10 +931,33 @@ function fileTable(files) {
 
 // Downloads go through the API with the token, so the file is fetched whole and handed to the browser; the
 // object URL is let go right after (an ONNX can be hundreds of MB).
+// The button shows how much has come so far: an ONNX of hundreds of MB takes a while on the intranet.
+export function downloadText(got, total) {
+  return `下载中 ${total ? Math.min(100, Math.floor((got / total) * 100)) : 0}%`;
+}
+
+async function readAll(response, onProgress) {
+  if (!response.body || !response.body.getReader) return response.blob();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    onProgress(got);
+  }
+  return new Blob(chunks);
+}
+
 async function download(f, button) {
   button.disabled = true;
+  const label = button.textContent;
+  button.title = `${f.path}，${sizeText(f.size)}`;
+  button.textContent = downloadText(0, f.size);
   try {
-    const blob = await (await api.object(f.sha256)).blob();
+    const blob = await readAll(await api.object(f.sha256), (got) => { button.textContent = downloadText(got, f.size); });
     const url = URL.createObjectURL(blob);
     const a = el('a', { href: url, download: f.path.slice(f.path.lastIndexOf('/') + 1) });
     document.body.append(a);
@@ -945,6 +968,8 @@ async function download(f, button) {
     button.after(el('span', { class: 'bad' }, ` 下载不了：${e.message}`));
   } finally {
     button.disabled = false;
+    button.textContent = label;
+    button.removeAttribute('title');
   }
 }
 
@@ -1360,6 +1385,21 @@ function bar() {
   return node;
 }
 
+// A folder input. After the folder is picked the browser first counts every file in it and asks whether to
+// upload them, before the page gets anything; on a slow disk that takes a while, so until the files arrive
+// (or the pick is cancelled) the page says what it is waiting for.
+function folderInput() {
+  const input = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const note = el('p', { class: 'muted waiting', role: 'status' },
+    '在等浏览器读目录：浏览器要先数完目录里的文件，再弹窗问要不要上传；点了「上传」，这里就开始检查。'
+    + '目录大、或者在 U 盘和网络盘上时要等一会，不是卡住了。');
+  const stop = () => note.remove();
+  input.addEventListener('click', () => input.after(note));
+  input.addEventListener('change', stop);
+  input.addEventListener('cancel', stop);
+  return input;
+}
+
 let uploading = false;
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', (ev) => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
@@ -1370,7 +1410,7 @@ async function uploadPage(name) {
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
   const latest = d.latest;
-  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const picker = folderInput();
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
   const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
@@ -1535,7 +1575,7 @@ async function addPage(name) {
   const show = live();
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
-  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const picker = folderInput();
   const target = el('input', { type: 'text', placeholder: '选了目录以后自动填目录名，可以改，例如 20261104 或 night/20261104' });
   const replace = el('input', { type: 'checkbox' });
   const allowOther = el('input', { type: 'checkbox' });
@@ -1771,7 +1811,7 @@ async function batchesPage(query) {
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
 // then makes the batch, the revision or the approval. Returns the node to show.
 function folderSender({ controls, allowOther, force, onPick, label, ready, done }) {
-  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const picker = folderInput();
   const result = el('div');
   let files = [];
   let paths = [];

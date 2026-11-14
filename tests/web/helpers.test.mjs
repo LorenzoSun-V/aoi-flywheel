@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  shortWhen, modelRow,
+  shortWhen, modelRow, downloadText,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -212,4 +212,11 @@ test('a model row shows the version its numbers belong to, and its menu leads to
   assert.deepEqual(plain.items.map((i) => i.text), ['查看版本', '复制版本号']);
   assert.equal(plain.number, '3');
   assert.deepEqual(modelRow({ name: 'N', latest: null }, undefined).items, []);  // no version yet: no menu
+});
+
+test('a download says how far it has come, in whole percent', () => {
+  assert.equal(downloadText(0, 1000), '下载中 0%');
+  assert.equal(downloadText(999, 1000), '下载中 99%');
+  assert.equal(downloadText(1000, 1000), '下载中 100%');
+  assert.equal(downloadText(5, 0), '下载中 0%');
 });

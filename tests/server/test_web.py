@@ -473,6 +473,7 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert seen['fallbackFocusBack']
     assert seen['byCommand'] == {'toast': f'已复制 {detr}@2', 'copied': f'{detr}@2', 'menu': 0, 'focusBack': True}
     assert seen['refsOneLine']
+    assert seen['downloaded'] == 'classes.txt' and seen['downloadButtons'] == 0
     assert seen['calm'] == '0s' and seen['normal'] != '0s'
 
 
@@ -615,6 +616,7 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert '标注批次' in seen['fieldNav'] and '操作记录' not in seen['fieldNav']
+    assert '在等浏览器读目录' in seen['waiting'] and seen['waitingAfter'] == 0
     assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']

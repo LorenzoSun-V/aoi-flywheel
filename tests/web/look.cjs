@@ -181,6 +181,12 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/mv/SES-TX-detr/2`);
   await page.waitForSelector('main table a.ref');
   seen.refsOneLine = await page.$$eval('main table a.ref', (as) => as.every((a) => a.getClientRects().length === 1));
+  // a download says how far it has come, and the button is itself again once the file is handed over
+  const button = page.locator('main button:has-text("下载")').first();
+  const [got] = await Promise.all([page.waitForEvent('download'), button.click()]);
+  seen.downloaded = got.suggestedFilename();
+  await page.waitForFunction(() => [...document.querySelectorAll('main button')].some((b) => b.textContent === '下载' && !b.disabled));
+  seen.downloadButtons = await page.$$eval('main button', (bs) => bs.filter((b) => b.textContent.startsWith('下载中')).length);
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();
