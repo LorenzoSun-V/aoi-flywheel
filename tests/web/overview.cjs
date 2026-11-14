@@ -14,7 +14,8 @@ const { chromium } = require('playwright');
   await page.evaluate((t) => localStorage.setItem('fw-token', t), token);
   await page.reload();
   const seen = {};
-  const firstCells = (id) => page.$$eval(`#${id} + table tr td:first-child`, (c) => c.map((x) => x.textContent));
+  const dataRows = () => page.$$eval('table.data tr', (rows) => rows.slice(1).map((r) => r.cells[0].textContent));
+  const lineAt = (s, l) => page.waitForFunction(([s2, l2]) => location.hash.includes(`site=${s2}&line=${l2}`) && document.querySelector('main h1')?.textContent === l2 && document.querySelector('#release'), [s, l]);
   await page.waitForSelector('#nav a');
   seen.nav = await page.$$eval('#nav a', (as) => as.map((a) => a.textContent));
   await page.click('#nav a:has-text("概览")');
@@ -22,22 +23,24 @@ const { chromium } = require('playwright');
   seen.lineRow = await page.$$eval(`#lines tr:has(a[href*="site=${site}&line=TX"]) td`, (c) => c.map((x) => x.textContent));
   await page.screenshot({ path: `${out}/overview-lines.png`, fullPage: true });
   await page.click(`#lines a[href*="site=${site}&line=TX"]`);
-  await page.waitForFunction((s) => document.querySelector('main h1')?.textContent === `${s} / TX` && document.querySelector('#release'), site);
-  seen.release = await page.textContent('#release + *');
-  seen.models = await page.$$eval('#models + table tr:nth-child(2) td', (c) => c.map((x) => x.textContent));
-  seen.snapshots = await firstCells('snapshots');
-  seen.pools = await firstCells('pools');
-  seen.batches = await page.$$eval('#batches + table tr:nth-child(2) td', (c) => c.map((x) => x.textContent));
+  await lineAt(site, 'TX');
+  seen.release = await page.textContent('#release');
+  seen.models = await page.$$eval('table.models tr:nth-child(2) td', (c) => c.map((x) => x.textContent));
+  await page.click('table.models tr:nth-child(2) button.dots');
+  seen.menu = await page.$$eval('.menu [role=menuitem]', (items) => items.map((i) => [i.textContent, i.getAttribute('href')]));
+  await page.keyboard.press('Escape');
+  seen.data = await dataRows();
+  seen.batches = await page.$$eval('table.batches tr:nth-child(1) td', (c) => c.map((x) => x.querySelector('a') ? x.querySelector('a').textContent : x.textContent));
   seen.treeOn = await page.textContent('#places li.line a.on');
   seen.navModels = await page.getAttribute('#nav a:has-text("模型")', 'href');
-  seen.moreBatches = await page.getAttribute('#batches a', 'href');
+  seen.moreBatches = await page.getAttribute('.section-head:has(#batches) a', 'href');
   await page.screenshot({ path: `${out}/overview-line.png`, fullPage: true });
   await page.click(`#places li.line a[href*="site=${site}&line=TY"]`);
-  await page.waitForFunction((s) => document.querySelector('main h1')?.textContent === `${s} / TY` && document.querySelector('#release'), site);
+  await lineAt(site, 'TY');
   seen.ty = await page.textContent('.browse .list');
-  seen.tyPools = await firstCells('pools');
+  seen.tyPools = await dataRows();
   await page.goto(`${url}#/overview?site=${site}&line=NOPE`);
-  await page.waitForFunction((s) => document.querySelector('main h1')?.textContent === `${s} / NOPE` && document.querySelector('#release'), site);
+  await lineAt(site, 'NOPE');
   seen.unknown = await page.textContent('.browse .list');
   await page.goto(`${url}#/overview?site=${site}`);
   await page.waitForFunction(() => document.querySelector('#lines') && document.querySelector('#places li.site a.on'));
@@ -48,11 +51,11 @@ const { chromium } = require('playwright');
   await page.reload();
   await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '模型');
   await page.goto(`${url}#/overview?site=${site}&line=TX`);
-  await page.waitForFunction((s) => document.querySelector('main h1')?.textContent === `${s} / TX` && document.querySelector('#release'), site);
+  await lineAt(site, 'TX');
   seen.field = {
-    sections: await page.$$eval('.browse .list h2', (h) => h.map((x) => x.id)),
-    release: await page.textContent('#release + *'),
-    model: await page.textContent('#models + table tr:nth-child(2) td'),
+    sections: await page.$$eval('main h2', (h) => h.map((x) => x.id)),
+    release: await page.textContent('#release'),
+    model: await page.textContent('table.models tr:nth-child(2) td'),
     refused: await page.$$eval('main .error', (e) => e.map((x) => x.textContent)),
   };
   // an account without the capability: no link, and the page says why

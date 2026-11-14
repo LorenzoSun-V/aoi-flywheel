@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
+  shortWhen, modelRow, downloadText, readDropped,
+  trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
@@ -150,4 +152,91 @@ test('a number in the tree of sites and lines is the number of rows choosing it 
   assert.deepEqual([d.line(tree.sites[0].lines[0]), d.line(tree.sites[0].lines[1]), d.site(tree.sites[0]), d.all, d.loose], [3, 2, 5, 6, 1]);
   const m = countsBy(tree, ['models']);
   assert.deepEqual([m.line(tree.sites[0].lines[0]), m.site(tree.sites[0]), m.all, m.loose], [3, 3, 4, 1]);
+});
+
+test('the path of a page starts at the home page and goes through the place the thing belongs to', () => {
+  assert.deepEqual(trailOf('datasets', { site: 'SES', line: 'TX' }, [['P', '#/d/P'], '@2']), [
+    ['概览', '#/'], ['SES', '#/?site=SES'], ['TX', '#/?site=SES&line=TX'], ['数据集', '#/datasets?site=SES&line=TX'], ['P', '#/d/P'], ['@2', null]]);
+  // a list is the page itself; a thing of no place (a snapshot from several lines) hangs under the whole list
+  assert.deepEqual(trailOf('models', { site: 'SES', line: '' }), [['概览', '#/'], ['SES', '#/?site=SES'], ['模型', null]]);
+  assert.deepEqual(trailOf('datasets', { site: '', line: '' }, ['T']), [['概览', '#/'], ['数据集', '#/datasets'], ['T', null]]);
+  assert.deepEqual(trailOf('jobs', { site: 'SES', line: 'TX' }, ['任务 3']).map((x) => x[1]), ['#/', '#/?site=SES', '#/?site=SES&line=TX', '#/jobs', null]);
+  assert.deepEqual(trailOf(null, { site: 'SES', line: 'TX' }), [['概览', '#/'], ['SES', '#/?site=SES'], ['TX', null]]);  // the overview of a line
+});
+
+test('back never leaves the platform: only the pages gone through here count', () => {
+  let stack = [];
+  for (const h of ['#/', '#/d/P', '#/v/P/1']) stack = visited(stack, h);
+  assert.deepEqual(stack, ['#/', '#/d/P', '#/v/P/1']);
+  stack = visited(stack, '#/d/P');  // a step back
+  assert.deepEqual(stack, ['#/', '#/d/P']);
+  assert.deepEqual(visited(stack, '#/d/P'), stack);  // drawn again: no step
+  assert.deepEqual(visited(visited(stack, '#/'), '#/jobs'), ['#/', '#/jobs']);
+  assert.equal(visited([], '#/d/P').length, 1);  // opened directly: nothing to go back to
+});
+
+test('the tree shows the ticked sites and lines, and always the one being browsed', () => {
+  const tree = { sites: [{ code: 'SES', lines: [{ code: 'TX' }, { code: 'TY' }] }, { code: 'B2', lines: [{ code: 'L1' }] }] };
+  const codes = (r) => r.sites.map((s) => [s.code, s.lines.map((x) => x.code)]);
+  assert.deepEqual(codes(shownPlaces(tree, [])), [['SES', ['TX', 'TY']], ['B2', ['L1']]]);
+  const hidden = [placeKey('SES', 'TY'), placeKey('B2')];
+  assert.deepEqual(hidden, ['ses/ty', 'b2']);
+  const r = shownPlaces(tree, hidden);
+  assert.deepEqual([codes(r), r.hidden], [[['SES', ['TX']]], 2]);
+  assert.deepEqual(codes(shownPlaces(tree, hidden, { site: 'ses', line: 'ty' })), [['SES', ['TX', 'TY']]]);
+  assert.deepEqual(codes(shownPlaces(tree, hidden, { site: 'B2', line: '' })), [['SES', ['TX']], ['B2', ['L1']]]);
+  assert.deepEqual(codes(shownPlaces(tree, [placeKey('B2'), placeKey('B2', 'L1')], { site: 'B2', line: '' })), [['SES', ['TX', 'TY']], ['B2', []]]);
+  assert.deepEqual(toggled(toggled([], 'a'), 'b'), ['a', 'b']);
+  assert.deepEqual(toggled(['a', 'b'], 'a'), ['b']);
+});
+
+test('what the browser kept about the tree is read with care', () => {
+  assert.deepEqual(readPlaces('{"closed":["ses"],"hidden":["b2",3]}'), { closed: ['ses'], hidden: ['b2'] });
+  for (const bad of [null, '', 'not json', '[]', '{"closed":"ses"}', 'null']) assert.deepEqual(readPlaces(bad), { closed: [], hidden: [] });
+});
+
+test('a release is dated without the year when it is this year', () => {
+  const now = new Date(2026, 10, 14);
+  assert.equal(shortWhen(new Date(2026, 10, 13, 17, 5).toISOString(), now), '11月13日 17:05');
+  assert.equal(shortWhen(new Date(2025, 0, 2, 8, 0).toISOString(), now), '2025年1月2日 08:00');
+  assert.equal(shortWhen(null, now), '');
+});
+
+test('a model row shows the version its numbers belong to, and its menu leads to that version and report', () => {
+  const e = { id: 7, model_version: { ref: 'SES-TX-detr@12' } };
+  const row = modelRow({ name: 'SES-TX-detr', latest: 'SES-TX-detr@13' }, e);
+  assert.deepEqual([row.ref, row.number], ['SES-TX-detr@12', '12']);
+  assert.deepEqual(row.items.map((i) => [i.text, i.href || i.copy]),
+    [['查看版本', '#/mv/SES-TX-detr/12'], ['查看评估', '#/eval/7'], ['复制版本号', 'SES-TX-detr@12']]);
+  const plain = modelRow({ name: 'M', latest: 'M@3' }, undefined);  // no evaluation: no report to show
+  assert.deepEqual(plain.items.map((i) => i.text), ['查看版本', '复制版本号']);
+  assert.equal(plain.number, '3');
+  assert.deepEqual(modelRow({ name: 'N', latest: null }, undefined).items, []);  // no version yet: no menu
+});
+
+test('a download says how far it has come, in whole percent', () => {
+  assert.equal(downloadText(0, 1000), '下载中 0%');
+  assert.equal(downloadText(999, 1000), '下载中 99%');
+  assert.equal(downloadText(1000, 1000), '下载中 100%');
+  assert.equal(downloadText(5, 0), '下载中 0%');
+});
+
+test('a dragged folder is read through all its batches and subfolders, with paths inside the folder', async () => {
+  const file = (fullPath) => ({ isFile: true, isDirectory: false, fullPath, file: (ok) => ok({ name: fullPath }) });
+  const dir = (fullPath, kids, size = 2) => ({
+    isFile: false, isDirectory: true, fullPath, name: fullPath.slice(fullPath.lastIndexOf('/') + 1),
+    createReader() {  // hands the entries over a few at a time, like a browser does (100 at a time there)
+      let at = 0;
+      return { readEntries(ok) { const part = kids.slice(at, at + size); at += size; setTimeout(() => ok(part)); } };
+    },
+  });
+  const top = dir('/20261104', [file('/20261104/a.png'), file('/20261104/a.json'), file('/20261104/b.png'),
+    dir('/20261104/night', [file('/20261104/night/c.png')]), dir('/20261104/empty', [])]);
+  const got = await readDropped(top);
+  assert.equal(got.folder, '20261104');
+  assert.deepEqual(got.paths, ['a.png', 'a.json', 'b.png', 'night/c.png']);
+  assert.deepEqual(got.files.map((f) => f.name), ['/20261104/a.png', '/20261104/a.json', '/20261104/b.png', '/20261104/night/c.png']);
+  const broken = dir('/x', []);
+  broken.createReader = () => ({ readEntries: (ok, no) => no(new Error('读不了')) });
+  await assert.rejects(readDropped(broken), /读不了/);
 });

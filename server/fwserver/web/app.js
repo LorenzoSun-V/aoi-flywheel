@@ -29,8 +29,52 @@ function present(nodes) {
 }
 
 function paint(...nodes) {
-  main.replaceChildren(...present(nodes));
+  const list = present(nodes);
+  const tree = list.find((n) => n instanceof Element && n.id === 'places');  // the tree lives in the side bar
+  main.replaceChildren(...list.filter((n) => n !== tree));
+  if (tree) document.getElementById('side-places').replaceChildren(tree);
+  else sideTree();
   window.scrollTo(0, 0);
+}
+
+// --- icons: one stroke width, drawn as SVG (no HTML strings) ------------------------------------------------
+const SVG = 'http://www.w3.org/2000/svg';
+const ICONS = {
+  overview: ['M4 4h6.5v6.5H4z', 'M13.5 4H20v6.5h-6.5z', 'M4 13.5h6.5V20H4z', 'M13.5 13.5H20V20h-6.5z'],
+  datasets: ['M4 6c0-1.66 3.58-3 8-3s8 1.34 8 3-3.58 3-8 3-8-1.34-8-3z', 'M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6', 'M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6'],
+  batches: ['M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3a1 1 0 0 1 0 1.4l-7.3 7.3a1 1 0 0 1-1.4 0z', 'M8 8h.01'],
+  models: ['M12 2.8l8.5 4.7v9L12 21.2l-8.5-4.7v-9z', 'M3.5 7.5L12 12l8.5-4.5', 'M12 12v9.2'],
+  jobs: ['M7 4.5l12 7.5-12 7.5z'],
+  predictions: ['M12 3l9 5-9 5-9-5z', 'M3 12.5l9 5 9-5', 'M3 16.5l9 5 9-5'],
+  events: ['M9 3.5h6v3H9z', 'M15 5h3a1 1 0 0 1 1 1v13.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3', 'M12 10.5v3.5l2.5 1.5'],
+  users: ['M15.5 20v-1.5a4 4 0 0 0-4-4h-5a4 4 0 0 0-4 4V20', 'M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z', 'M21.5 20v-1.5a4 4 0 0 0-3-3.87', 'M15.5 4.13a3.5 3.5 0 0 1 0 6.74'],
+  line: ['M3.5 3.5v17h17', 'M7.5 15l3.5-4 3 3 5-6'],
+  chip: ['M7 7h10v10H7z', 'M10 10h4v4h-4z', 'M9.5 3v4M14.5 3v4M9.5 17v4M14.5 17v4M3 9.5h4M3 14.5h4M17 9.5h4M17 14.5h4'],
+  folder: ['M3 6.5a1.5 1.5 0 0 1 1.5-1.5h4.4l2 2.2h8.6A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z'],
+  right: ['M9.5 6l6 6-6 6'],
+  left: ['M14.5 6l-6 6 6 6'],
+  down: ['M6 9.5l6 6 6-6'],
+  more: ['M5.5 12h.01M12 12h.01M18.5 12h.01'],
+  open: ['M14 4h6v6', 'M20 4l-8.5 8.5', 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'],
+  chart: ['M4 20h16', 'M7.5 16.5v-4', 'M12 16.5V8', 'M16.5 16.5v-6'],
+  copy: ['M9 9h11v11H9z', 'M15 5V4H4v11h1'],
+  side: ['M4 6h16', 'M4 12h10', 'M4 18h16'],
+  user: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 12.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M6.2 18.4a7 7 0 0 1 11.6 0'],
+  logout: ['M14 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4', 'M9.5 8l-4 4 4 4', 'M5.5 12H15'],
+  arrow: ['M5 12h14', 'M13 6l6 6-6 6'],
+};
+
+export function icon(name, cls = '') {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('class', `icon icon-${name}${cls ? ` ${cls}` : ''}`);
+  for (const d of ICONS[name] || []) {
+    const path = document.createElementNS(SVG, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
 }
 
 // Every page starts with `const show = live();` before its first await: what it shows later is dropped when
@@ -107,7 +151,7 @@ export const api = {
   dataset: (name) => call(`/datasets/${encodeURIComponent(name)}`),
   versions: (name) => call(`/datasets/${encodeURIComponent(name)}/versions`),
   version: (name, number) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
-  sites: () => call('/sites'),
+  sites: () => call('/sites').then((tree) => { treeCache = tree; return tree; }),
   addSite: (ref, name) => call('/sites', { method: 'POST', body: { ref, name } }),
   labels: (name) => call(`/datasets/${encodeURIComponent(name)}/labels`),
   addLabel: (name, number, label, note) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
@@ -299,6 +343,104 @@ async function labelForm(name, versions, model, done) {
       + retired.map((r) => `${r.label}（原来指 ${r.ref}，${r.retired_note}）`).join('、')) : null];
 }
 
+// --- where a page is: the path from the home page, and the way back ---------------------------------------
+const SECTIONS = { datasets: '数据集', batches: '标注批次', models: '模型', jobs: '任务', predictions: '预测集',
+  events: '操作记录', users: '账号', me: '我的凭据' };
+const PLACED = new Set(['datasets', 'batches', 'models']);  // the lists that are browsed by site and line
+
+// The path to a page as [[text, link or null], ...]: the home page (the overview), the site and line the thing
+// belongs to (each leads to the overview of that place), its list (of that place), then the page's own steps
+// (a text: where one is; [text, link]: a step one can go back to).
+export function trailOf(section, place, steps = []) {
+  const at = place && place.site ? { site: place.site, line: place.line || '' } : { site: '', line: '' };
+  const out = [['概览', '#/']];
+  if (at.site) out.push([at.site, hrefOf([], { site: at.site })]);
+  if (at.line) out.push([at.line, hrefOf([], at)]);
+  if (section) out.push([SECTIONS[section], hrefOf([section], PLACED.has(section) ? at : null)]);
+  if (!steps.length) out[out.length - 1] = [out[out.length - 1][0], null];  // the page itself
+  return out.concat(steps.map((x) => (typeof x === 'string' ? [x, null] : x)));
+}
+
+// The pages gone through in this tab, so that "back" never leaves the platform: going to the page before the
+// last one is a step back, anything else a step on.
+export function visited(stack, hash) {
+  if (stack.length > 1 && stack[stack.length - 2] === hash) return stack.slice(0, -1);
+  return stack[stack.length - 1] === hash ? stack : [...stack, hash];
+}
+let visits = [];
+
+// The line on top of every page but the home page: back, and the path. Back is the page one came from; on a
+// page opened directly (a bookmark, a new tab) it is the step above.
+function crumbs(section, place, ...steps) {
+  const trail = trailOf(section, place, steps.filter(Boolean));
+  const up = trail.slice(0, -1).reverse().find(([, href]) => href);
+  return el('nav', { class: 'crumbs' }, sideToggle(),
+    el('button', { class: 'tool back', type: 'button', title: '返回刚才的页面', 'aria-label': '返回', onclick: () => {
+      if (visits.length > 1) history.back(); else location.hash = up ? up[1] : '#/';
+    } }, icon('left')),
+    el('span', { class: 'path' }, trail.map(([text, href], i) => [i ? el('span', { class: 'sep' }, '/') : null,
+      href ? el('a', { href }, text) : el('span', { class: 'here' }, text)])));
+}
+
+// The button that hides and shows the side bar (remembered by the browser).
+const SIDE_KEY = 'fw-side';
+function sideToggle() {
+  return el('button', { class: 'tool side-toggle', type: 'button', title: '收起或展开侧栏', 'aria-label': '收起或展开侧栏',
+    'aria-controls': 'side', onclick: () => {
+      const off = document.body.classList.toggle('side-off');
+      try { localStorage.setItem(SIDE_KEY, off ? 'off' : ''); } catch { /* private window */ }
+    } }, icon('side'));
+}
+
+// The site and line of a dataset (they never change), for the path of the pages below it.
+const placeCache = new Map();
+async function placeOfDataset(name) {
+  if (!placeCache.has(name)) {
+    const d = await api.dataset(name);
+    placeCache.set(name, { site: d.site, line: d.line });
+  }
+  return placeCache.get(name);
+}
+
+// --- which sites and lines the tree shows -----------------------------------------------------------------
+// Kept in this browser: the sites folded up (closed) and the sites and lines one chose not to see (hidden),
+// as lower-case 'site' and 'site/line'. This only tidies the tree and the overview's table of lines: nothing
+// is hidden from the lists themselves.
+const PLACES_KEY = 'fw-places';
+export const placeKey = (site, line) => (line ? `${site}/${line}` : site).toLowerCase();
+
+export function readPlaces(text) {
+  let doc = null;
+  try { doc = JSON.parse(text || '{}'); } catch { /* not ours: start over */ }
+  const list = (x) => (Array.isArray(x) ? x.filter((k) => typeof k === 'string') : []);
+  return { closed: list(doc && doc.closed), hidden: list(doc && doc.hidden) };
+}
+
+export const toggled = (list, key) => (list.includes(key) ? list.filter((k) => k !== key) : [...list, key]);
+
+// The sites and lines to show: {sites, hidden (how many are left out)}. The one being browsed is always shown.
+export function shownPlaces(tree, hidden, at = { site: '', line: '' }) {
+  const off = new Set(hidden);
+  let left = 0;
+  const sites = [];
+  for (const s of tree.sites) {
+    const here = !!at.site && placeKey(s.code) === placeKey(at.site);
+    if (off.has(placeKey(s.code)) && !here) { left += 1; continue; }
+    const lines = s.lines.filter((x) => !off.has(placeKey(s.code, x.code)) || (here && !!at.line && placeKey(x.code) === placeKey(at.line)));
+    left += s.lines.length - lines.length;
+    sites.push({ ...s, lines });
+  }
+  return { sites, hidden: left };
+}
+
+function placePrefs() {
+  try { return readPlaces(localStorage.getItem(PLACES_KEY)); } catch { return readPlaces(''); }
+}
+
+function savePlaces(prefs) {
+  try { localStorage.setItem(PLACES_KEY, JSON.stringify(prefs)); } catch { /* private window: for this page only */ }
+}
+
 // --- browsing by site and line ------------------------------------------------------------------------
 // The list pages (datasets, batches, models) show what belongs to one site or line, chosen in the tree on the
 // left; the choice and the search text are in the address (?site=&line=&q=), and the links at the top keep
@@ -332,19 +474,63 @@ export function datasetCounts(tree) {
 }
 
 // The tree of sites and lines with a count next to each (counts: see countsBy; null: no counts).
-// link(site, line): where a choice leads.
+// link(site, line): where a choice leads. A site folds up with the arrow in front of it; 「选择」 puts a box in
+// front of every site and line, and only the ticked ones are shown afterwards (see shownPlaces).
 function placeTree(tree, at, counts, link) {
-  const a = (site, line, text, count, on) => el('a', { href: link(site, line), class: on ? 'on' : '' }, text,
-    counts ? el('span', { class: 'count' }, String(count())) : null);
+  const aside = el('aside', { id: 'places' });
   const same = (x, y) => x.toLowerCase() === y.toLowerCase();
-  const items = [el('li', {}, a('', '', '全部', () => counts.all, !at.site))];
-  for (const s of tree.sites) {
-    const here = same(s.code, at.site);
-    items.push(el('li', { class: 'site' }, a(s.code, '', placeText(s), () => counts.site(s), here && !at.line)),
-      ...s.lines.map((x) => el('li', { class: 'line' }, a(s.code, x.code, placeText(x), () => counts.line(x), here && same(x.code, at.line)))));
-  }
-  return el('aside', { id: 'places' }, el('div', { class: 'muted' }, '现场 / 产线'), el('ul', {}, items),
-    counts && counts.loose ? el('p', { class: 'muted small' }, `另有 ${counts.loose} 个不在任何登记的现场下（没写现场产线的测试集、现场没登记的旧数据），只在「全部」里。`) : null);
+  const label = (p) => [p.code, p.name].filter(Boolean).join(' ');  // TX 贴片线
+  let choosing = false;
+  const draw = () => {
+    const prefs = placePrefs();
+    const change = (next) => { savePlaces({ ...prefs, ...next }); draw(); };
+    const a = (site, line, text, count, on) => el('a', { href: link(site, line), class: on ? 'on' : '', 'aria-current': on ? 'true' : null },
+      line ? icon('line') : null, el('span', { class: 'name' }, text), counts ? el('span', { class: 'count' }, String(count())) : null);
+    const box = (key, off, what) => (choosing ? el('input', { type: 'checkbox', class: 'pick', checked: !prefs.hidden.includes(key), disabled: off,
+      title: `显示 ${what}`, 'data-place': key, onchange: () => change({ hidden: toggled(prefs.hidden, key) }) }) : null);
+    const { sites, hidden } = choosing ? { sites: tree.sites, hidden: 0 } : shownPlaces(tree, prefs.hidden, at);
+    const whole = (s) => tree.sites.find((x) => x.code === s.code) || s;
+    const items = [el('li', { class: 'all' }, a('', '', '全部', () => counts.all, !at.site))];
+    for (const s of sites) {
+      const here = same(s.code, at.site);
+      const key = placeKey(s.code);
+      const closed = !choosing && prefs.closed.includes(key);
+      const off = prefs.hidden.includes(key);
+      const fold = s.lines.length && !choosing ? el('button', { class: 'fold', type: 'button', 'aria-expanded': String(!closed),
+        title: closed ? `展开 ${s.code} 的产线` : `收起 ${s.code} 的产线`, onclick: () => change({ closed: toggled(prefs.closed, key) }) }, icon('down'))
+        : el('span', { class: 'fold none' });
+      items.push(el('li', { class: `site${closed ? ' closed' : ''}${closed && here && at.line ? ' within' : ''}` }, fold, box(key, false, s.code),
+        a(s.code, '', label(s), () => counts.site(whole(s)), here && !at.line)));  // the lines not shown count too
+      if (!closed) {
+        items.push(...s.lines.map((x) => el('li', { class: 'line' }, box(placeKey(s.code, x.code), off, `${s.code} / ${x.code}`),
+          a(s.code, x.code, label(x), () => counts.line(x), here && same(x.code, at.line)))));
+      }
+    }
+    aside.className = choosing ? 'choosing' : '';
+    aside.replaceChildren(...present([
+      el('div', { class: 'head' }, el('span', {}, '现场 / 产线'),
+        tree.sites.length ? el('button', { id: 'places-choose', class: 'link', type: 'button',
+          title: '选哪些现场、产线显示在这里', onclick: () => {
+            if (choosing) { render(); return; }  // done: the page shows the choice too
+            choosing = true;
+            draw();
+          } }, choosing ? '完成' : '选择') : null),
+      choosing ? el('p', { class: 'muted small' }, '只有勾上的现场和产线显示在这里和概览的表里；这台电脑的这个浏览器会记住。') : null,
+      el('ul', {}, items),
+      hidden ? el('p', { class: 'muted small', id: 'places-hidden' }, `有 ${hidden} 个现场 / 产线没显示，点「选择」勾上。`) : null,
+      counts && counts.loose ? el('p', { class: 'muted small' }, `另有 ${counts.loose} 个不在任何登记的现场下（没写现场产线的测试集、现场没登记的旧数据），只在「全部」里。`) : null]));
+  };
+  draw();
+  return aside;
+}
+
+let treeCache = null;  // the last /sites read (api.sites keeps it)
+async function sideTree() {
+  const slot = document.getElementById('side-places');
+  const mine = seq;
+  if (!me || !can('sites.read')) { slot.replaceChildren(); return; }
+  if (!treeCache) { try { await api.sites(); } catch { return; } }
+  if (mine === seq) slot.replaceChildren(placeTree(treeCache, scope, null, (site, line) => hrefOf([], { site, line })));
 }
 
 // The tree, the search box, and the list itself next to them. parts, keep: the page's address and the query
@@ -355,13 +541,12 @@ function browse(tree, at, parts, keep, counts, hint, ...list) {
     ev.preventDefault();
     location.hash = hrefOf(parts, { ...keep, site: at.site, line: at.line, q: q.value.trim() });
   };
-  return el('div', { class: 'browse' },
-    placeTree(tree, at, counts, (site, line) => hrefOf(parts, { ...keep, site, line, q: at.q })),
+  return [placeTree(tree, at, counts, (site, line) => hrefOf(parts, { ...keep, site, line, q: at.q })), el('div', { class: 'browse' },
     el('div', { class: 'list' },
       el('form', { class: 'row', onsubmit: go }, q, el('button', { type: 'submit' }, '搜索'),
         at.q ? el('a', { href: hrefOf(parts, { ...keep, site: at.site, line: at.line }) }, '清除') : null,
         at.site ? el('span', { class: 'muted' }, `只看 ${[at.site, at.line].filter(Boolean).join(' / ')}`) : null),
-      ...list));
+      ...list))];
 }
 
 async function datasetsPage(query) {
@@ -383,8 +568,8 @@ async function datasetsPage(query) {
   const pools = rows.filter((d) => d.kind !== 'trainset');
   const snapshots = rows.filter((d) => d.kind === 'trainset');
   const narrowed = at.site || at.q;
-  show(el('h1', {}, '数据集'),
-    browse(tree, at, [], {}, datasetCounts(tree), '搜名称',
+  show(crumbs('datasets', at), el('h1', {}, '数据集'),
+    browse(tree, at, ['datasets'], {}, datasetCounts(tree), '搜名称',
       el('h2', { id: 'pools' }, `数据池和测试集（${pools.length}）`),
       pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的数据池。'
         : '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
@@ -407,7 +592,11 @@ function sourceNode(source) {
 
 async function datasetPage(name) {
   const show = live();
-  if ((await api.dataset(name)).kind === 'batch') { location.hash = hrefOf(['b', name]); return; }
+  if ((await api.dataset(name)).kind === 'batch') {  // a batch has its own page: this address does not stay in the way back
+    visits = visits.slice(0, -1);
+    location.replace(hrefOf(['b', name]));
+    return;
+  }
   const [d, versions] = await Promise.all([api.dataset(name), api.versions(name)]);
   const list = versions.slice().reverse();
   const pick = (id) => el('select', { id }, list.map((v) => el('option', { value: String(v.number) }, v.ref)));
@@ -418,7 +607,8 @@ async function datasetPage(name) {
     onclick: () => { location.hash = hrefOf(['diff', d.name], { old: a.value, new: b.value }); },
     disabled: list.length < 2,
   }, '比较');
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', d.name),
+  placeCache.set(d.name, { site: d.site, line: d.line });
+  show(crumbs('datasets', d, d.name),
     el('h1', {}, d.name),
     el('dl', { class: 'kv' }, el('dt', {}, '类型'), el('dd', {}, d.kind), el('dt', {}, '现场 / 产线'),
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
@@ -449,16 +639,14 @@ export function opsText(ops) {
   return ops.map((o) => `${{ add: '新增', replace: '替换', remove: '去掉' }[o.op]} ${o.dir}/`).join('、');
 }
 
-function crumbsFor(version, dir) {
+function crumbsFor(version, dir, place, leaf = true) {  // leaf: the folder is the page itself, not a step above it
   const parts = dir ? dir.split('/') : [];
-  const out = [version.kind === 'batch' ? el('a', { href: '#/batches' }, '标注批次') : el('a', { href: '#/' }, '数据集'), ' / ',
-    el('a', { href: hrefOf([version.kind === 'batch' ? 'b' : 'd', version.dataset]) }, version.dataset),
-    ' / ', el('a', { href: hrefOf(['v', version.dataset, String(version.number)]) }, `@${version.number}`)];
-  parts.forEach((p, i) => {
-    out.push(' / ');
-    out.push(el('a', { href: hrefOf(['v', version.dataset, String(version.number)], { dir: parts.slice(0, i + 1).join('/') }) }, p));
-  });
-  return el('div', { class: 'crumbs' }, out);
+  const batch = version.kind === 'batch';
+  const at = ['v', version.dataset, String(version.number)];
+  const steps = [[version.dataset, hrefOf([batch ? 'b' : 'd', version.dataset])], [`@${version.number}`, hrefOf(at)],
+    ...parts.map((p, i) => [p, hrefOf(at, { dir: parts.slice(0, i + 1).join('/') })])];
+  if (leaf) steps[steps.length - 1] = steps[steps.length - 1][0];
+  return crumbs(batch ? 'batches' : 'datasets', place, ...steps);
 }
 
 // The folders right below dir (with how many images each holds, at any depth) and the images directly in it.
@@ -495,6 +683,7 @@ function lazyThumb(img, file) {
 async function versionPage(name, number, query) {
   const show = live();
   const version = await api.version(name, number);
+  const place = await placeOfDataset(version.dataset);
   const { files, snapshot, flat, problems } = await viewFiles(version);
   const dir = (query.get('dir') || '').replace(/^\/+|\/+$/g, '');
   const page = Math.max(0, Number(query.get('page') || 0));
@@ -508,7 +697,7 @@ async function versionPage(name, number, query) {
     `第 ${page + 1} / ${pages} 页`,
     el('button', { disabled: page + 1 >= pages, onclick: () => { location.hash = hrefOf(vparts, { dir, page: page + 1 }); } }, '下一页')) : null;
   const labeled = images.filter((f) => labelOf(f)).length;
-  show(crumbsFor(version, dir),
+  show(crumbsFor(version, dir, place),
     el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version)),
     dir ? null : el('dl', { class: 'kv' },
       el('dt', {}, '文件'), el('dd', {}, `${version.file_count} 个，${sizeText(version.total_bytes)}`),
@@ -606,6 +795,7 @@ export function predictedShapes(doc, path, threshold) {
 async function imagePage(name, number, path, query) {
   const show = live();
   const version = await api.version(name, number);
+  const place = await placeOfDataset(version.dataset);
   const { files, snapshot } = await viewFiles(version);
   const image = files.find((f) => f.path === path);
   if (!image) throw new Error(`${version.ref} 里没有 ${path}`);
@@ -626,8 +816,8 @@ async function imagePage(name, number, path, query) {
   const side = el('div', { class: 'panel' }, el('p', { class: 'muted' }, '加载中…'));
   const slider = set ? el('input', { type: 'range', min: String(set.conf), max: '1', step: '0.01', value: String(Math.max(threshold, set.conf)),
     onchange: (ev) => { location.hash = hrefOf(['img', version.dataset, String(version.number), path], { pred: set.id, thr: ev.target.value }); } }) : null;
-  show(set ? el('div', { class: 'crumbs' }, el('a', { href: '#/predictions' }, '预测集'), ' / ',
-    el('a', { href: hrefOf(['p', String(set.id)], { thr: query.get('thr') }) }, `#${set.id}`)) : crumbsFor(version, dir),
+  show(set ? crumbs('predictions', null, [`#${set.id}`, hrefOf(['p', String(set.id)], { thr: query.get('thr') })], path.slice(path.lastIndexOf('/') + 1))
+    : crumbsFor(version, dir, place, false),
   el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, path.slice(path.lastIndexOf('/') + 1)),
     slider ? el('label', { class: 'row' }, '阈值', slider, el('span', {}, Math.max(threshold, set.conf).toFixed(2))) : null,
     el('button', { disabled: at <= 0, onclick: () => go(siblings[at - 1]) }, '上一张'),
@@ -687,12 +877,13 @@ async function diffPage(name, query) {
   const show = live();
   const [a, b] = await Promise.all([api.version(name, query.get('old')), api.version(name, query.get('new'))]);
   const d = await api.diff(a.id, b.id);
+  const place = await placeOfDataset(name);
   const LIMIT = 500;
   const link = (v, path) => (IMAGE_EXTS.has(ext(path)) ? el('a', { href: hrefOf(['img', v.dataset, String(v.number), path]) }, path) : path);
   const section = (title, cls, rows) => (rows.length ? [el('h2', {}, `${title}（${rows.length}）`),
     el('table', {}, rows.slice(0, LIMIT).map((r) => el('tr', { class: cls }, el('td', { class: 'mark' }), el('td', {}, r)))),
     rows.length > LIMIT ? el('p', { class: 'muted' }, `只列出前 ${LIMIT} 个；全部用 fw dataset diff --list 看`) : null] : []);
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', name]) }, name), ' / 比较'),
+  show(crumbs('datasets', place, [name, hrefOf(['d', name])], '比较'),
     el('h1', {}, `${a.ref} → ${b.ref}`),
     el('p', {}, `新增 ${d.added.length}，删除 ${d.deleted.length}，修改 ${d.modified.length}，改名 ${d.renamed.length}`),
     section('新增', 'change-added', d.added.map((p) => link(b, p))),
@@ -740,10 +931,33 @@ function fileTable(files) {
 
 // Downloads go through the API with the token, so the file is fetched whole and handed to the browser; the
 // object URL is let go right after (an ONNX can be hundreds of MB).
+// The button shows how much has come so far: an ONNX of hundreds of MB takes a while on the intranet.
+export function downloadText(got, total) {
+  return `下载中 ${total ? Math.min(100, Math.floor((got / total) * 100)) : 0}%`;
+}
+
+async function readAll(response, onProgress) {
+  if (!response.body || !response.body.getReader) return response.blob();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    onProgress(got);
+  }
+  return new Blob(chunks);
+}
+
 async function download(f, button) {
   button.disabled = true;
+  const label = button.textContent;
+  button.title = `${f.path}，${sizeText(f.size)}`;
+  button.textContent = downloadText(0, f.size);
   try {
-    const blob = await (await api.object(f.sha256)).blob();
+    const blob = await readAll(await api.object(f.sha256), (got) => { button.textContent = downloadText(got, f.size); });
     const url = URL.createObjectURL(blob);
     const a = el('a', { href: url, download: f.path.slice(f.path.lastIndexOf('/') + 1) });
     document.body.append(a);
@@ -754,18 +968,20 @@ async function download(f, button) {
     button.after(el('span', { class: 'bad' }, ` 下载不了：${e.message}`));
   } finally {
     button.disabled = false;
+    button.textContent = label;
+    button.removeAttribute('title');
   }
 }
 
 const vref = (ref) => {  // NAME@N -> link to the dataset version page
   const [name, number] = ref.split(':')[0].split('@');
-  return el('a', { href: hrefOf(['v', name, number]) }, ref);
+  return el('a', { class: 'ref', href: hrefOf(['v', name, number]) }, ref);
 };
 const mref = (ref) => {
   const [name, number] = ref.split('@');
-  return el('a', { href: hrefOf(['mv', name, number]) }, ref);
+  return el('a', { class: 'ref', href: hrefOf(['mv', name, number]) }, ref);
 };
-const jobLink = (id) => (id ? el('a', { href: hrefOf(['job', String(id)]) }, `任务 ${id}`) : '-');
+const jobLink = (id) => (id ? el('a', { class: 'ref', href: hrefOf(['job', String(id)]) }, `任务 ${id}`) : '-');
 
 async function modelsPage(query) {
   const show = live();
@@ -773,7 +989,7 @@ async function modelsPage(query) {
   scope = at;
   renderNav();
   const [rows, tree] = await Promise.all([api.models(scopeQuery(at)), api.sites()]);
-  show(el('h1', {}, '模型'),
+  show(crumbs('models', at), el('h1', {}, '模型'),
     browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '搜名称',
       rows.length ? el('table', {}, el('tr', {}, ['名称', '现场 / 产线', '任务', '版本数', '最新', '建立', '备注'].map((h) => el('th', {}, h))),
         rows.map((m) => el('tr', {},
@@ -788,7 +1004,7 @@ async function modelPage(name) {
   const show = live();
   const [m, versions, evals] = await Promise.all([api.model(name), api.modelVersions(name), api.evals(name)]);
   const list = versions.slice().reverse();
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/models' }, '模型'), ' / ', m.name),
+  show(crumbs('models', m, m.name),
     el('h1', {}, m.name),
     el('dl', { class: 'kv' }, el('dt', {}, '现场 / 产线'), el('dd', {}, `${m.site} / ${m.line}`),
       el('dt', {}, '任务'), el('dd', {}, TASK_NAMES[m.task] || m.task),
@@ -832,7 +1048,7 @@ async function modelVersionPage(name, number) {
   const mv = await api.modelVersion(name, number);
   const [chain, sets] = await Promise.all([api.chain(mv.ref), api.predictionSets(mv.model)]);
   const mine = sets.filter((p) => p.model_version.id === mv.id).reverse();
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/models' }, '模型'), ' / ', el('a', { href: hrefOf(['m', mv.model]) }, mv.model), ' / ', `@${mv.number}`),
+  show(crumbs('models', mv, [mv.model, hrefOf(['m', mv.model])], `@${mv.number}`),
     el('h1', {}, mv.ref, labelChips(mv), ...mv.tags.map((t) => [' ', el('span', { class: 'tag' }, t)])),
     el('dl', { class: 'kv' },
       el('dt', {}, '训练集快照'), el('dd', {}, vref(mv.trainset.ref)),
@@ -894,7 +1110,8 @@ async function submitForms(mv) {
 async function evalPage(id) {
   const show = live();
   const e = await api.eval(id);
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/models' }, '模型'), ' / ', mref(e.model_version.ref), ' / ', `评估 #${e.id}`),
+  const [model, number] = e.model_version.ref.split('@');
+  show(crumbs('models', null, [model, hrefOf(['m', model])], [`@${number}`, hrefOf(['mv', model, number])], `评估 #${e.id}`),
     el('h1', {}, `评估 #${e.id}`),
     el('dl', { class: 'kv' },
       el('dt', {}, '模型版本'), el('dd', {}, mref(e.model_version.ref)),
@@ -920,7 +1137,7 @@ async function evalComparePage(query) {
     return el('td', { class: `num ${d > 0 ? 'ok' : d < 0 ? 'bad' : ''}` }, (d > 0 ? '+' : '') + numberText(d));
   };
   const head = (e) => [el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`), el('div', { class: 'muted' }, `${e.model_version.ref} 在 ${e.testset.ref}`)];
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/models' }, '模型'), ' / 比较评估'),
+  show(crumbs('models', null, '比较评估'),
     el('h1', {}, '比较评估'),
     a.testset.ref !== b.testset.ref || a.dirs.join() !== b.dirs.join()
       ? el('div', { class: 'error' }, '两份报告的测试集或目录不一样，数字不能直接比') : null,
@@ -951,7 +1168,7 @@ async function jobsPage(query) {
   const pick = el('select', { onchange: (ev) => { location.hash = hrefOf(['jobs'], { status: ev.target.value }); } },
     [['', '全部'], ['queued', '排队'], ['running', '运行中'], ['done', '完成'], ['failed', '失败'], ['cancelled', '已取消']]
       .map(([v, t]) => el('option', { value: v, selected: v === status }, t)));
-  show(el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, '任务'), '状态', pick),
+  show(crumbs('jobs'), el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, '任务'), '状态', pick),
     rows.length ? el('table', {}, el('tr', {}, ['编号', '类型', '内容', '推理环境', '状态', '提交', '开始', '结束'].map((h) => el('th', {}, h))),
       rows.map((j) => el('tr', {},
         el('td', {}, jobLink(j.id)), el('td', {}, j.kind_text), el('td', {}, jobWhat(j)), el('td', {}, j.runner || '-'),
@@ -990,7 +1207,7 @@ async function jobPage(id, query) {
     result.replaceChildren(j.status === 'done' ? jobResult(j) : j.error ? el('span', { class: 'bad' }, j.error) : '-');
     cancel.hidden = !can('jobs.write') || !(j.status === 'queued' || j.status === 'running') || j.cancel_requested;
   };
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/jobs' }, '任务'), ' / ', `任务 ${j.id}`),
+  show(crumbs('jobs', null, `任务 ${j.id}`),
     query.get('reused') ? el('p', { class: 'panel' }, '同样的模型版本、推理环境、图片和 conf 已经有一个任务，用的就是它，没有再跑。') : null,
     el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, `任务 ${j.id}：${j.kind_text}`), cancel),
     el('dl', { class: 'kv' },
@@ -1037,7 +1254,7 @@ function predictionTable(rows, withModel) {
 async function predictionsPage() {
   const show = live();
   const rows = await api.predictionSets();
-  show(el('h1', {}, '预测集'),
+  show(crumbs('predictions'), el('h1', {}, '预测集'),
     el('p', { class: 'muted' }, '模型在数据池图片上的推理结果。下载成预标注：fw predict get <编号> <目录> --threshold 0.3。'),
     predictionTable(rows.slice().reverse(), true));
 }
@@ -1060,7 +1277,7 @@ async function predictionPage(id, query) {
   const keep = (extra) => hrefOf(['p', String(set.id)], { thr: query.get('thr'), ...extra });
   const slider = el('input', { type: 'range', min: String(set.conf), max: '1', step: '0.01', value: String(threshold),
     onchange: (ev) => { location.hash = keep({ thr: ev.target.value, page: null }); } });
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/predictions' }, '预测集'), ' / ', `#${set.id}`),
+  show(crumbs('predictions', null, `#${set.id}`),
     el('h1', {}, `预测集 #${set.id}`),
     el('dl', { class: 'kv' },
       el('dt', {}, '模型版本'), el('dd', {}, mref(set.model_version.ref)),
@@ -1168,6 +1385,92 @@ function bar() {
   return node;
 }
 
+// The files of a folder dragged onto the page, from its FileSystemDirectoryEntry: the folder's name, the
+// files and their paths inside the folder (what relPaths gives for a picked folder).
+export async function readDropped(dir) {
+  const found = [];
+  const walk = async (d) => {
+    const reader = d.createReader();
+    for (;;) {  // readEntries hands the entries over a batch at a time, then an empty one
+      const batch = await new Promise((ok, no) => reader.readEntries(ok, no));
+      if (!batch.length) return;
+      for (const e of batch) if (e.isDirectory) await walk(e); else if (e.isFile) found.push(e);
+    }
+  };
+  await walk(dir);
+  const files = new Array(found.length);
+  await inParallel(found, 32, async (e, i) => { files[i] = await new Promise((ok, no) => e.file(ok, no)); });
+  const cut = dir.fullPath.length + 1;  // fullPath is "/<folder>/sub/a.png"
+  return { folder: dir.name, files, paths: found.map((e) => e.fullPath.slice(cut)) };
+}
+
+// Where a folder is given: dragged onto the box, or chosen with the button. Dragging skips the browser's
+// folder dialog and its "upload N files?" prompt, which on some Windows machines take seconds whatever the
+// folder holds. The box's files / paths / folder hold what was given; a 'change' event says new ones came.
+function folderInput() {
+  const input = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const status = el('span', {}, '把目录拖到这里');
+  const box = el('div', { class: 'drop' }, icon('folder'), status, el('label', { class: 'choose' }, '或者选择目录', input));
+  let disabled = false;
+  let shown = [status.textContent, status.className];  // what to show again when a choice is cancelled
+  let reads = 0;  // each choice or drop starts a new read; an older one that finishes later is dropped
+  const say = (text, cls = '') => { status.textContent = text; status.className = cls; };
+  const reading = () => {
+    if (!box.classList.contains('reading')) shown = [status.textContent, status.className];
+    box.classList.add('reading');
+    say('正在读取目录…');
+    return ++reads;
+  };
+  const pick = (files, paths, folder) => {
+    Object.assign(box, { files, paths, folder });
+    box.classList.remove('reading');
+    say(files.length ? `${folder}/ · ${files.length} 个文件` : `${folder}/ 是空的`, files.length ? 'got' : 'bad');
+  };
+  Object.assign(box, { files: [], paths: [], folder: '' });
+  Object.defineProperty(box, 'disabled', {
+    get: () => disabled,
+    set: (on) => { disabled = on; input.disabled = on; box.classList.toggle('off', on); },
+  });
+  input.addEventListener('click', reading);
+  input.addEventListener('cancel', () => {  // an older read still going was dropped by the click: show what was before it
+    reads++;
+    box.classList.remove('reading');
+    say(...shown);
+  });
+  input.addEventListener('change', () => {  // then the event goes on up to the box, where the page listens
+    reads++;
+    const files = [...input.files];
+    pick(files, relPaths(files), files.length ? (files[0].webkitRelativePath || '').split('/')[0] : '');
+  });
+  box.addEventListener('dragover', (ev) => {
+    ev.preventDefault();
+    if (!disabled) box.classList.add('over');
+  });
+  box.addEventListener('dragleave', (ev) => { if (!box.contains(ev.relatedTarget)) box.classList.remove('over'); });
+  box.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    box.classList.remove('over');
+    if (disabled) return;
+    const items = [...((ev.dataTransfer && ev.dataTransfer.items) || [])].filter((i) => i.kind === 'file');
+    const entries = items.map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
+    if (entries.length !== 1 || !entries[0].isDirectory) {
+      say('拖进来的要是一个目录：不是文件，也不是几个目录一起', 'bad');
+      return;
+    }
+    const mine = reading();
+    readDropped(entries[0]).then(({ folder, files, paths }) => {
+      if (mine !== reads) return;
+      pick(files, paths, folder);
+      box.dispatchEvent(new Event('change'));
+    }).catch((e) => {
+      if (mine !== reads) return;
+      box.classList.remove('reading');
+      say(`读不了这个目录：${e.message}`, 'bad');
+    });
+  });
+  return box;
+}
+
 let uploading = false;
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', (ev) => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
@@ -1178,7 +1481,7 @@ async function uploadPage(name) {
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
   const latest = d.latest;
-  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const picker = folderInput();
   const allowOther = el('input', { type: 'checkbox' });
   const force = el('input', { type: 'checkbox' });
   const note = el('input', { type: 'text', placeholder: '这批数据是什么（来源、日期、批次），写进版本备注' });
@@ -1291,19 +1594,19 @@ async function uploadPage(name) {
   };
 
   picker.addEventListener('change', () => {
-    files = [...picker.files];
-    paths = relPaths(files);
+    files = picker.files;
+    paths = picker.paths;
     check().catch((e) => result.replaceChildren(errorBox(e)));
   });
   for (const box of [allowOther, force]) box.addEventListener('change', () => check().catch((e) => result.replaceChildren(errorBox(e))));
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传'),
+  show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '上传'),
     el('h1', {}, `上传到 ${d.name}`),
     el('p', { class: 'muted' }, ['只想加一个新目录、不动池里原有的文件？用 ', el('a', { href: hrefOf(['add', d.name]) }, '上传新增目录'), '。']),
     el('p', { class: 'muted' }, `选一个目录：目录里的全部文件成为新版本（${latest ? `父版本 ${latest.ref}；目录里没有的文件在新版本里就是删除` : '第一个版本'}）。`
       + '和 fw dataset import 一样检查、按哈希去重（服务器上已有的不再上传），建好后冻结。大批数据（几万张）还是在服务器上用 fw dataset import 快。'
       + '浏览器看不到读不了的子目录和链接（命令行会拦下），上传前看清「会删掉」的提示。'),
     el('div', { class: 'panel form' },
-      el('label', {}, '目录', picker),
+      el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       el('label', {}, '备注', note),
       el('label', { class: 'check' }, allowOther, '图片和标注以外的文件也一起入库（--allow-other-files）'),
       el('label', { class: 'check' }, force, '同名不同扩展名的图片也入库（--force）')),
@@ -1343,7 +1646,7 @@ async function addPage(name) {
   const show = live();
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传；快照用 fw trainset create 建`);
-  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const picker = folderInput();
   const target = el('input', { type: 'text', placeholder: '选了目录以后自动填目录名，可以改，例如 20261104 或 night/20261104' });
   const replace = el('input', { type: 'checkbox' });
   const allowOther = el('input', { type: 'checkbox' });
@@ -1462,9 +1765,9 @@ async function addPage(name) {
 
   const again = () => check().catch((e) => result.replaceChildren(errorBox(e)));
   picker.addEventListener('change', () => {
-    files = [...picker.files];
-    paths = relPaths(files);
-    if (files.length) target.value = (files[0].webkitRelativePath || '').split('/')[0];
+    files = picker.files;
+    paths = picker.paths;
+    if (files.length) target.value = picker.folder;
     again();
   });
   for (const box of [replace, allowOther, force]) box.addEventListener('change', again);
@@ -1474,12 +1777,12 @@ async function addPage(name) {
     clearTimeout(typing);
     typing = setTimeout(again, 400);
   });
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 上传新增目录'),
+  show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '上传新增目录'),
     el('h1', {}, `往 ${d.name} 里加一个目录`),
     el('p', { class: 'muted' }, `选一个目录，比如今天采集的那一天：只上传这个目录，新版本 = ${d.latest ? d.latest.ref : '空'} + 这个目录，池里原有的文件不动。`
       + '池里已经有同名目录时会拦下，除非勾选「替换已有目录」。和池里重复的图片、标注不一致的重复图片只提醒，不拦。和 fw dataset add 是同一件事。'),
     el('div', { class: 'panel form' },
-      el('label', {}, '目录', picker),
+      el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       el('label', {}, '放在池里的目录', target),
       el('label', {}, '备注', note),
       el('label', { class: 'check' }, replace, '替换已有目录：池里已有这个目录时，整个换成这一份（--replace）'),
@@ -1525,7 +1828,7 @@ async function removePage(name) {
     result.replaceChildren(...present([changeReport(plan), go ? el('div', { class: 'row' }, go) : null]));
   };
   const run = () => preview().catch((e) => result.replaceChildren(errorBox(e)));
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/' }, '数据集'), ' / ', el('a', { href: hrefOf(['d', d.name]) }, d.name), ' / 去掉目录'),
+  show(crumbs('datasets', d, [d.name, hrefOf(['d', d.name])], '去掉目录'),
     el('h1', {}, `从 ${d.name} 里去掉目录`),
     el('p', { class: 'muted' }, `新版本 = ${latest.ref} 去掉选中的目录。${latest.ref} 和更早的版本不变，用它们建的训练集快照也不变，随时可以取回。和 fw dataset remove 是同一件事。`),
     el('div', { class: 'panel form' },
@@ -1540,7 +1843,7 @@ async function removePage(name) {
 // --- accounts, tokens, the record of who did what ------------------------------------------------------------
 // --- labelling batches: upload, review, import ---------------------------------------------------------
 const BATCH_CLASS = { open: '', review: 'warn', rejected: 'bad', approved: 'ok', imported: 'muted', closed: 'muted' };
-const bref = (name) => el('a', { href: hrefOf(['b', name]) }, name);
+const bref = (name) => el('a', { class: 'ref', href: hrefOf(['b', name]) }, name);
 
 export function boxChangeText(row) {
   if (row.unreadable) return '标注读不出框，没有逐框比较';
@@ -1567,7 +1870,7 @@ async function batchesPage(query) {
     el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), el('td', {}, when(b.updated_at))));
   const empty = at.site || at.q ? '这里没有符合的批次。'
     : { todo: '没有待你复核的批次。', mine: '你还没有上传过批次。', all: '还没有批次。' }[view];
-  show(el('h1', {}, '标注批次'),
+  show(crumbs('batches', at), el('h1', {}, '标注批次'),
     el('p', { class: 'muted' }, '一个批次是一个要进数据池的目录：上传（每次上传都冻结成一版，不进数据池）、提交给复核人、退回或通过，通过以后由算法工程师入库。'),
     browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '搜批次名称',
       el('div', { class: 'row tabs' }, tabs, can('batches.write') ? el('a', { class: 'button primary', href: '#/batch-new' }, '上传新批次') : null),
@@ -1579,7 +1882,7 @@ async function batchesPage(query) {
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
 // then makes the batch, the revision or the approval. Returns the node to show.
 function folderSender({ controls, allowOther, force, onPick, label, ready, done }) {
-  const picker = el('input', { type: 'file', webkitdirectory: true, multiple: true });
+  const picker = folderInput();
   const result = el('div');
   let files = [];
   let paths = [];
@@ -1651,9 +1954,9 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
 
   const again = () => check().catch((e) => result.replaceChildren(errorBox(e)));
   picker.addEventListener('change', () => {
-    files = [...picker.files];
-    paths = relPaths(files);
-    if (files.length && onPick) onPick((files[0].webkitRelativePath || '').split('/')[0]);
+    files = picker.files;
+    paths = picker.paths;
+    if (files.length && onPick) onPick(picker.folder);
     again();
   });
   for (const box of [allowOther, force]) box.addEventListener('change', again);
@@ -1713,7 +2016,7 @@ async function batchUploadPage(name, query) {
     },
     ready, done });
   const title = approve ? `通过 ${b.name}，并带上我修改后的内容` : b ? `给 ${b.name} 上传新的一版` : '上传新批次';
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/batches' }, '标注批次'), b ? [' / ', bref(b.name)] : null, ` / ${approve ? '修改后通过' : b ? '新的一版' : '上传'}`),
+  show(crumbs('batches', b, b ? [b.name, hrefOf(['b', b.name])] : null, approve ? '修改后通过' : b ? '新的一版' : '上传'),
     el('h1', {}, title),
     el('p', { class: 'muted' }, approve
       ? `选你修改后的整个目录（${b.dir}/）：它成为第 ${b.revision + 1} 版，记下是你改的，并且直接通过。`
@@ -1721,7 +2024,7 @@ async function batchUploadPage(name, query) {
         : '选一个目录，原始图片或已经标注的都行：冻结成批次的第 1 版，不会进数据池；复核通过以后由算法工程师入库。'),
     el('div', { class: 'panel form' },
       b ? null : el('label', {}, '进哪个数据池', pool),
-      el('label', {}, '目录', picker),
+      el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       b ? null : el('label', {}, '批次名称', batchName),
       b ? null : el('label', {}, '池里的目录名', dir),
       el('label', {}, approve ? '修改人姓名' : '标注人姓名', labeler),
@@ -1850,7 +2153,7 @@ async function batchPage(name, query) {
         s.pool_version ? ['，成为 ', vref(s.pool_version)] : null),
       el('td', {}, s.comment, s.images.length ? el('ul', { class: 'mono' }, s.images.map((i) => el('li', {},
         el('a', { href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i)))) : null)));
-    show(el('div', { class: 'crumbs' }, el('a', { href: '#/batches' }, '标注批次'), ` / ${b.name}`),
+    show(crumbs('batches', b, b.name),
       el('h1', {}, b.name, ' ', el('span', { class: `tag ${BATCH_CLASS[b.status]}`, id: 'batch-status' }, b.status_text)),
       el('p', {}, '入库后是 ', el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` 的 ${b.dir}/`,
         b.imported ? ['；已入库为 ', vref(b.imported)] : null,
@@ -1938,7 +2241,7 @@ async function usersPage() {
       try { await api.createUser(name.value.trim(), role.value); await draw(); } catch (e) { say(e); }
     };
     msg.replaceChildren();
-    show(el('h1', {}, '账号'),
+    show(crumbs('users'), el('h1', {}, '账号'),
       el('p', { class: 'muted' }, '一人一个账号。管理员管账号；算法工程师能新建和修改数据集、模型、评估和任务；现场实施能看数据集和模型、下载文件、登记发布；GPU worker 是 GPU 机用的账号。'
         + '每一次改动都记在「操作记录」里。'),
       msg,
@@ -1956,7 +2259,7 @@ async function mePage() {
   const msg = el('div');
   const draw = async () => {
     const tokens = await api.myTokens();
-    show(el('h1', {}, '我的凭据'),
+    show(crumbs('me'), el('h1', {}, '我的凭据'),
       el('p', { class: 'muted' }, `${me.name}（${me.role_text || me.role}）。现在登录用的是凭据 ${me.token_id}${me.token_label ? `（${me.token_label}）` : ''}。`
         + '不再用的机器可以在这里吊销它的凭据；要新凭据找管理员。'),
       msg,
@@ -1992,7 +2295,7 @@ async function eventsPage(query) {
   const actor = el('input', { type: 'text', placeholder: '账号', value: asked.actor || '' });
   const q = el('input', { type: 'text', placeholder: '对象里的字，例如 SES-TX', value: asked.q || '' });
   const filter = (ev) => { ev.preventDefault(); go({ action: action.value, actor: actor.value.trim(), q: q.value.trim() }); };
-  show(el('h1', {}, '操作记录'),
+  show(crumbs('events'), el('h1', {}, '操作记录'),
     el('p', { class: 'muted' }, '谁在什么时候改了什么：建版本、登记模型和发布、提交和取消任务、账号和凭据的变动。和改动本身一起写入，只增不改。'),
     el('form', { class: 'row', onsubmit: filter }, action, actor, q, el('button', { type: 'submit' }, '筛选')),
     r.events.length ? el('table', {}, el('tr', {}, ['时间', '账号', '操作', '对象', '细节'].map((h) => el('th', {}, h))),
@@ -2085,13 +2388,129 @@ export function lastEvalByModel(evals) {
 }
 
 function lineTable(tree, at) {
-  const sites = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
+  const shown = shownPlaces(tree, placePrefs().hidden, at);  // the lines chosen in the tree
+  const sites = shown.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
   const rows = sites.flatMap((s) => s.lines.map((x) => el('tr', {},
-    el('td', {}, el('a', { href: hrefOf(['overview'], { site: s.code, line: x.code }) }, `${placeText(s)} / ${placeText(x)}`)),
+    el('td', {}, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${placeText(s)} / ${placeText(x)}`)),
     ...['datasets', 'snapshots', 'models', 'batches', 'releases'].map((k) => el('td', { class: 'num' }, String(x[k] || 0))))));
-  if (!rows.length) return el('p', { class: 'muted' }, at.site ? '这个现场还没有登记产线。' : '还没有登记现场和产线：在「数据集」页最下面登记。');
-  return el('table', { id: 'lines' }, el('tr', {}, ['现场 / 产线', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数'].map((h, i) => el('th', { class: i ? 'num' : '' }, h))), rows);
+  const all = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
+  const lines = (list) => list.reduce((n, s) => n + s.lines.length, 0);
+  const missing = at.site ? lines(all) - lines(sites) : shown.hidden;  // of what this page would list
+  const left = missing ? el('p', { class: 'muted small' }, `有 ${missing} 个${at.site ? '产线' : '现场 / 产线'}没显示：在左边点「选择」勾上。`) : null;
+  if (!rows.length) {
+    return [el('p', { class: 'muted' }, at.site ? '这个现场没有要显示的产线。' : tree.sites.length ? '没有要显示的产线。' : '还没有登记现场和产线：在「数据集」页最下面登记。'), left];
+  }
+  return [el('table', { id: 'lines' }, el('tr', {}, ['现场 / 产线', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数'].map((h, i) => el('th', { class: i ? 'num' : '' }, h))), rows), left];
 }
+
+// A day and time without the year when it is this year: 11月13日 17:25.
+export function shortWhen(stamp, now = new Date()) {
+  if (!stamp) return '';
+  const d = new Date(stamp);
+  const p = (x) => String(x).padStart(2, '0');
+  const day = `${d.getMonth() + 1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.getFullYear() === now.getFullYear() ? day : `${d.getFullYear()}年${day}`;
+}
+
+// What a row of the overview's model table shows: the version its numbers belong to (that of its last
+// evaluation, or the newest version when it has none) and the menu behind its ⋯.
+export function modelRow(m, e) {
+  const ref = e ? e.model_version.ref : m.latest || '';
+  const [name, number] = ref ? ref.split('@') : [m.name, ''];
+  const items = [];
+  if (ref) items.push({ icon: 'open', text: '查看版本', href: hrefOf(['mv', name, number]) });
+  if (e) items.push({ icon: 'chart', text: '查看评估', href: hrefOf(['eval', String(e.id)]) });
+  if (ref) items.push({ icon: 'copy', text: '复制版本号', copy: ref });
+  return { ref, number, items };
+}
+
+// The one menu open now (a ⋯ menu): Esc or a click elsewhere closes it.
+let openMenu = null;
+function closeMenu(refocus = false) {
+  if (openMenu) openMenu.close(refocus);
+}
+
+// A ⋯ button and its menu. items: {icon, text, href} or {icon, text, copy}. Opened, the first item has the
+// focus; arrows move it; Esc, Tab, a click elsewhere or a choice closes it (by keys the focus goes back to ⋯).
+function moreMenu(label, items) {
+  const wrap = el('div', { class: 'more' });
+  const button = el('button', { class: 'tool dots', type: 'button', title: '更多', 'aria-label': `${label} 的更多操作`,
+    'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('more'));
+  const open = () => {
+    closeMenu();
+    const menu = el('div', { class: 'menu', role: 'menu', 'aria-label': label });
+    const close = (refocus) => {
+      menu.remove();
+      wrap.classList.remove('open');
+      button.setAttribute('aria-expanded', 'false');
+      if (openMenu && openMenu.wrap === wrap) openMenu = null;
+      if (refocus) button.focus();
+    };
+    menu.append(...items.map((it) => (it.href
+      ? el('a', { role: 'menuitem', href: it.href, tabindex: '-1', onclick: () => close(false) }, icon(it.icon), el('span', {}, it.text))
+      : el('button', { role: 'menuitem', type: 'button', tabindex: '-1', onclick: () => copyRef(it.copy, menu, close) }, icon(it.icon), el('span', {}, it.text)))));
+    menu.addEventListener('keydown', (ev) => {
+      const list = [...menu.querySelectorAll('[role=menuitem]')];
+      const at = list.indexOf(document.activeElement);
+      const go = (i) => { ev.preventDefault(); if (list.length) list[(i + list.length) % list.length].focus(); };
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(true); }
+      else if (ev.key === 'Tab') close(false);
+      else if (ev.key === 'ArrowDown') go(at + 1);
+      else if (ev.key === 'ArrowUp') go(at - 1);
+      else if (ev.key === 'Home') go(0);
+      else if (ev.key === 'End') go(-1);
+    });
+    wrap.append(menu);
+    wrap.classList.add('open');
+    button.setAttribute('aria-expanded', 'true');
+    openMenu = { wrap, close };
+    menu.querySelector('[role=menuitem]').focus();
+  };
+  button.addEventListener('click', () => { if (openMenu && openMenu.wrap === wrap) closeMenu(); else open(); });
+  button.addEventListener('keydown', (ev) => { if (ev.key === 'ArrowDown') { ev.preventDefault(); open(); } });
+  wrap.append(button);
+  return wrap;
+}
+
+// Copy a version's full reference. Where the browser has no clipboard for the page (an http address on the
+// intranet), the menu shows the reference selected and tries the older copy command on it; if that fails
+// too, it says to press Ctrl+C.
+async function copyRef(ref, menu, close) {
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
+    await navigator.clipboard.writeText(ref);
+    close(true);
+    toast(`已复制 ${ref}`);
+  } catch {
+    const field = el('input', { class: 'copy-field mono', type: 'text', readonly: true, value: ref, 'aria-label': '版本号' });
+    menu.replaceChildren(el('p', { class: 'small' }, '浏览器不让这个页面写剪贴板，按 Ctrl+C 复制：'), field);
+    field.focus();
+    field.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { /* not there either */ }
+    if (copied) {
+      close(true);
+      toast(`已复制 ${ref}`);
+    }
+  }
+}
+
+// A short note at the bottom of the window that goes away by itself.
+let toastTimer = null;
+function toast(text) {
+  let box = document.getElementById('toast');
+  if (!box) {
+    box = el('div', { id: 'toast', role: 'status', 'aria-live': 'polite' });
+    document.body.append(box);
+  }
+  box.replaceChildren(icon('copy'), el('span', {}, text));
+  box.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => box.classList.remove('show'), 1800);
+}
+
+const BATCH_DOT = { open: 'blue', review: 'orange', rejected: 'red', approved: 'green', imported: 'gray', closed: 'gray' };
+const DATA_ORDER = ['pool', 'trainset', 'test', 'regression', 'other'];
 
 async function overviewPage(query) {
   const show = live();
@@ -2099,10 +2518,11 @@ async function overviewPage(query) {
   scope = at;
   renderNav();
   const tree = await api.sites();
-  const side = placeTree(tree, at, null, (site, line) => hrefOf(['overview'], { site, line }));
+  const side = placeTree(tree, at, null, (site, line) => hrefOf([], { site, line }));
+  const site = tree.sites.find((s) => s.code.toLowerCase() === at.site.toLowerCase());
   if (!at.line) {
-    show(el('h1', {}, '概览'),
-      el('div', { class: 'browse' }, side, el('div', { class: 'list' },
+    show(at.site ? crumbs(null, at) : el('nav', { class: 'crumbs' }, sideToggle()), el('h1', {}, at.site ? (site ? placeText(site) : at.site) : '概览'), side,
+      el('div', { class: 'browse' }, el('div', { class: 'list' },
         el('p', { class: 'muted' }, '点一条产线，看它现在发布的模型、最近的评估、训练集快照、数据池和在办的批次。'), lineTable(tree, at))));
     return;
   }
@@ -2112,76 +2532,87 @@ async function overviewPage(query) {
     api.datasets(where), api.models(where), api.currentRelease(at.site, at.line).catch(none),
     can('batches.read') ? api.batches(where).then((r) => batchesUnderWay(r.batches)) : null]);
   const evals = lastEvalByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat());
-  const more = (parts, text) => el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, text);
-  const head = (id, text, parts, link) => el('h2', { id }, text, ' ', more(parts, link));
-  const latest = (d) => (d.latest ? [el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref), labelChips(d.latest)] : '-');
-  const dataTable = (list, kind) => el('table', {}, el('tr', {}, ['名称', kind ? '类型' : null, '最新版本', '大小', '最新版本时间'].filter(Boolean).map((h) => el('th', {}, h))),
-    list.map((d) => el('tr', {}, el('td', {}, el('a', { href: hrefOf(['d', d.name]) }, d.name)),
-      kind ? el('td', {}, KIND_NAMES[d.kind] || d.kind) : null, el('td', {}, latest(d)),
-      el('td', {}, d.latest ? `${d.latest.file_count} 个文件，${sizeText(d.latest.total_bytes)}` : ''),
-      el('td', {}, d.latest ? when(d.latest.created_at) : ''))));
-  const pools = data.filter((d) => d.kind !== 'trainset');
-  const snapshots = data.filter((d) => d.kind === 'trainset');
-  const site = tree.sites.find((s) => s.code.toLowerCase() === at.site.toLowerCase());
+  const head = (id, text, parts, link) => el('div', { class: 'section-head' }, el('h2', { id }, text),
+    el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link));
   const line = site && site.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
-  show(el('div', { class: 'crumbs' }, el('a', { href: '#/overview' }, '概览'), ' / ',
-    el('a', { href: hrefOf(['overview'], { site: at.site }) }, site ? placeText(site) : at.site), ' / ', line ? placeText(line) : at.line),
-  el('h1', {}, `${at.site} / ${at.line}`),
-  el('div', { class: 'browse' }, side, el('div', { class: 'list' },
-    line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是登记过的产线，下面是名字对得上的东西。`),
-    el('h2', { id: 'release' }, '现在发布的'),
-    release ? el('dl', { class: 'kv' },
-      el('dt', {}, '发布'), el('dd', {}, release.ref),
-      el('dt', {}, '模型版本'), el('dd', {}, mref(release.model_version.ref)),
-      el('dt', {}, '部署时间'), el('dd', {}, when(release.deployed_at)),
-      el('dt', {}, '登记'), el('dd', {}, `${release.created_by}，${when(release.created_at)}`),
-      el('dt', {}, '备注'), el('dd', {}, release.note || '-'))
-      : el('p', { class: 'muted' }, '这条产线还没有登记过发布；部署成功后用 fw release register 登记。'),
-    head('models', `模型（${models.length}）`, ['models'], '全部模型'),
-    models.length ? el('table', {}, el('tr', {}, ['名称', '最新版本', '最近一次评估', ...KEY_METRICS, '测试集', '评估时间'].map((h) => el('th', { class: KEY_METRICS.includes(h) ? 'num' : '' }, h))),
-      models.map((m) => {
-        const e = evals[m.name];
-        const shown = e ? Object.fromEntries(keyMetrics(e.metrics)) : {};
-        return el('tr', {}, el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
-          el('td', {}, m.latest ? mref(m.latest) : '-'),
-          el('td', {}, e ? [el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`), ' ', mref(e.model_version.ref)] : '还没有评估'),
-          ...KEY_METRICS.map((k) => el('td', { class: 'num' }, shown[k] || (e ? '-' : ''))),
-          el('td', {}, e ? vref(e.testset.ref) : ''), el('td', {}, e ? when(e.created_at) : ''));
-      })) : el('p', { class: 'muted' }, '这条产线还没有模型。'),
-    head('snapshots', `训练集快照（${snapshots.length}）`, [], '全部数据集'),
-    snapshots.length ? dataTable(snapshots, false) : el('p', { class: 'muted' }, '还没有从这条产线取数据的训练集快照。'),
-    head('pools', `数据池和测试集（${pools.length}）`, [], '全部数据集'),
-    pools.length ? dataTable(pools, true) : el('p', { class: 'muted' }, '这条产线还没有数据池。'),
-    batches === null ? null : [head('batches', `在办的批次（${batches.length}）`, ['batches'], '全部批次'),
-      batches.length ? el('table', {}, el('tr', {}, ['批次', '状态', '入库到', '上传账号', '复核人', '最近变化'].map((h) => el('th', {}, h))),
-        batches.map((b) => el('tr', {}, el('td', {}, bref(b.name)),
-          el('td', {}, el('span', { class: `tag ${BATCH_CLASS[b.status]}` }, b.status_text)),
-          el('td', {}, `${b.pool} / ${b.dir}/`), el('td', {}, b.owner), el('td', {}, b.reviewer || '-'), el('td', {}, when(b.updated_at)))))
-        : el('p', { class: 'muted' }, '没有在办的批次（没入库、没关闭的）。')])));
+  const mvHref = (ref) => { const [n, k] = ref.split('@'); return hrefOf(['mv', n, k]); };
+
+  const card = release
+    ? el('section', { id: 'release', class: 'release', 'aria-label': '当前发布' },
+      el('div', { class: 'chip' }, icon('chip')),
+      el('div', { class: 'what' }, el('div', { class: 'label' }, '当前发布'), el('div', { class: 'ref' }, release.ref),
+        el('div', { class: 'sub', title: `登记：${release.created_by}，${when(release.created_at)}${release.note ? `；备注：${release.note}` : ''}` },
+          el('span', { class: 'mv' }, release.model_version.ref), el('span', { class: 'bar' }), el('span', {}, `部署于 ${shortWhen(release.deployed_at)}`))),
+      el('div', { class: 'state' }, el('span', { class: 'dot green' }), '已部署'),
+      el('a', { class: 'button primary go', href: mvHref(release.model_version.ref) }, '查看模型版本', icon('arrow')))
+    : el('section', { id: 'release', class: 'release none', 'aria-label': '当前发布' },
+      el('div', { class: 'chip' }, icon('chip')),
+      el('div', { class: 'what' }, el('div', { class: 'label' }, '当前发布'),
+        el('p', { class: 'muted' }, '这条产线还没有登记过发布；部署成功后用 fw release register 登记。')));
+
+  const modelTable = models.length ? el('table', { class: 'models' },
+    el('tr', {}, ['模型', '版本', ...KEY_METRICS].map((h, i) => el('th', { class: i > 1 ? 'num' : '' }, h)), el('th', { class: 'act' })),
+    models.map((m) => {
+      const e = evals[m.name];
+      const row = modelRow(m, e);
+      const shown = e ? Object.fromEntries(keyMetrics(e.metrics)) : {};
+      return el('tr', { title: e ? `评估 #${e.id}：${e.model_version.ref} 在 ${e.testset.ref} 上，${when(e.created_at)}` : '这个模型还没有评估' },
+        el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
+        el('td', {}, row.ref ? el('a', { href: mvHref(row.ref) }, `@${row.number}`) : '-'),
+        ...KEY_METRICS.map((k) => el('td', { class: `num${shown[k] ? '' : ' muted'}` }, shown[k] || '—')),
+        el('td', { class: 'act' }, row.items.length ? moreMenu(row.ref, row.items) : null));
+    })) : el('p', { class: 'muted' }, '这条产线还没有模型。');
+
+  const sorted = data.slice().sort((a, b) => DATA_ORDER.indexOf(a.kind) - DATA_ORDER.indexOf(b.kind));
+  const dataTable = sorted.length ? el('table', { class: 'data' },
+    el('tr', {}, el('th', {}, '名称'), el('th', {}, '类型'), el('th', { class: 'num' }, '大小'), el('th', { class: 'act' })),
+    sorted.map((d) => el('tr', { title: d.latest ? `${d.latest.file_count} 个文件，最新版本 ${when(d.latest.created_at)}` : '还没有版本' },
+      el('td', {}, el('span', { class: 'with-icon' }, icon('folder'),
+        d.latest ? el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref) : el('a', { href: hrefOf(['d', d.name]) }, d.name), labelChips(d.latest || {}))),
+      el('td', {}, d.kind === 'trainset' ? '训练集快照' : KIND_NAMES[d.kind] || d.kind),
+      el('td', { class: 'num' }, d.latest ? sizeText(d.latest.total_bytes) : '—'),
+      el('td', { class: 'act' }, el('a', { class: 'tool go', href: hrefOf(['d', d.name]), title: `打开 ${d.name}`, 'aria-label': `打开 ${d.name}` }, icon('right'))))))
+    : el('p', { class: 'muted' }, '这条产线还没有数据池和训练集快照。');
+
+  const batchList = batches === null ? null : batches.length ? el('table', { class: 'batches' },
+    batches.map((b) => el('tr', {},
+      el('td', {}, bref(b.name), el('div', { class: 'small muted sub', title: `入库到 ${b.pool} / ${b.dir}/，上传账号 ${b.owner}` }, `${b.dir}/ · ${b.owner}`)),
+      el('td', { class: 'state' }, el('span', { class: `dot ${BATCH_DOT[b.status] || 'gray'}` }), b.status_text))))
+    : el('p', { class: 'muted' }, '没有在办的批次（没入库、没关闭的）。');
+
+  show(crumbs(null, at),
+    el('h1', {}, line ? [line.code, line.name].filter(Boolean).join(' ') : at.line), side,
+    el('div', { class: 'browse' }, el('div', { class: 'list' },
+      line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是登记过的产线，下面是名字对得上的东西。`),
+      card,
+      el('div', { class: `cols${batchList ? '' : ' one'}` },
+        el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型'), modelTable,
+          head('data', '数据池与快照', ['datasets'], '全部数据集'), dataTable),
+        batchList ? el('div', { class: 'col right' }, head('batches', '在办的批次', ['batches'], '全部批次'), batchList) : null))));
 }
 
 // --- frame and routing ------------------------------------------------------------------------------------
 // [link, text, the capability that shows it, the pages it stands for]
 const NAV = [
-  ['#/overview', '概览', 'sites.read', /^#\/overview/],
-  ['#/', '数据集', 'datasets.read', /^#\/?($|\?|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/],
-  ['#/batches', '标注批次', 'batches.read', /^#\/(batches|b\/|batch-new|batch-up\/)/],
-  ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/],
-  ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/],
-  ['#/predictions', '预测集', 'datasets.read', /^#\/(predictions|p\/)/],
-  ['#/events', '操作记录', 'events.read', /^#\/events/],
-  ['#/users', '账号', 'users.manage', /^#\/users/],
+  ['#/', '概览', 'sites.read', /^#\/?($|\?|overview)/, 'overview'],  // the home page
+  ['#/datasets', '数据集', 'datasets.read', /^#\/(datasets|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/, 'datasets'],
+  ['#/batches', '标注批次', 'batches.read', /^#\/(batches|b\/|batch-new|batch-up\/)/, 'batches'],
+  ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/, 'models'],
+  ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/, 'jobs'],
+  ['#/predictions', '预测集', 'datasets.read', /^#\/(predictions|p\/)/, 'predictions'],
+  ['#/events', '操作记录', 'events.read', /^#\/events/, 'events'],
+  ['#/users', '账号', 'users.manage', /^#\/users/, 'users'],
 ];
 
-const SCOPED = new Set(['#/overview', '#/', '#/batches', '#/models']);
+const SCOPED = new Set(['#/', '#/datasets', '#/batches', '#/models']);
 
 function renderNav() {
   const here = location.hash || '#/';
   document.getElementById('nav').replaceChildren(...NAV.filter(([, , cap]) => !me || can(cap))
-    .map(([href, text, , on]) => el('a', {  // the lists keep the site and line being browsed
+    .map(([href, text, , on, name]) => el('a', {  // the lists keep the site and line being browsed
       href: SCOPED.has(href) && scope.site ? hrefOf(href.slice(2).split('/').filter(Boolean), { site: scope.site, line: scope.line }) : href,
-      class: on.test(here) ? 'on' : '',
-    }, text)));
+      class: on.test(here) ? 'on' : '', 'aria-current': on.test(here) ? 'page' : null,
+    }, icon(name), text)));
 }
 
 function renderWho(account) {
@@ -2189,9 +2620,10 @@ function renderWho(account) {
   renderNav();
   const who = document.getElementById('who');
   if (!me) { who.replaceChildren(); return; }
-  who.replaceChildren(el('a', { href: '#/me', title: '我的凭据' }, `${me.name}（${me.role_text || me.role}）`), el('button', {
+  who.replaceChildren(icon('user', 'avatar'), el('a', { href: '#/me', title: '我的凭据' }, `${me.name}（${me.role_text || me.role}）`), el('button', {
+    class: 'tool', type: 'button', title: '退出', 'aria-label': '退出',
     onclick: () => { try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ } renderWho(null); location.hash = '#/login'; },
-  }, '退出'));
+  }, icon('logout')));
 }
 
 export function route(hash) {
@@ -2204,21 +2636,24 @@ async function render() {
   seq += 1;
   clearTimeout(timer);
   keyNav = null;
+  closeMenu();
   const show = live();
   const { parts, query } = route(location.hash);
   renderNav();
-  if (parts[0] === 'login' || !token()) { loginPage(); return; }
-  if (parts.length === 0 && me && !can('datasets.read')) {  // their home: what they may see
-    location.hash = can('jobs.read') ? '#/jobs' : '#/models';
+  if (parts[0] === 'login' || !token()) { visits = []; loginPage(); return; }
+  visits = visited(visits, location.hash || '#/');
+  if (parts.length === 0 && me && !can('sites.read')) {  // their home: what they may see
+    visits = [];
+    location.replace(can('datasets.read') ? '#/datasets' : can('jobs.read') ? '#/jobs' : '#/models');
     return;
   }
   try {
-    if (parts.length === 0) await datasetsPage(query);
+    if (parts.length === 0 || parts[0] === 'overview') await overviewPage(query);  // #/overview: the address it had before it became the home page
+    else if (parts[0] === 'datasets') await datasetsPage(query);
     else if (parts[0] === 'd' && parts[1]) await datasetPage(parts[1]);
     else if (parts[0] === 'v' && parts[2]) await versionPage(parts[1], parts[2], query);
     else if (parts[0] === 'img' && parts[3]) await imagePage(parts[1], parts[2], parts.slice(3).join('/'), query);
     else if (parts[0] === 'diff' && parts[1]) await diffPage(parts[1], query);
-    else if (parts[0] === 'overview') await overviewPage(query);
     else if (parts[0] === 'models') await modelsPage(query);
     else if (parts[0] === 'm' && parts[1]) await modelPage(parts[1]);
     else if (parts[0] === 'mv' && parts[2]) await modelVersionPage(parts[1], parts[2]);
@@ -2249,9 +2684,17 @@ async function start() {
   if (token()) {
     try { renderWho(await api.me(true)); } catch { /* the pages say why */ }
   }
+  try { if (localStorage.getItem(SIDE_KEY) === 'off') document.body.classList.add('side-off'); } catch { /* private window */ }
   window.addEventListener('hashchange', render);
+  for (const kind of ['dragover', 'drop']) {  // a folder dropped beside the box must not open in the tab instead
+    window.addEventListener(kind, (ev) => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) ev.preventDefault(); });
+  }
   document.addEventListener('keydown', (ev) => {  // one listener; the page shown now sets keyNav
+    if (ev.key === 'Escape' && openMenu) { closeMenu(true); return; }
     if (keyNav && !ev.target.closest('input, select, textarea')) keyNav(ev.key);
+  });
+  document.addEventListener('pointerdown', (ev) => {  // a click outside the open menu closes it
+    if (openMenu && !openMenu.wrap.contains(ev.target)) closeMenu();
   });
   await render();
 }

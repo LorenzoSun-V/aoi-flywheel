@@ -12,13 +12,14 @@ const { chromium } = require('playwright');
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.goto(url);
   await page.evaluate((t) => localStorage.setItem('fw-token', t), token);
+  await page.goto(`${url}#/datasets`);
   await page.reload();
   const seen = {};
   const lists = async () => ({
     pools: await page.$$eval('#pools + table tr td:first-child', (c) => c.map((x) => x.textContent)),
     snapshots: await page.$$eval('#snapshots + table tr td:first-child', (c) => c.map((x) => x.textContent)),
   });
-  await page.waitForSelector('#places');
+  await page.waitForSelector('#pools');
   seen.all = await lists();
   seen.tree = await page.$$eval('#places li', (items) => items.map((x) => x.textContent));
   await page.click(`#places li.site a:has-text("${site}")`);

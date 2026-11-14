@@ -64,7 +64,7 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、bench_versions.py（一个池连加几百个版本的测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
-tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、accounts.cjs、race.cjs（Playwright 走页面，由 test_web.py 调）
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、accounts.cjs、race.cjs、nav.cjs、look.cjs 等（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
@@ -202,6 +202,8 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 网页只加载自己的脚本和样式，平台里的文字只当文字显示（不用 innerHTML）；只提供列出的几个文件 | `app.py` 的 `WEB_HEADERS`、`WEB_FILES`，`web/app.js` 的 `el()` | `test_the_pages_are_served_with_a_strict_policy` |
 | 网页走一遍：登录（错的凭据说明原因）、数据集、版本、目录、缩略图、看图和标注框、翻图（看过几张后按一次方向键只翻一页）、比较、退出，浏览器控制台没有报错 | `web/app.js` | `test_a_walk_through_the_pages`（要装 node 的 Playwright，CI 上没有就跳过）、`tests/web/helpers.test.mjs`（node --test） |
 | 网页的概览页只读已有接口（现场树、数据集、模型、评估、当前发布、批次），一条产线的东西和各列表页按同一条产线筛出来的一致；没有登记的产线和没有权限的账号说明原因 | `web/app.js` 的 `overviewPage`、`keyMetrics`、`batchesUnderWay`、`lastEvalByModel` | `test_a_line_is_seen_at_a_glance`（`tests/web/overview.cjs`）、`tests/web/helpers.test.mjs` |
+| 网页的首页是概览；首页以外每一页有「返回」和从首页开始的路径（经过所在的现场、产线），「返回」只在平台里退，直接打开的页面退到上一级；树上收起和勾选的现场 / 产线只记在浏览器里，只整理树和概览的产线表，不筛列表；表头不换行 | `app.js` 的 `trailOf`、`crumbs`、`visited`、`shownPlaces`、`placeTree` | `test_one_finds_the_way_around`、`helpers.test.mjs` |
+| 产线概览模型表一行的数字、显示的版本、菜单里的「查看评估」是同一份报告（最近一次评估）；没有评估就没有「查看评估」；复制的是完整的版本引用，复制不了时显示并选中；菜单 Esc / 点外面关闭，键盘关闭焦点回到 ⋯ | `app.js` 的 `modelRow`、`moreMenu`、`copyRef` | `test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu`、`helpers.test.mjs` |
 | 网页上的模型、评估比较、任务和日志、预测集；从网页提交预标注（错的数据说明原因），worker 跑完后预测集和叠框的看图页能看 | `web/app.js` | `test_a_walk_through_models_jobs_and_predictions`（`tests/web/models.cjs`） |
 | 网页上传目录和 `fw dataset import` 用同一套检查规则，建出的版本清单和 `fw dataset import` 同一目录完全一样；浏览器的 SHA-256 和清单排序（按 UTF-8 字节）和 Python 一致 | `fw/contract.py` 的 `classify_paths`、`blocking_reasons`，`app.py` 的 `/folder-check`，`web/sha256.js`，`web/app.js` 的 `manifestText` | `test_the_folder_check_is_the_one_of_fw_dataset_import`、`test_a_folder_uploaded_from_the_browser`（`tests/web/upload.cjs`）、`helpers.test.mjs` |
 | 上传页只认最后一次检查：先选的目录检查回得晚，也不会把后选的目录带着旧报告上传 | `web/app.js` 的 `uploadPage`（`round`、`lock`） | `test_an_older_folder_check_answer_is_not_used`（`tests/web/race.cjs`） |

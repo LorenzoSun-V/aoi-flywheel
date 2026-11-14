@@ -4,6 +4,41 @@
 // field account uploads the fixed folder; the algo account approves and imports it. Prints one JSON line.
 const { chromium } = require('playwright');
 
+// Drops a folder of this machine on the page's folder box, the way a browser hands a dragged folder over
+// (FileSystemDirectoryEntry), or (asFolder false) drops the folder's first file only.
+async function dropOn(page, folder, asFolder, slow = 0) {
+  const fs = require('fs');
+  const path = require('path');
+  const walk = (dir, rel) => fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))
+    .flatMap((d) => (d.isDirectory() ? walk(path.join(dir, d.name), `${rel}/${d.name}`)
+      : [[`${rel}/${d.name}`, fs.readFileSync(path.join(dir, d.name)).toString('base64')]]));
+  const top = `/${path.basename(folder)}`;
+  await page.$eval('.drop', (box, [top, files, asFolder, slow]) => {
+    const dirs = new Map();
+    const dir = (fullPath) => {
+      if (!dirs.has(fullPath)) {
+        const kids = [];
+        dirs.set(fullPath, { isDirectory: true, isFile: false, name: fullPath.slice(fullPath.lastIndexOf('/') + 1), fullPath, kids,
+          createReader() { let given = false; return { readEntries(ok) { setTimeout(() => { ok(given ? [] : kids); given = true; }, slow); } }; } });
+        const up = fullPath.slice(0, fullPath.lastIndexOf('/'));
+        if (up) dir(up).kids.push(dirs.get(fullPath));
+      }
+      return dirs.get(fullPath);
+    };
+    const leaves = files.map(([fp, b64]) => {
+      const name = fp.slice(fp.lastIndexOf('/') + 1);
+      const file = new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], name);
+      const entry = { isDirectory: false, isFile: true, name, fullPath: fp, file: (ok) => ok(file) };
+      dir(fp.slice(0, fp.lastIndexOf('/'))).kids.push(entry);
+      return entry;
+    });
+    const ev = new Event('drop', { bubbles: true, cancelable: true });
+    const entry = asFolder ? dir(top) : leaves[0];
+    Object.defineProperty(ev, 'dataTransfer', { value: { types: ['Files'], items: [{ kind: 'file', webkitGetAsEntry: () => entry }] } });
+    box.dispatchEvent(ev);
+  }, [top, walk(folder, top), asFolder, slow]);
+}
+
 (async () => {
   const [url, fieldToken, algoToken, algoName, pool, batch, out, folder, fixed] = process.argv.slice(2);
   const browser = await chromium.launch();
@@ -28,8 +63,14 @@ const { chromium } = require('playwright');
   await field.click('a:has-text("上传新批次")');
   await field.waitForSelector('#pool');
   await field.selectOption('#pool', pool);
-  await field.setInputFiles('input[type=file]', folder);
+  // while the browser reads the chosen folder the box says so, then what it got
+  const [chooser] = await Promise.all([field.waitForEvent('filechooser'), field.click('.drop .choose')]);
+  seen.reading = await field.textContent('.drop.reading > span');
+  await field.screenshot({ path: `${out}/batch-reading.png` });
+  await chooser.setFiles(folder);
   await field.waitForSelector('#send-folder');
+  await field.screenshot({ path: `${out}/batch-picked.png` });
+  seen.picked = { text: await field.textContent('.drop > span'), reading: await field.locator('.drop.reading').count() };
   seen.dir = await field.inputValue('#batch-dir');
   await field.fill('#batch-name', batch);
   await field.click('#send-folder');                       // no labeler yet: refused before anything is made
@@ -63,8 +104,15 @@ const { chromium } = require('playwright');
   seen.prelabel = await field.locator('#prelabel-go').count();  // the owner may have a rejected batch pre-labelled
   await field.click('a:has-text("上传新的一版")');
   await field.waitForSelector('#labeler');
-  await field.setInputFiles('input[type=file]', fixed);
+  await dropOn(field, fixed, false);  // a file, not a folder, is refused in the box itself
+  seen.droppedFile = await field.textContent('.drop > span.bad');
+  await dropOn(field, folder, true, 400);  // a slow first drag, then the fixed folder: the first one, done last, is not used
+  await field.$eval('.drop input', (i) => { i.dispatchEvent(new Event('click')); i.dispatchEvent(new Event('cancel')); });
+  seen.cancelled = { text: await field.textContent('.drop > span'), reading: await field.locator('.drop.reading').count() };
+  await dropOn(field, fixed, true);
   await field.waitForSelector('#send-folder');
+  await field.waitForTimeout(1200);
+  seen.dropped = await field.textContent('.drop > span');
   await field.fill('#labeler', '李四');
   seen.sameReviewer = await field.inputValue('#reviewer');
   await field.click('#send-folder');
@@ -84,7 +132,7 @@ const { chromium } = require('playwright');
   await algo.click('#import-go');
   await algo.waitForFunction(() => document.querySelector('#batch-status')?.textContent === '已入库');
   seen.done = await algo.textContent('main');
-  seen.buttons = await algo.locator('main button').count();
+  seen.buttons = await algo.locator('main button:not(.tool)').count();  // nothing left to do (the side bar switch and back are not steps of the batch)
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();
