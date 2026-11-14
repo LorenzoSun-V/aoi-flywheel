@@ -250,6 +250,27 @@ def test_a_lost_claim_is_taken_back_though_nobody_looks(api, make_service, make_
     assert state == {'status': 'queued', 'outcome': 'lost'}
 
 
+def test_a_lost_claim_is_taken_back_the_moment_someone_asks(api, make_worker, fake_conda, sql):
+    """The other way a lost claim is taken back, at once and not at the next round of the timer (15 seconds
+    with the lease of a minute this service has)."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    assert w.claim()['id'] == job['id']
+    sql.execute("UPDATE jobs SET lease_expires = now() - interval '1 second' WHERE id = %s", (job['id'],))
+    seen = api.job(job['id'])
+    assert seen['status'] == 'queued' and [h['outcome'] for h in seen['history']] == ['lost']
+    api.cancel_job(job['id'])  # not left in the queue of the service the other tests share
+
+
+def test_the_folder_in_use_says_which_setting_to_change(tmp_path):
+    for name, setting in (('job-5-1', 'FW_WORK_DIR'), ('build-' + 'ab' * 32 + '-7', 'FW_CACHE')):
+        with worker.held_folder(tmp_path / name):
+            with pytest.raises(worker.WorkerError, match=setting):
+                with worker.held_folder(tmp_path / name):
+                    pass
+
+
 def test_tried_too_often_fails(api, make_service, make_worker, fake_conda):
     svc = make_service(job_lease_seconds=1)
     w = make_worker(svc)

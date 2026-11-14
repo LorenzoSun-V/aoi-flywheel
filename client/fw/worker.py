@@ -600,8 +600,10 @@ def held_folder(folder: Path, keep: Optional[bool] = None):
     if os.name == 'posix':
         held = _try_hold(_lock_of(folder))
         if held is None:
-            raise WorkerError(f'任务目录 {folder} 正被这台机器上另一个 worker 用着（它连的多半是另一个平台）；'
-                              f'给每个 worker 设各自的 FW_WORK_DIR 再启动')
+            build = BUILD_FOLDER.fullmatch(folder.name) is not None
+            raise WorkerError(f'{"建引擎的目录" if build else "任务目录"} {folder} 正被另一个 worker 用着'
+                              f'（{"两个容器共用了一个缓存目录" if build else "它连的多半是另一个平台"}）；'
+                              f'给每个 worker 设各自的 {"FW_CACHE" if build else "FW_WORK_DIR"} 再启动')
     try:
         yield folder
     finally:
