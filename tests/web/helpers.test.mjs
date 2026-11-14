@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
+  shortWhen, modelRow,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -192,4 +193,23 @@ test('the tree shows the ticked sites and lines, and always the one being browse
 test('what the browser kept about the tree is read with care', () => {
   assert.deepEqual(readPlaces('{"closed":["ses"],"hidden":["b2",3]}'), { closed: ['ses'], hidden: ['b2'] });
   for (const bad of [null, '', 'not json', '[]', '{"closed":"ses"}', 'null']) assert.deepEqual(readPlaces(bad), { closed: [], hidden: [] });
+});
+
+test('a release is dated without the year when it is this year', () => {
+  const now = new Date(2026, 10, 14);
+  assert.equal(shortWhen(new Date(2026, 10, 13, 17, 5).toISOString(), now), '11月13日 17:05');
+  assert.equal(shortWhen(new Date(2025, 0, 2, 8, 0).toISOString(), now), '2025年1月2日 08:00');
+  assert.equal(shortWhen(null, now), '');
+});
+
+test('a model row shows the version its numbers belong to, and its menu leads to that version and report', () => {
+  const e = { id: 7, model_version: { ref: 'SES-TX-detr@12' } };
+  const row = modelRow({ name: 'SES-TX-detr', latest: 'SES-TX-detr@13' }, e);
+  assert.deepEqual([row.ref, row.number], ['SES-TX-detr@12', '12']);
+  assert.deepEqual(row.items.map((i) => [i.text, i.href || i.copy]),
+    [['查看版本', '#/mv/SES-TX-detr/12'], ['查看评估', '#/eval/7'], ['复制版本号', 'SES-TX-detr@12']]);
+  const plain = modelRow({ name: 'M', latest: 'M@3' }, undefined);  // no evaluation: no report to show
+  assert.deepEqual(plain.items.map((i) => i.text), ['查看版本', '复制版本号']);
+  assert.equal(plain.number, '3');
+  assert.deepEqual(modelRow({ name: 'N', latest: null }, undefined).items, []);  // no version yet: no menu
 });

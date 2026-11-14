@@ -15,13 +15,14 @@ const { chromium } = require('playwright');
   await page.reload();
   const seen = {};
   const h1 = (text) => page.waitForFunction((t) => document.querySelector('main h1')?.textContent === t, text);
+  const lineAt = (l) => page.waitForFunction(([s2, l2]) => location.hash.includes(`site=${s2}&line=${l2}`) && document.querySelector('main h1')?.textContent === l2 && document.querySelector('#release'), [site, l]);
   const tree = () => page.$$eval('#places li a .name', (items) => items.map((x) => x.textContent));
   const mine = (names) => names.filter((n) => n.startsWith(site) || n.startsWith(other) || n === 'TX' || n === 'TY');
   const key = (s, line) => (line ? `${s}/${line}` : s).toLowerCase();
 
   // the home page is the overview
   await page.waitForSelector('#lines');
-  seen.home = { h1: await page.textContent('main h1'), on: await page.textContent('#nav a.on'), crumbs: await page.$$eval('.crumbs', (c) => c.length) };
+  seen.home = { h1: await page.textContent('main h1'), on: await page.textContent('#nav a.on'), crumbs: await page.$$eval('.crumbs .path, .crumbs .back', (c) => c.length) };
   seen.brand = await page.getAttribute('.brand', 'href');
 
   // a site folds up, and stays so
@@ -76,14 +77,14 @@ const { chromium } = require('playwright');
   seen.siteModelRows = await page.$$eval('.browse table tr td:first-child', (c) => c.length);
   // a line that is not shown is still there when one goes to it
   await page.goto(`${url}#/?site=${site}&line=TY`);
-  await h1(`${site} / TY`);
+  await lineAt('TY');
   seen.browsedHidden = await page.$$eval('#places li.line a.on', (a) => a.map((x) => x.getAttribute('href')));
 
   // from the overview of a line into a dataset: the page says where it is, and back leads back
   await page.goto(`${url}#/?site=${site}&line=TX`);
-  await h1(`${site} / TX`);
+  await lineAt('TX');
   seen.lineCrumbs = await page.$$eval('.crumbs .path > *', (c) => c.map((x) => x.textContent));
-  await page.click(`#pools + table a:text-is("${pool}")`);
+  await page.click(`table.data a.go[href="#/d/${pool}"]`);
   await h1(pool);
   seen.crumbs = await page.$$eval('.crumbs .path a, .crumbs .path .here', (c) => c.map((x) => [x.textContent, x.getAttribute('href')]));
   seen.onInDataset = await page.textContent('#nav a.on');
@@ -94,10 +95,10 @@ const { chromium } = require('playwright');
   await page.click('.crumbs button.back');
   await h1(pool);
   await page.click('.crumbs button.back');
-  await h1(`${site} / TX`);
+  await lineAt('TX');
   seen.backTo = page.url().split('#')[1];
   // the name on the top left is the way home
-  await page.click(`#pools + table a:text-is("${pool}")`);
+  await page.click(`table.data a.go[href="#/d/${pool}"]`);
   await h1(pool);
   await page.click('.brand');
   await h1('概览');
