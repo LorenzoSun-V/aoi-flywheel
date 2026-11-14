@@ -19,7 +19,7 @@ from fwserver import db
 
 from test_jobs import make_worker  # noqa: F401  (fixture)
 from test_models import model, onnx_bytes, snapshot  # noqa: F401  (fixtures)
-from test_trainsets import label, png, pool, sample_files, status_of
+from test_trainsets import label, old_pool, png, pool, sample_files, status_of
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='the worker runs on the Linux GPU machine')
 
@@ -549,7 +549,7 @@ def test_a_relative_work_dir(api, gpu, model, snapshot, tmp_path, monkeypatch): 
 def test_pool_labels_must_name_classes_of_the_model(api, gpu, model, snapshot, tmp_path):  # noqa: F811
     mv = trained(api, model, snapshot, tmp_path)
     r = add_runner(gpu)
-    data = pool(api, tmp_path, {'A/1.png': png(uuid.uuid4().hex), 'A/1.json': label('Scratch'),
+    data = old_pool(api, tmp_path, {'A/1.png': png(uuid.uuid4().hex), 'A/1.json': label('Scratch'),
                                 'B/2.png': png(uuid.uuid4().hex), 'B/2.json': label('no-such-class'),
                                 'C/3.png': png(uuid.uuid4().hex), 'C/3.json': label(mv['classes'][0])})
     for d in ('A', 'B'):

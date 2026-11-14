@@ -2,6 +2,7 @@
 import uuid
 
 import psycopg
+import helpers
 import pytest
 
 from helpers import quiet, write
@@ -55,14 +56,14 @@ def test_pools_models_and_releases_take_registered_lines_only(api, make_api, sna
     site = new_site()
     name = f'D-{uuid.uuid4().hex[:8]}'
     with pytest.raises(ops.ApiError, match=f'fw site add {site}/TX') as e:
-        api.create_dataset(name, site, 'TX', 'pool', '')
+        api.create_dataset(name, site, 'TX', 'pool', '', classes=helpers.CLASSES)
     assert e.value.status == 400
     assert status_of(lambda: api.create_dataset(name, '', '', 'pool', '')) == 400      # a pool belongs to a line
     assert status_of(lambda: api.create_dataset(name, 'SES', '', 'pool', '')) == 400
     assert status_of(lambda: api.create_model(f'M-{name}', site, 'TX', 'det', '')) == 400
     api.add_site(f'{site}/TX')
     assert status_of(lambda: api.create_dataset(name, site, 'TY', 'pool', '')) == 400  # that line is not registered
-    d = api.create_dataset(name, site.lower(), 'tx', 'pool', '')                       # stored as registered
+    d = api.create_dataset(name, site.lower(), 'tx', 'pool', '', classes=helpers.CLASSES)                       # stored as registered
     assert (d['site'], d['line']) == (site, 'TX')
     m = api.create_model(f'M-{name}', site.lower(), 'tx', 'det', '')
     assert (m['site'], m['line']) == (site, 'TX')

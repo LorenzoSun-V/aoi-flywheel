@@ -109,9 +109,12 @@ def test_dataset_rules(api, dataset):
 
 
 def test_versions_diff_and_chain(api, dataset, tmp_path, cache):
-    v1 = {'a.bmp': b'1', 'a.json': b'j1', 'b.bmp': b'2', 'b.json': b'j2', 'c.bmp': b'3', 'c.json': b'j3'}
-    v2 = {'a.bmp': b'1', 'a.json': b'j1-new', 'copy/b.bmp': b'2', 'copy/b.json': b'j2', 'moved.bmp': b'3',
-          'c.json': b'j3', 'd.bmp': b'4'}
+    def j(text):  # an empty label told apart by its text
+        return json.dumps({'shapes': [], 'j': text}).encode()
+
+    v1 = {'a.bmp': b'1', 'a.json': j('1'), 'b.bmp': b'2', 'b.json': j('2'), 'c.bmp': b'3', 'c.json': j('3')}
+    v2 = {'a.bmp': b'1', 'a.json': j('1-new'), 'copy/b.bmp': b'2', 'copy/b.json': j('2'), 'moved.bmp': b'3',
+          'c.json': j('3'), 'd.bmp': b'4'}
     for n, files in ((1, v1), (2, v2)):
         for rel, data in files.items():
             write(tmp_path / f'v{n}', rel, data)
@@ -145,11 +148,16 @@ def test_fw_command_line(service, tokens, tmp_path, monkeypatch, capsys):
     assert fw_cli.main(['login', '--server', service.url, '--token', tokens['algo']]) == 0
     assert json.loads((tmp_path / 'config.json').read_text())['server'] == service.url
     name = f'CLI-{uuid.uuid4().hex[:6]}'
-    files = {'a.bmp': b'1', 'a.json': b'{}', '图/b.bmp': b'2', '图/b.json': b'{}'}
+    files = {'a.bmp': b'1', 'a.json': b'{"shapes": []}', '图/b.bmp': b'2', '图/b.json': b'{"shapes": []}'}
     for rel, data in files.items():
         write(tmp_path / 'src', rel, data)
     assert fw_cli.main(['whoami']) == 0
-    assert fw_cli.main(['dataset', 'create', name, '--site', 'SES', '--line', 'TX']) == 0
+    assert fw_cli.main(['dataset', 'create', name, '--site', 'SES', '--line', 'TX']) == 1  # a pool needs its classes
+    assert '--classes' in capsys.readouterr().err
+    write(tmp_path, 'classes.txt', b'scratch\ndent\n')
+    assert fw_cli.main(['dataset', 'create', name, '--site', 'SES', '--line', 'TX', '--classes',
+                        str(tmp_path / 'classes.txt')]) == 0
+    assert '类别表 2 类' in capsys.readouterr().out
     assert fw_cli.main(['dataset', 'import', name, str(tmp_path / 'src'), '--dry-run']) == 0
     assert fw_cli.main(['dataset', 'import', name, str(tmp_path / 'src')]) == 1  # no terminal to confirm in
     assert fw_cli.main(['dataset', 'import', name, str(tmp_path / 'src'), '--yes', '--note', 'v1']) == 0

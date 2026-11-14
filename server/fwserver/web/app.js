@@ -183,6 +183,7 @@ export const api = {
   predictionSets: async (model = '') => (await call(`/predictions?model=${encodeURIComponent(model)}`)).prediction_sets,
   predictionSet: (id) => call(`/predictions/${Number(id)}`),
   createDataset: (body) => call('/datasets', { method: 'POST', body }),
+  addClasses: (name, classes) => call(`/datasets/${encodeURIComponent(name)}/classes`, { method: 'POST', body: { classes } }),
   createModel: (body) => call('/models', { method: 'POST', body }),
   registerModelVersion: (name, body) => call(`/models/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
   folderCheck: (paths, allowOtherFiles, force) => call('/folder-check', { method: 'POST', body: { paths, allow_other_files: allowOtherFiles, force } }),
@@ -709,7 +710,58 @@ function sourceNode(source) {
   return b ? ['批次 ', el('a', { href: hrefOf(['b', b.name]) }, b.name), ` 第 ${b.revision} 版`] : (source || '-');
 }
 
-async function datasetPage(name) {
+// The class table of a pool by number and, for an account that may change datasets, adding to its end. added: what
+// the last addition answered, to show how the newest version fits a pool's first table.
+function classSection(d, added) {
+  const head = el('h2', {}, '类别表', info(['上传到该数据池的标注只能使用类别表中的类别；含表外类别或无法读取的标注将被拒收，请改正后重新上传。',
+    'YOLO txt 标注中的类别编号即类别在表中的序号（从 0 开始）；目录中附带的 classes.txt 须与类别表一致。',
+    '类别只能添加到表的末尾，不能删除、改名或调整顺序。'], '类别表的说明'));
+  const table = d.classes.length
+    ? el('table', { id: 'class-table' }, el('tr', {}, el('th', {}, '编号'), el('th', {}, '类别')),
+      d.classes.map((c, i) => el('tr', {}, el('td', {}, String(i)), el('td', {}, c))))
+    : el('p', { class: 'muted' }, '暂无类别表。');
+  const check = added && added.latest_check;
+  const fits = !check ? null : check.problem
+    ? el('div', { class: 'error', id: 'class-check' }, `${check.ref} 中有不符合类别表的标注，下一次上传时须一并改正：${check.problem}`)
+    : el('p', { class: 'muted', id: 'class-check' }, `${check.ref} 中的标注均符合类别表。`);
+  if (!can('datasets.write')) return [head, table];
+  const input = classInput('class-add', d.classes.length ? '每行一个新类别名，依次添加到类别表末尾' : '每行一个类别名，行号（从 0 开始）即类别编号');
+  const msg = el('div');
+  const go = el('button', { id: 'class-go', class: 'primary', onclick: async () => {
+    const names = input.names();
+    if (!names.length) { msg.replaceChildren(errorBox('请填写类别，每行一个。')); return; }
+    go.disabled = true;
+    try {
+      const out = await api.addClasses(d.name, names);
+      await datasetPage(d.name, out);
+    } catch (e) { msg.replaceChildren(errorBox(e)); go.disabled = false; }
+  } }, d.classes.length ? '添加到类别表末尾' : '保存类别表');
+  const form = el('details', { id: 'class-form', open: !d.classes.length }, el('summary', {}, d.classes.length ? '添加类别' : '填写类别表'),
+    el('div', { class: 'panel form' }, msg, input.box,
+      el('div', { class: 'row' }, go, el('span', { class: 'muted small' }, '保存后无法删除、改名或调整顺序。'))));
+  return [head, table, fits, form];
+}
+
+// A class table to type in or read from a classes.txt: the text box, the button that reads a file into it, the count.
+function classInput(id, placeholder) {
+  const text = el('textarea', { id, rows: 6, class: 'mono', 'aria-label': '类别表', placeholder });
+  const file = el('input', { type: 'file', accept: '.txt,.names,text/plain', hidden: true });
+  const count = el('span', { class: 'muted small' });
+  const counted = () => { const n = parseClasses(text.value).length; count.textContent = n ? `共 ${n} 个类别` : ''; };
+  file.addEventListener('change', async () => {
+    const f = file.files[0];
+    if (!f) return;
+    text.value = parseClasses(await f.text()).join('\n');
+    file.value = '';
+    counted();
+  });
+  text.addEventListener('input', counted);
+  const box = el('div', {}, text, el('div', { class: 'row' },
+    el('button', { type: 'button', onclick: () => file.click() }, '读取 classes.txt'), file, count));
+  return { box, names: () => parseClasses(text.value) };
+}
+
+async function datasetPage(name, added) {
   const show = live();
   if ((await api.dataset(name)).kind === 'batch') {  // a batch has its own page: this address does not stay in the way back
     visits = visits.slice(0, -1);
@@ -733,7 +785,7 @@ async function datasetPage(name) {
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
       el('dd', {}, `${d.created_by}，${when(d.created_at)}`), el('dt', {}, '备注'), el('dd', {}, d.note || '-')),
     el('h2', {}, '版本'),
-    el('table', {}, el('tr', {}, ['版本', '版本号', '父版本', '文件', '大小', '目录变化', '来源', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
+    el('table', { id: 'versions' }, el('tr', {}, ['版本', '版本号', '父版本', '文件', '大小', '目录变化', '来源', '登记人', '时间', '备注'].map((h) => el('th', {}, h))),
       list.map((v) => el('tr', {},
         el('td', {}, el('a', { href: hrefOf(['v', d.name, String(v.number)]) }, v.ref)),
         el('td', {}, labelChips(v)),
@@ -742,7 +794,9 @@ async function datasetPage(name) {
         el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, sourceNode(v.source)), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
         el('td', { class: 'muted' }, v.note)))),
     !can('datasets.write') ? null : d.kind === 'trainset' ? el('div', { class: 'row', style: 'margin-top:12px' },
-      el('a', { id: 'trainset-next', class: 'button primary', href: hrefOf(['trainset-new'], { name: d.name }) }, '建立下一版')) : el('div', { class: 'row', style: 'margin-top:12px' },
+      el('a', { id: 'trainset-next', class: 'button primary', href: hrefOf(['trainset-new'], { name: d.name }) }, '建立下一版'))
+      : d.kind === 'pool' && !d.classes.length ? el('p', { class: 'warn', id: 'class-none' }, '该数据池尚未填写类别表，无法上传。请先在下方填写类别表。')
+        : el('div', { class: 'row', style: 'margin-top:12px' },
       el('a', { class: 'button primary', href: hrefOf(['add', d.name]) }, '上传新增目录'),
       d.latest ? el('a', { class: 'button', href: hrefOf(['remove', d.name]) }, '去掉目录') : null,
       el('a', { class: 'button', href: hrefOf(['upload', d.name]) }, '上传完整版本'),
@@ -750,6 +804,7 @@ async function datasetPage(name) {
         '去掉目录：新版本不再包含所选目录，此前的版本保持不变。',
         '上传完整版本：以所选目录的全部内容作为新版本，其中不存在的文件将从新版本中删除。'], '上传方式说明'),
       d.kind === 'pool' && d.latest && d.site && d.line ? el('a', { id: 'trainset-from', class: 'button', href: hrefOf(['trainset-new'], { from: d.latest.ref }) }, '建立训练集快照') : null),
+    ...(d.kind === 'pool' ? classSection(d, added) : []),
     el('h2', {}, '比较两个版本'),
     el('div', { class: 'row' }, '从', a, '到', b, compare),
     list.length && can('datasets.write') ? await labelForm(d.name, list, false, () => datasetPage(name)) : null);
@@ -2266,6 +2321,7 @@ async function uploadPage(name) {
   const show = live();
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传。训练集快照请使用 fw trainset create 创建。`);
+  if (d.kind === 'pool' && !(d.classes || []).length) throw new Error(`${d.name} 尚未填写类别表，无法上传。请先在数据池页面填写类别表。`);
   const latest = d.latest;
   const picker = folderInput({ several: true });
   const allowOther = el('input', { type: 'checkbox' });
@@ -2437,6 +2493,7 @@ async function addPage(name) {
   const show = live();
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传。训练集快照请使用 fw trainset create 创建。`);
+  if (d.kind === 'pool' && !(d.classes || []).length) throw new Error(`${d.name} 尚未填写类别表，无法上传。请先在数据池页面填写类别表。`);
   const picker = folderInput({ several: true });
   const target = el('input', { type: 'text', placeholder: '选择目录后自动填写，可修改，例如 20261104 或 night/20261104' });
   const inside = el('input', { type: 'checkbox', id: 'add-inside' });
@@ -3186,17 +3243,26 @@ async function datasetNewPage(query) {
   const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX 或 SES-TX-test' });
   const { site, line, none } = placePicker(tree, at, true);
   const note = el('input', { id: 'dataset-note', type: 'text', placeholder: '备注（选填）' });
+  const classes = classInput('dataset-classes', '每行一个类别名，行号（从 0 开始）即类别编号');
+  const classRow = el('div', { class: 'label', id: 'dataset-class-row' }, el('span', { class: 'name' }, '类别表',
+    info(['上传到数据池的标注只能使用类别表中的类别；含表外类别或无法读取的标注将被拒收。',
+      'YOLO txt 标注中的类别编号即类别在表中的序号（从 0 开始）。创建后只能在表的末尾添加类别，不能删除、改名或调整顺序。',
+      '对应命令行选项 fw dataset create --classes。'], '类别表的说明')), classes.box);
   const msg = el('div');
   const sync = () => {
     none.disabled = kind.value === 'pool';  // a pool belongs to a line
     if (none.disabled && !site.value && site.options.length > 1) { site.selectedIndex = 1; site.dispatchEvent(new Event('change')); }
+    classRow.hidden = kind.value !== 'pool';  // only a pool has a class table
   };
   kind.addEventListener('change', sync);
   sync();
   const go = async (ev) => {
     ev.preventDefault();
+    const pool = kind.value === 'pool';
+    if (pool && !classes.names().length) { msg.replaceChildren(errorBox('请填写数据池的类别表，每行一个类别名。')); return; }
     try {
-      const d = await api.createDataset({ name: name.value.trim(), kind: kind.value, site: site.value, line: line.value, note: note.value.trim() });
+      const d = await api.createDataset({ name: name.value.trim(), kind: kind.value, site: site.value, line: line.value, note: note.value.trim(),
+        ...(pool ? { classes: classes.names() } : {}) });
       location.hash = hrefOf(['upload', d.name]);
     } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
@@ -3208,7 +3274,7 @@ async function datasetNewPage(query) {
         can('sites.write') ? el('a', { href: '#/places' }, '登记现场和产线') : '请联系管理员或算法工程师登记。') : null,
       field('类型', kind, ['数据池：一条产线采集的数据，此后按批次追加目录。', '测试集：用于评估模型，可不属于任何产线。',
         '回归集：每次发布前必须通过的一组图片，可不属于任何产线。', '其他：不属于以上类型的数据。']),
-      el('label', {}, '名称', name), el('label', {}, '现场', site), el('label', {}, '产线', line), el('label', {}, '备注', note),
+      el('label', {}, '名称', name), el('label', {}, '现场', site), el('label', {}, '产线', line), classRow, el('label', {}, '备注', note),
       el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '创建并上传')))));
 }
 

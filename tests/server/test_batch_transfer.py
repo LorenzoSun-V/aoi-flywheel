@@ -134,7 +134,7 @@ def test_import_and_get_mixing_batched_and_single_files(api, dataset, cache, tmp
     monkeypatch.setattr(ops, 'UPLOAD_COUNT', 4)
     monkeypatch.setattr(fw_cache, 'FETCH_COUNT', 4)
     files = {f'line{i % 3}/img{i}.bmp': os.urandom(100 + 50 * i) for i in range(10)}
-    files.update({f'line{i % 3}/img{i}.json': b'{"i": %d}' % i for i in range(10)})
+    files.update({f'line{i % 3}/img{i}.json': b'{"shapes": [], "i": %d}' % i for i in range(10)})
     for rel, data in files.items():
         write(tmp_path / 'src', rel, data)
     v = ops.import_folder(api, dataset, tmp_path / 'src', echo=quiet)

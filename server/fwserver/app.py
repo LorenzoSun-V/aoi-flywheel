@@ -142,6 +142,11 @@ class DatasetBody(BaseModel):
     line: str = ''
     kind: str = 'pool'
     note: str = ''
+    classes: Optional[list] = None  # the class table of a new pool
+
+
+class ClassesBody(BaseModel):
+    classes: list  # to add at the end of the pool's class table
 
 
 class VersionBody(BaseModel):
@@ -684,9 +689,17 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.post('/api/v1/datasets', status_code=201)
     def create_dataset(body: DatasetBody, user: dict = Depends(data_user)):
         with conn() as c:
-            d = datasets.create_dataset(c, user['user_id'], body.name, body.site, body.line, body.kind, body.note)
+            d = datasets.create_dataset(c, user['user_id'], body.name, body.site, body.line, body.kind, body.note,
+                                        classes=body.classes)
         log.info('dataset %s created by %s', d['name'], user['name'])
         return d
+
+    @app.post('/api/v1/datasets/{name}/classes')
+    def add_classes(name: str, body: ClassesBody, user: dict = Depends(data_user)):
+        with conn() as c:
+            out = datasets.add_classes(c, store, user['user_id'], name, body.classes)
+        log.info('classes %s added to %s by %s', ', '.join(out['added']), out['dataset']['name'], user['name'])
+        return out
 
     @app.get('/api/v1/datasets/{name}')
     def get_dataset(name: str, user: dict = Depends(data_reader)):

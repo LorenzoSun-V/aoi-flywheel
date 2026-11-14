@@ -29,7 +29,7 @@ def folder(tmp_path, n=20):
     files = {}
     for i in range(n):
         files[f'img_{i:03d}.bmp'] = salt.encode() + bytes([i]) * (100 + i)
-        files[f'img_{i:03d}.json'] = f'{{"i": {i}, "salt": "{salt}"}}'.encode()
+        files[f'img_{i:03d}.json'] = f'{{"shapes": [], "i": {i}, "salt": "{salt}"}}'.encode()
     for rel, data in files.items():
         write(tmp_path / 'src', rel, data)
     return tmp_path / 'src', files

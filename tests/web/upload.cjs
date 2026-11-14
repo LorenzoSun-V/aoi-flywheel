@@ -1,6 +1,6 @@
 // Upload folders from the browser (run by tests/server/test_web.py):
 // node upload.cjs <url> <token> <new dataset name> <out dir> <folder 1> <folder 2>.
-// Creates the dataset from the datasets page (新建数据集), uploads folder 1 (first refused for its other file, then allowed
+// Creates the dataset from the datasets page (新建数据集; first refused without a class table), uploads folder 1 (first refused for its other file, then allowed
 // with the check box), then folder 2 as the next version. Prints one JSON line of what it saw.
 const { chromium } = require('playwright');
 
@@ -22,6 +22,10 @@ const { chromium } = require('playwright');
   await page.fill('#dataset-name', name);
   await page.selectOption('#site', 'SES');
   await page.selectOption('#line', 'TX');
+  await page.click('button:has-text("创建并上传")');  // a pool needs its class table first
+  await page.waitForSelector('form .error');
+  seen.noClasses = await page.textContent('form .error');
+  await page.fill('#dataset-classes', 'scratch\ndent\n');
   await page.click('button:has-text("创建并上传")');
   await page.waitForFunction((n) => document.querySelector('h1') && document.querySelector('h1').textContent === `上传到 ${n}`, name);
 

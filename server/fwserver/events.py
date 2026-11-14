@@ -16,6 +16,7 @@ LIMIT = 500
 # the whole vocabulary.
 ACTIONS = {
     'dataset.create': '新建数据集',
+    'dataset.classes': '添加数据池的类别',
     'version.create': '建版本',
     'version.label': '给版本起版本号',
     'version.unlabel': '撤销版本号',

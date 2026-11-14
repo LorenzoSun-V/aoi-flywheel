@@ -148,7 +148,7 @@ def cache(tmp_path):
 def dataset(api):
     """A new, empty dataset for one test."""
     name = f'DS-{uuid.uuid4().hex[:8]}'
-    api.create_dataset(name, 'SES', 'TX', 'pool', 'test')
+    api.create_dataset(name, 'SES', 'TX', 'pool', 'test', classes=helpers.CLASSES)
     return name
 
 
