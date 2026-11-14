@@ -3,7 +3,7 @@
 const { chromium } = require('playwright');
 
 (async () => {
-  const [url, token, site, other, pool, hiddenPool, out] = process.argv.slice(2);
+  const [url, token, site, other, pool, hiddenPool, out, batch] = process.argv.slice(2);
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
@@ -67,6 +67,13 @@ const { chromium } = require('playwright');
   seen.listCrumbs = (await page.textContent('.crumbs .path')).trim();
   seen.headers = await page.$$eval('main th', (ths) => ths.map((t) => [getComputedStyle(t).whiteSpace, t.getClientRects()[0].height < 45]));
   await page.screenshot({ path: `${out}/nav-datasets.png`, fullPage: true });
+  // a number in the tree is still the number of rows: the site counts the line that is not shown too
+  await page.click('#nav a:has-text("模型")');
+  await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '模型' && document.querySelector('#places'));
+  seen.siteModels = await page.textContent(`#places li.site a[href$="site=${site}"] .count`);
+  await page.click(`#places li.site a[href$="site=${site}"]`);
+  await page.waitForFunction(() => location.hash.includes('site=') && document.querySelector('#places li.site a.on'));
+  seen.siteModelRows = await page.$$eval('.browse table tr td:first-child', (c) => c.length);
   // a line that is not shown is still there when one goes to it
   await page.goto(`${url}#/?site=${site}&line=TY`);
   await h1(`${site} / TY`);
@@ -105,7 +112,20 @@ const { chromium } = require('playwright');
   await tab.waitForSelector('#pools');
   seen.upTo = tab.url().split('#')[1];
   seen.upPools = await tab.$$eval('#pools + table tr td:first-child', (c) => c.map((x) => x.textContent));
-  // the address the datasets had before still shows something sensible: the home page
+  // the dataset address of a batch leads to the batch without staying in the way back
+  await tab.goto(`${url}#/datasets`);
+  await tab.waitForSelector('#pools');
+  await tab.goto(`${url}#/d/${batch}`);
+  await tab.waitForFunction(() => location.hash.startsWith('#/b/') && document.querySelector('#batch-status'));
+  await tab.click('.crumbs button.back');
+  await tab.waitForSelector('#pools', { timeout: 5000 });
+  seen.backFromBatch = tab.url().split('#')[1];
+  // a site whose lines are all unticked says how to get them back
+  await tab.evaluate((keys) => localStorage.setItem('fw-places', JSON.stringify({ closed: [], hidden: keys })),
+    [`${site}/tx`.toLowerCase(), `${site}/ty`.toLowerCase()]);
+  await tab.goto(`${url}#/?site=${site}`);
+  await tab.waitForFunction(() => document.querySelector('#places li.site a.on') && document.querySelector('.browse .list'));
+  seen.allLinesHidden = await tab.textContent('.browse .list');
   seen.hiddenPoolListed = seen.listPools.includes(hiddenPool);
   seen.errors = errors;
   console.log(JSON.stringify(seen));

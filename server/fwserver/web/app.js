@@ -434,6 +434,7 @@ function placeTree(tree, at, counts, link) {
     const box = (key, off, what) => (choosing ? el('input', { type: 'checkbox', class: 'pick', checked: !prefs.hidden.includes(key), disabled: off,
       title: `显示 ${what}`, 'data-place': key, onchange: () => change({ hidden: toggled(prefs.hidden, key) }) }) : null);
     const { sites, hidden } = choosing ? { sites: tree.sites, hidden: 0 } : shownPlaces(tree, prefs.hidden, at);
+    const whole = (s) => tree.sites.find((x) => x.code === s.code) || s;
     const items = [el('li', { class: 'all' }, a('', '', '全部', () => counts.all, !at.site))];
     for (const s of sites) {
       const here = same(s.code, at.site);
@@ -444,7 +445,7 @@ function placeTree(tree, at, counts, link) {
         title: closed ? `展开 ${s.code} 的产线` : `收起 ${s.code} 的产线`, onclick: () => change({ closed: toggled(prefs.closed, key) }) })
         : el('span', { class: 'fold none' });
       items.push(el('li', { class: `site${closed ? ' closed' : ''}${closed && here && at.line ? ' within' : ''}` }, fold, box(key, false, s.code),
-        a(s.code, '', placeText(s), () => counts.site(s), here && !at.line)));
+        a(s.code, '', placeText(s), () => counts.site(whole(s)), here && !at.line)));  // the lines not shown count too
       if (!closed) {
         items.push(...s.lines.map((x) => el('li', { class: 'line' }, box(placeKey(s.code, x.code), off, `${s.code} / ${x.code}`),
           a(s.code, x.code, placeText(x), () => counts.line(x), here && same(x.code, at.line)))));
@@ -528,7 +529,11 @@ function sourceNode(source) {
 
 async function datasetPage(name) {
   const show = live();
-  if ((await api.dataset(name)).kind === 'batch') { location.hash = hrefOf(['b', name]); return; }
+  if ((await api.dataset(name)).kind === 'batch') {  // a batch has its own page: this address does not stay in the way back
+    visits = visits.slice(0, -1);
+    location.replace(hrefOf(['b', name]));
+    return;
+  }
   const [d, versions] = await Promise.all([api.dataset(name), api.versions(name)]);
   const list = versions.slice().reverse();
   const pick = (id) => el('select', { id }, list.map((v) => el('option', { value: String(v.number) }, v.ref)));
@@ -2214,7 +2219,10 @@ function lineTable(tree, at) {
   const rows = sites.flatMap((s) => s.lines.map((x) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${placeText(s)} / ${placeText(x)}`)),
     ...['datasets', 'snapshots', 'models', 'batches', 'releases'].map((k) => el('td', { class: 'num' }, String(x[k] || 0))))));
-  const left = !at.site && shown.hidden ? el('p', { class: 'muted small' }, `有 ${shown.hidden} 个现场 / 产线没显示：在左边点「选择」勾上。`) : null;
+  const all = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
+  const lines = (list) => list.reduce((n, s) => n + s.lines.length, 0);
+  const missing = at.site ? lines(all) - lines(sites) : shown.hidden;  // of what this page would list
+  const left = missing ? el('p', { class: 'muted small' }, `有 ${missing} 个${at.site ? '产线' : '现场 / 产线'}没显示：在左边点「选择」勾上。`) : null;
   if (!rows.length) {
     return [el('p', { class: 'muted' }, at.site ? '这个现场没有要显示的产线。' : tree.sites.length ? '没有要显示的产线。' : '还没有登记现场和产线：在「数据集」页最下面登记。'), left];
   }

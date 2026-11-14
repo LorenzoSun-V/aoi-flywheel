@@ -327,16 +327,20 @@ def test_one_finds_the_way_around(service, tokens, api, tmp_path):
     """The home page is the overview; a site folds up and only the ticked sites and lines are shown, which the
     browser remembers and which hides nothing from the lists; every page says where it is and its back button
     leads to where one came from, or one step up on a page opened directly; table headers stay on one line."""
-    from helpers import register_place
+    from fw import ops
+    from helpers import quiet, register_place
     from test_trainsets import pool, sample_files
     site, other = f'S{os.urandom(4).hex()}', f'S{os.urandom(4).hex()}'
     register_place(site, 'TY')
     register_place(other, 'TX')
     a = pool(api, tmp_path / 'a', sample_files('2026-09', 2), site=site, line='TX')
     b = pool(api, tmp_path / 'b', sample_files('2026-09', 2), site=other, line='TX')
+    for line in ('TX', 'TY', 'TY'):
+        api.create_model(f'M-{os.urandom(4).hex()}', site, line, 'det', '')
+    batch = ops.upload_batch(api, write_tree(tmp_path / 'day', {'x.png': real_png(64, 32, 7)}), a, '张三', echo=quiet)['name']
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(['node', str(WEB_TESTS / 'nav.cjs'), service.url + '/', tokens['algo'], site, other, a, b, str(shots)],
+    r = subprocess.run(['node', str(WEB_TESTS / 'nav.cjs'), service.url + '/', tokens['algo'], site, other, a, b, str(shots), batch],
                        capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
@@ -356,6 +360,9 @@ def test_one_finds_the_way_around(service, tokens, api, tmp_path):
     assert seen['listCrumbs'].replace(' ', '') == '概览/数据集'
     assert seen['headers'] and all(h == ['nowrap', True] for h in seen['headers'])
     assert seen['browsedHidden'] == [ty]
+    assert (seen['siteModels'], seen['siteModelRows']) == ('3', 3)     # TY is not shown, its two models still count
+    assert seen['backFromBatch'] == '/datasets'                         # not caught between the two addresses of a batch
+    assert '没有要显示的产线' in seen['allLinesHidden'] and '选择' in seen['allLinesHidden']
     # the path and the way back
     assert seen['lineCrumbs'] == ['概览', '/', site, '/', 'TX']
     assert seen['crumbs'] == [['概览', '#/'], [site, f'#/?site={site}'], ['TX', tx],
