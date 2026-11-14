@@ -262,6 +262,20 @@ def test_the_server_checks_weights_and_code(api, model, snapshot, tmp_path):
             api.register_model_version(model, dict(base, files=[rows[0]], **body))
 
 
+def test_the_server_refuses_an_onnx_with_external_data_too(api, model, snapshot, tmp_path):
+    # The web registers a model version without fw, so the server makes the check fw makes before sending.
+    from helpers import EXTERNAL, ld, onnx_model, tensor
+    bad = write(tmp_path / 'ext', 'model.onnx', onnx_model(ld(5, tensor('w', EXTERNAL))))
+    rows = ops._send_files(api, [('model.onnx', bad)], 2, quiet)
+    with pytest.raises(ApiError, match='external data'):
+        api.register_model_version(model, {'trainset_id': snapshot['id'], 'files': rows})
+    broken = write(tmp_path / 'broken', 'model.onnx', b'\x08\x07\x12\xff')  # starts like ONNX, does not parse
+    rows = ops._send_files(api, [('model.onnx', broken)], 2, quiet)
+    with pytest.raises(ApiError, match='不完整'):
+        api.register_model_version(model, {'trainset_id': snapshot['id'], 'files': rows})
+    assert api.model_versions(model) == []
+
+
 def test_tags(api, model, snapshot, tmp_path, sql):
     mv = register(api, model, snapshot, files_in(tmp_path))
     assert mv['tags'] == []

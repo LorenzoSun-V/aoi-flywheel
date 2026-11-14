@@ -20,6 +20,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from fw.contract import ContractError, check_path, collisions, eval_dirs, is_label, manifest_bytes
+from fw.onnx_check import OnnxError, check_self_contained
 
 from . import datasets, events, labels, trainsets
 from .datasets import NAME, DatasetError, check_digest
@@ -189,6 +190,12 @@ def _check_onnx(store: Store, digest: str) -> None:
     if head != b'\x08':  # an ONNX ModelProto starts with its ir_version (field 1, varint)
         raise DatasetError(400, 'model.onnx 不像 ONNX 文件（ONNX 文件以 ir_version 开头）；'
                                 '检查是不是传成了 .pt 等权重文件，权重可以作为附件登记')
+    try:  # fw checks this before sending; the web sends without fw, so the server checks it too
+        check_self_contained(store.path(digest))
+    except OnnxError as e:
+        raise DatasetError(400, f'model.onnx：{e}') from None
+    except OSError as e:
+        raise DatasetError(503, f'读不了 model.onnx（{e.strerror or e}）') from None
 
 
 def _prepare(store: Store, entries: List[Entry]) -> str:

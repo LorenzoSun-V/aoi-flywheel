@@ -652,6 +652,49 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_model_version_is_registered_from_the_browser(service, tokens, api, tmp_path):
+    """The web registers a model version the way fw model register does: the ONNX with its metrics and weights,
+    on the snapshot it was trained on; a weights file or an ONNX with external data is refused."""
+    from helpers import EXTERNAL, ld, onnx_model, tensor
+    from test_models import onnx_bytes
+    from test_trainsets import CLASSES, make
+    seed = int.from_bytes(os.urandom(2), 'big')
+    line = f'R{os.urandom(3).hex()}'  # a line of its own: no model of another test is proposed
+    files = {f'A/img{i}.png': real_png(200, 100, seed + i) for i in range(4)}
+    files.update({f'A/img{i}.json': label('scratch', 'dent') for i in range(4)})
+    src = pool(api, tmp_path, files, site='WEB', line=line)
+    snap = f'{src}-det'
+    make(api, snap, [f'{src}@1'], CLASSES)
+    run = write_tree(tmp_path / 'run', {'best.onnx': onnx_bytes(f'web {seed}'), 'best.pt': b'PK\x03\x04 weights',
+                                        'metrics.json': json.dumps({'mAP50': 0.91}).encode(),
+                                        'external.onnx': onnx_model(ld(5, tensor('w', EXTERNAL)))})
+    name = f'WEB-{line}-detr'
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'register.cjs'), service.url + '/', tokens['algo'], tokens['field'], snap, name,
+                        str(run), str(shots)], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['first'] == {'trainset': f'{snap}@1', 'model': '', 'newShown': True, 'place': f'WEB/{line}'}
+    assert '不是 ONNX 文件' in seen['notOnnx']
+    assert 'external data' in seen['external'] and seen['afterRefusal'] == name
+    assert seen['sent'] is None and seen['page']['hash'] == f'#/mv/{name}/1' and seen['page']['title'].startswith(f'{name}@1')
+    assert f'{snap}@1' in seen['page']['info'] and 'scratch、dent' in seen['page']['info'] and 'a' * 40 in seen['page']['info']
+    assert {'model.onnx', 'metrics.json', 'weights/best.pt', 'classes.txt'} <= set(seen['page']['files'])
+    m = api.model(name)
+    assert (m['site'], m['line'], m['task']) == ('WEB', line, 'det')
+    mv = api.model_version(name, 1)
+    assert mv['trainset']['ref'] == f'{snap}@1' and mv['code_commit'] == 'a' * 40 and mv['note'] == '网页登记'
+    assert mv['metrics'] == {'mAP50': 0.91} and api.model_versions(name)[-1]['number'] == 1
+    assert seen['again'] == {'trainset': f'{snap}@1', 'model': name, 'newShown': False, 'place': seen['again']['place']}
+    assert seen['againSent'] is None and f'已登记为 {name}@1' in seen['toast'] and seen['againHash'] == f'#/mv/{name}/1'
+    assert len(api.model_versions(name)) == 1                                  # the same ONNX: no second version
+    assert seen['models'] == '#/model-register'
+    assert seen['fieldButtons'] == 0 and '不能登记模型版本' in seen['fieldPage']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, tmp_path):
     """No page carries long grey hints; they are behind an ⓘ, which shows its text while pointed at or focused,
     keeps it after a click until Esc, a second click or a click elsewhere, and never ticks the box it sits by."""
@@ -671,7 +714,7 @@ def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, t
     assert seen['errors'] == []
     assert seen['long'] == {}                                                  # no long hint left on any page
     for hash in ('#/', f'#/add/{name}', f'#/upload/{name}', f'#/remove/{name}', '#/dataset-new', f'#/trainset-new?from={name}@1',
-                 '#/places', '#/batches',
+                 '#/places', '#/model-register', '#/batches',
                  '#/batch-new', '#/predictions', '#/events', '#/me', '#/users'):
         assert seen['marks'][hash] >= 1, hash
     assert 'fw dataset add' in seen['hovered'] and seen['label'] == '上传新增目录说明'

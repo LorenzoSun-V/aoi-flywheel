@@ -183,6 +183,8 @@ export const api = {
   predictionSets: async (model = '') => (await call(`/predictions?model=${encodeURIComponent(model)}`)).prediction_sets,
   predictionSet: (id) => call(`/predictions/${Number(id)}`),
   createDataset: (body) => call('/datasets', { method: 'POST', body }),
+  createModel: (body) => call('/models', { method: 'POST', body }),
+  registerModelVersion: (name, body) => call(`/models/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
   folderCheck: (paths, allowOtherFiles, force) => call('/folder-check', { method: 'POST', body: { paths, allow_other_files: allowOtherFiles, force } }),
   missing: async (objects) => (await call('/objects/missing', { method: 'POST', body: { objects } })).missing,
   putObject: (digest, blob) => call(`/objects/${digest}`, { method: 'PUT', blob }),
@@ -825,6 +827,7 @@ async function versionPage(name, number, query) {
         'val 和 test 的图片不区分有无标注框，均位于各自的 images 目录中。'], '快照目录说明') : null),
     el('div', { class: 'actions' },
       writer && version.kind === 'pool' ? el('a', { id: 'trainset-from', class: 'button primary', href: hrefOf(['trainset-new'], { from: version.ref }) }, '建立训练集快照') : null,
+      !dir && snapshot && can('models.write') ? el('a', { id: 'model-from', class: 'button primary', href: hrefOf(['model-register'], { trainset: version.ref }) }, '登记模型版本') : null,
       writer && snapshot ? el('a', { id: 'trainset-next', class: 'button', href: hrefOf(['trainset-new'], { name: version.dataset }) }, '建立下一版') : null)),
     dir ? null : el('dl', { class: 'kv' },
       el('dt', {}, '文件'), el('dd', {}, `${version.file_count} 个，${sizeText(version.total_bytes)}`),
@@ -1510,7 +1513,8 @@ async function modelsPage(query) {
   scope = at;
   renderNav();
   const [rows, tree] = await Promise.all([api.models(scopeQuery(at)), api.sites()]);
-  show(crumbs('models', at), el('h1', {}, '模型', info('模型使用 fw model create 创建，模型版本使用 fw model register 登记。', '模型说明')),
+  show(crumbs('models', at), pageHead(['模型', info('在网页上点击「登记模型版本」上传 ONNX，或使用 fw model create 和 fw model register。', '模型说明')],
+    can('models.write') ? el('a', { id: 'model-register', class: 'button primary', href: '#/model-register' }, icon('plus'), '登记模型版本') : null),
     browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '按名称搜索',
       rows.length ? el('table', {}, el('tr', {}, ['名称', '现场 / 产线', '任务', '版本数', '最新', '建立', '备注'].map((h) => el('th', {}, h))),
         rows.map((m) => el('tr', {},
@@ -1526,7 +1530,7 @@ async function modelPage(name) {
   const [m, versions, evals] = await Promise.all([api.model(name), api.modelVersions(name), api.evals(name)]);
   const list = versions.slice().reverse();
   show(crumbs('models', m, m.name),
-    el('h1', {}, m.name),
+    pageHead(m.name, can('models.write') ? el('a', { id: 'model-register', class: 'button primary', href: hrefOf(['model-register'], { model: m.name }) }, '登记新版本') : null),
     el('dl', { class: 'kv' }, el('dt', {}, '现场 / 产线'), el('dd', {}, `${m.site} / ${m.line}`),
       el('dt', {}, '任务'), el('dd', {}, TASK_NAMES[m.task] || m.task),
       el('dt', {}, '建立'), el('dd', {}, `${m.created_by}，${when(m.created_at)}`), el('dt', {}, '备注'), el('dd', {}, m.note || '-')),
@@ -1537,7 +1541,7 @@ async function modelPage(name) {
         el('td', { class: 'mono' }, v.code_commit ? v.code_commit.slice(0, 10) + (v.code_dirty ? '*' : '') : '-'),
         el('td', {}, tagChips(v.tags)),
         el('td', {}, v.created_by), el('td', {}, when(v.created_at)), el('td', { class: 'muted' }, v.note))))
-      : el('p', { class: 'muted' }, '暂无版本，可使用 fw model register 登记。'),
+      : el('p', { class: 'muted' }, '暂无版本。'),
     el('h2', {}, '评估'), evalTable(evals.slice().reverse(), true),
     list.length && can('models.write') ? await labelForm(m.name, list, true, () => modelPage(name)) : null);
 }
@@ -1660,6 +1664,173 @@ async function submitForms(mv) {
       () => ({ model: mv.ref, data: predData.value.trim(), dirs: dirsOf(predDirs), conf: Number(predConf.value) }),
       ['对数据池版本中的图片进行推理，结果保存为预测集。',
         '若相同的模型版本、推理环境、图片和 conf 已有结果，将直接复用，不再重复运行。']))];
+}
+
+// A model version registered from the browser: the ONNX (with its validation metrics and weights, if given)
+// hashed, uploaded and registered with the snapshot it was trained on, the same requests fw model register sends.
+// The platform runs only the ONNX (through TensorRT); weights are kept with the version and never loaded.
+// trainset=<snapshot>@<version>: the snapshot (from its page); model=<name>: the model (from its page).
+async function modelRegisterPage(query) {
+  const show = live();
+  if (!can('models.write')) throw new Error('当前账号不能登记模型版本，请联系管理员或算法工程师。');
+  const want = splitRef(query.get('trainset') || '');
+  const asked = query.get('model') || '';
+  const [all, models, tree] = await Promise.all([api.datasets(), api.models(), api.sites()]);
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const snapshots = all.filter((d) => d.kind === 'trainset' && d.latest).sort((a, b) => a.name.localeCompare(b.name));
+  const askedModel = asked ? models.find((m) => same(m.name, asked)) : null;
+  const head = [crumbs('models', askedModel || null, askedModel ? [askedModel.name, hrefOf(['m', askedModel.name])] : null, '登记模型版本'),
+    el('h1', {}, '登记模型版本', info([
+      '上传训练导出的 ONNX，并引用训练所用的训练集快照，登记为模型的下一个版本。模型的类别表取自该快照，即可从模型追溯到训练使用的每个文件。',
+      '平台只使用 ONNX：评估时由 GPU 机从 ONNX 建立 TensorRT 引擎，现场同样从 ONNX 建立引擎。权重文件仅随版本保存，平台不会加载。',
+      '同一个 ONNX 只能登记一次。功能与 fw model register 相同。'], '登记模型版本说明'))];
+  if (!snapshots.length) {
+    show(head, el('p', { class: 'muted' }, '暂无训练集快照。模型版本须引用训练所用的训练集快照，请先建立训练集快照。'));
+    return;
+  }
+
+  // the snapshot it was trained on: a snapshot and one of its versions
+  const tsName = el('select', { id: 'mv-trainset', 'aria-label': '训练集快照' }, snapshots.map((d) => el('option', { value: d.name }, d.name)));
+  const tsVersion = el('select', { id: 'mv-trainset-version', 'aria-label': '快照版本' });
+  const versionsOf = new Map();
+  const fillVersions = async (number) => {
+    const chosen = tsName.value;
+    if (!versionsOf.has(chosen)) versionsOf.set(chosen, api.versions(chosen));
+    const list = (await versionsOf.get(chosen)).slice().reverse();
+    if (tsName.value !== chosen) return;
+    tsVersion.replaceChildren(...list.map((v) => el('option', { value: String(v.number) }, v.ref + ((v.labels || []).length ? `（${v.labels.join('、')}）` : ''))));
+    const hit = list.find((v) => String(v.number) === String(number) || (v.labels || []).includes(number));
+    tsVersion.value = String((hit || list[0]).number);
+  };
+  // the model: one of those there are, or a new one (of a registered site and line)
+  const model = el('select', { id: 'mv-model', 'aria-label': '模型' }, models.map((m) => el('option', { value: m.name }, `${m.name}（${m.site} / ${m.line}）`)),
+    el('option', { value: '' }, '新建模型…'));
+  const newName = el('input', { id: 'mv-new-name', type: 'text', placeholder: '例如 SES-TX-detr' });
+  const { site, line } = placePicker(tree, { site: '', line: '' });
+  const newRows = [field('模型名称', newName, '名称只能使用字母、数字和 . _ -，建立后不能修改。同一产线可以有多个模型，例如不同的网络结构。'),
+    el('label', {}, '现场', site), el('label', {}, '产线', line)];
+  const place = async () => {  // a new model defaults to the line of the snapshot's first source
+    const t = await api.trainset(tsName.value, tsVersion.value || 'latest');
+    const first = splitRef(t.trainset.sources[0]);
+    const pool = first && all.find((d) => same(d.name, first.name));
+    if (!pool || !pool.site) return;
+    const s = [...site.options].find((o) => same(o.value, pool.site));
+    if (s) { site.value = s.value; site.dispatchEvent(new Event('change')); }
+    const l = [...line.options].find((o) => same(o.value, pool.line));
+    if (l) line.value = l.value;
+  };
+  const shape = () => { for (const r of newRows) r.hidden = model.value !== ''; };
+
+  const onnx = el('input', { id: 'mv-onnx', type: 'file', accept: '.onnx' });
+  const metrics = el('input', { id: 'mv-metrics', type: 'file', accept: '.json,application/json' });
+  const weights = el('input', { id: 'mv-weights', type: 'file' });
+  const repo = el('input', { id: 'mv-repo', type: 'text', placeholder: '选填，例如 https://git.example.com/aoi/rf-detr-pro.git' });
+  const commit = el('input', { id: 'mv-commit', type: 'text', placeholder: '选填，训练代码的提交号（40 位）', class: 'mono' });
+  const note = el('input', { id: 'mv-note', type: 'text', placeholder: '备注（选填），例如训练参数、轮数' });
+  const result = el('div', { id: 'mv-result' });
+  const go = el('button', { id: 'mv-go', class: 'primary', type: 'button' }, '上传并登记');
+
+  // what is sent, checked first where the browser can: an ONNX starts with its ir_version, metrics are a JSON object
+  const files = async () => {
+    const f = onnx.files[0];
+    if (!f) throw new Error('请选择 ONNX 文件。');
+    if (!f.size || new Uint8Array(await f.slice(0, 1).arrayBuffer())[0] !== 0x08) {
+      throw new Error(`${f.name} 不是 ONNX 文件。权重文件（.pt、.pth）请在「权重文件」中选择，平台只使用 ONNX。`);
+    }
+    const items = [['model.onnx', f]];
+    const m = metrics.files[0];
+    if (m) {
+      let doc = null;
+      try { doc = JSON.parse(await m.text()); } catch { /* said below */ }
+      if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error(`${m.name} 不是 JSON 对象，无法作为验证指标登记。`);
+      items.push(['metrics.json', m]);
+    }
+    const w = weights.files[0];
+    if (w) {
+      if (!w.size) throw new Error(`权重文件 ${w.name} 是空文件。`);
+      items.push([`weights/${w.name}`, w]);
+    }
+    return items;
+  };
+  go.addEventListener('click', async () => {
+    const progress = bar();
+    go.disabled = true;
+    result.replaceChildren();  // an error left from the last try is not this one's
+    try {
+      const items = await files();
+      const name = model.value || newName.value.trim();
+      if (!name) throw new Error('请选择模型，或填写新模型的名称。');
+      if (repo.value.trim() && !commit.value.trim()) throw new Error('填写了训练代码仓库时，请同时填写提交号。');
+      const t = await api.trainset(tsName.value, tsVersion.value);
+      result.replaceChildren(progress);
+      const total = items.reduce((a, [, f]) => a + f.size, 0);
+      progress.set(0, total, '计算哈希…');
+      const digests = await hashAll(items.map(([, f]) => f), (done) => progress.set(done, total, `计算哈希 ${sizeText(done)} / ${sizeText(total)}`));
+      const rows = items.map(([path, f], i) => [path, digests[i], f.size]);
+      const missing = new Set(await api.missing(rows.map(([, d, n]) => [d, n])));
+      const todo = rows.map((r, i) => [r, items[i][1]]).filter(([r]) => missing.has(r[1]));
+      const bytes = todo.reduce((a, [r]) => a + r[2], 0);
+      let sent = 0;
+      for (const [[path, digest, size], f] of todo) {
+        progress.set(sent, bytes, `上传 ${path}（${sizeText(size)}），已上传 ${sizeText(sent)} / ${sizeText(bytes)}`);
+        await api.putObject(digest, f);
+        sent += size;
+      }
+      progress.set(1, 1, '登记…');
+      if (!model.value) {  // made once: a retry after a refused version registers on it, not a second new model
+        const m = await api.createModel({ name, site: site.value, line: line.value, task: 'det', note: '' });
+        model.insertBefore(el('option', { value: m.name }, `${m.name}（${m.site} / ${m.line}）`), model.lastElementChild);
+        model.value = m.name;
+        shape();
+      }
+      const mv = await api.registerModelVersion(name, { files: rows, trainset_id: t.id, code_repo: repo.value.trim(),
+        code_commit: commit.value.trim(), note: note.value.trim() });
+      if (mv.existing) toast(`该 ONNX 已登记为 ${mv.ref}`);
+      location.hash = hrefOf(['mv', mv.model, String(mv.number)]);
+    } catch (e) {
+      result.replaceChildren(errorBox(e));
+    } finally { go.disabled = false; }
+  });
+
+  // defaults: the snapshot asked for, else the model's latest one's; the model asked for, else the one that was
+  // trained on this snapshot before, else the only one on its line, else a new one
+  let tsDefault = want;
+  if (!tsDefault && askedModel && askedModel.latest) {
+    tsDefault = splitRef((await api.modelVersion(askedModel.name, 'latest')).trainset.ref);
+  }
+  const hit = tsDefault && snapshots.find((d) => same(d.name, tsDefault.name));
+  if (want && !hit) throw new Error(`${want.name} 不是训练集快照。模型版本须引用训练所用的训练集快照。`);
+  if (hit) tsName.value = hit.name;
+  await fillVersions(hit ? tsDefault.number : 'latest');
+  if (askedModel) model.value = askedModel.name;
+  else {
+    const t = await api.trainset(tsName.value, tsVersion.value);
+    const first = splitRef(t.trainset.sources[0]);
+    const pool = first && all.find((d) => same(d.name, first.name));
+    const near = pool ? models.filter((m) => same(m.site, pool.site) && same(m.line, pool.line)) : [];
+    let pick = '';
+    for (const m of near.filter((x) => x.latest).slice(0, 10)) {
+      if (same(splitRef((await api.modelVersion(m.name, 'latest')).trainset.ref).name, tsName.value)) { pick = m.name; break; }
+    }
+    model.value = pick || (near.length === 1 ? near[0].name : '');
+  }
+  if (!model.value) await place();
+  shape();
+  tsName.addEventListener('change', () => { fillVersions('latest').then(() => (model.value ? null : place())).catch((e) => result.replaceChildren(errorBox(e))); });
+  model.addEventListener('change', () => { shape(); if (!model.value) place().catch(() => {}); });
+
+  show(head, el('div', { class: 'panel form', id: 'mv-form' },
+    el('div', { class: 'label' }, el('span', { class: 'name' }, '训练集快照', info('训练所用的训练集快照版本，即训练前 fw get 取回的版本。模型的类别表取自该快照。', '训练集快照的说明')),
+      el('div', { class: 'row' }, tsName, tsVersion)),
+    field('模型', model, '选择已有模型时，登记为其下一个版本；选择「新建模型…」时，先建立模型，再登记第一个版本。'),
+    ...newRows,
+    field('ONNX 文件', onnx, '训练导出的单个 ONNX 文件。平台不接收把张量数据存放在其他文件中的 ONNX（external data）。'),
+    field('验证指标', metrics, '选填。训练框架输出的验证指标 JSON 文件，登记为 metrics.json，在模型版本页显示。'),
+    field('权重文件', weights, '选填。训练得到的权重文件（如 best.pt），随版本保存以便追溯，平台不会加载。'),
+    field('训练代码仓库', repo, '选填。训练代码的仓库地址；地址中的用户名和密码不会被记录。'),
+    field('提交号', commit, '选填。训练代码的 git 提交号；填写仓库地址时必填。'),
+    el('label', {}, '备注', note),
+    el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, go))), result);
 }
 
 async function evalPage(id) {
@@ -3276,7 +3447,7 @@ async function overviewPage(query) {
       line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是已登记的产线，以下为名称匹配的内容。`),
       card,
       el('div', { class: `cols${batchList ? '' : ' one'}` },
-        el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型'), modelTable,
+        el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型', can('models.write') ? el('a', { id: 'model-new', class: 'small with-icon', href: '#/model-register' }, icon('plus'), '登记模型版本') : null), modelTable,
           head('data', '数据池与快照', ['datasets'], '全部数据集', newData, newSnapshot), dataTable),
         batchList ? el('div', { class: 'col right' }, head('batches', ['在办的批次', info('在办批次指尚未入库且未关闭的批次。', '在办批次说明')], ['batches'], '全部批次'), batchList) : null))));
 }
@@ -3343,6 +3514,7 @@ async function render() {
     else if (parts[0] === 'datasets') await datasetsPage(query);
     else if (parts[0] === 'dataset-new') await datasetNewPage(query);
     else if (parts[0] === 'trainset-new') await trainsetNewPage(query);
+    else if (parts[0] === 'model-register') await modelRegisterPage(query);
     else if (parts[0] === 'places') await placesPage();
     else if (parts[0] === 'd' && parts[1]) await datasetPage(parts[1]);
     else if (parts[0] === 'v' && parts[2]) await versionPage(parts[1], parts[2], query);
