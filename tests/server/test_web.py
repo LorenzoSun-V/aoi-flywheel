@@ -701,6 +701,40 @@ def test_a_model_version_is_registered_from_the_browser(service, tokens, api, tm
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_onnx_is_saved_under_the_name_of_its_version(service, tokens, api, make_api, model, snapshot, tmp_path):  # noqa: F811
+    """A model version's ONNX is saved as <model>@<number>.onnx, with its highest 版本号 in use when it has one, so
+    a file on a field machine says which version it is; the bytes are the version's; a field account saves it."""
+    from test_models import files_in, register
+    one = register(api, model, snapshot, files_in(tmp_path, f'onnx-1-{os.urandom(4).hex()}'))
+    register(api, model, snapshot, files_in(tmp_path, f'onnx-2-{os.urandom(4).hex()}'))
+    register(api, model, snapshot, files_in(tmp_path, f'onnx-3-{os.urandom(4).hex()}'))
+    api.add_model_label(model, 2, 'v0.9.0')
+    api.add_model_label(model, 2, 'v1.0.0')
+    api.add_model_label(model, 3, 'v1.1.0')
+    make_api('admin').retire_model_label(model, 'v1.1.0', '起错版本号')
+    weights = next(f for f in api.model_version(model, 1)['files'] if f['path'] == 'files/best.pt')
+    stored = service.app.state.store.path(weights['sha256'])  # unique bytes: no other test's file goes missing
+    aside = tmp_path / 'aside'
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    stored.rename(aside)
+    try:
+        r = subprocess.run(['node', str(WEB_TESTS / 'onnx.cjs'), service.url + '/', tokens['field'], tokens['algo'], model, str(shots)],
+                           capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    finally:
+        aside.rename(stored)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['one'] == {'name': f'{model}@1.onnx', 'sha256': one['onnx_sha256']} and seen['oneRow'] == seen['one']
+    assert seen['classes'] == 'classes.txt' and seen['tags'] == 0 and seen['icon'] == 1
+    assert '下载失败' in seen['missing']
+    assert seen['two'] == f'{model}@2_v1.0.0.onnx'                          # the highest of its 版本号
+    assert seen['three'] == f'{model}@3.onnx'                               # a retired 版本号 names nothing
+    assert seen['algo'] == ['下载 ONNX', '标记为候选', '标记为弃用…']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, tmp_path):
     """No page carries long grey hints; they are behind an ⓘ, which shows its text while pointed at or focused,
     keeps it after a click until Esc, a second click or a click elsewhere, and never ticks the box it sits by."""
