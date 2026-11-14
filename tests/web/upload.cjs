@@ -1,6 +1,6 @@
 // Upload folders from the browser (run by tests/server/test_web.py):
 // node upload.cjs <url> <token> <new dataset name> <out dir> <folder 1> <folder 2>.
-// Creates the dataset on the datasets page, uploads folder 1 (first refused for its other file, then allowed
+// Creates the dataset from the datasets page (新建数据集), uploads folder 1 (first refused for its other file, then allowed
 // with the check box), then folder 2 as the next version. Prints one JSON line of what it saw.
 const { chromium } = require('playwright');
 
@@ -16,9 +16,10 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/datasets`);
   await page.reload();
   const seen = {};
-  await page.waitForSelector('details summary');
-  await page.click('summary:has-text("新建数据池")');
-  await page.fill('input[placeholder^="名称"]', name);
+  await page.waitForSelector('#dataset-new');
+  await page.click('#dataset-new');
+  await page.waitForSelector('#dataset-kind');
+  await page.fill('#dataset-name', name);
   await page.selectOption('#site', 'SES');
   await page.selectOption('#line', 'TX');
   await page.click('button:has-text("建好后上传")');

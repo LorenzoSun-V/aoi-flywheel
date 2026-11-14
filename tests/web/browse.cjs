@@ -32,8 +32,7 @@ const { chromium } = require('playwright');
   await page.click(`#places li.line a[href*="site=${site}&line=TX"]`);  // other sites have a line of this name too
   await page.waitForFunction(() => location.hash.includes('line=TX') && (document.querySelector('#places li.line a.on')?.textContent || '').startsWith('TX'));
   seen.tx = await lists();
-  seen.formSite = await page.inputValue('#site');
-  seen.formLine = await page.inputValue('#line');
+  seen.newHref = await page.getAttribute('#dataset-new', 'href');
   await page.screenshot({ path: `${out}/browse.png`, fullPage: true });
   await page.fill('#search', 'no-such-name');
   await page.press('#search', 'Enter');

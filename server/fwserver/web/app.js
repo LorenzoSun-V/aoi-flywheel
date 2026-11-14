@@ -25,7 +25,7 @@ export function el(tag, attrs = {}, ...children) {
 }
 
 function present(nodes) {
-  return nodes.flat().filter((n) => n !== null && n !== undefined && n !== false);
+  return nodes.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false);  // a part may itself be a list of parts
 }
 
 function paint(...nodes) {
@@ -62,6 +62,8 @@ const ICONS = {
   user: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 12.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M6.2 18.4a7 7 0 0 1 11.6 0'],
   logout: ['M14 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4', 'M9.5 8l-4 4 4 4', 'M5.5 12H15'],
   arrow: ['M5 12h14', 'M13 6l6 6-6 6'],
+  plus: ['M12 5v14', 'M5 12h14'],
+  download: ['M12 4v11', 'M7.5 10.5L12 15l4.5-4.5', 'M5 19.5h14'],
 };
 
 export function icon(name, cls = '') {
@@ -153,6 +155,10 @@ export const api = {
   version: (name, number) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
   sites: () => call('/sites').then((tree) => { treeCache = tree; return tree; }),
   addSite: (ref, name) => call('/sites', { method: 'POST', body: { ref, name } }),
+  renameSite: (ref, name) => call('/sites/name', { method: 'POST', body: { ref, name } }),
+  retireLabel: (name, label, note) => call(`/datasets/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}/retire`, { method: 'POST', body: { note } }),
+  retireModelLabel: (name, label, note) => call(`/models/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}/retire`, { method: 'POST', body: { note } }),
+  setTag: (name, number, tag, added, note) => call(`/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/tags`, { method: 'POST', body: { tag, added, note } }),
   labels: (name) => call(`/datasets/${encodeURIComponent(name)}/labels`),
   addLabel: (name, number, label, note) => call(`/datasets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
   modelLabels: (name) => call(`/models/${encodeURIComponent(name)}/labels`),
@@ -332,6 +338,33 @@ async function labelForm(name, versions, model, done) {
     } catch (e) { msg.replaceChildren(errorBox(e)); go.disabled = false; }
   } }, '起版本号');
   const retired = info.labels.filter((r) => r.retired);
+  const alive = info.labels.filter((r) => !r.retired);
+  const retire = can('labels.retire');
+  const row = (r) => {
+    const tr = el('tr', {}, el('td', {}, el('span', { class: 'tag ver' }, r.label)), el('td', {}, r.ref),
+      el('td', {}, `${r.created_by}，${when(r.created_at)}`), el('td', { class: 'muted' }, r.note || ''),
+      retire ? el('td', {}, el('button', { class: 'retire', 'data-label': r.label, onclick: () => tr.replaceWith(asking(r)) }, '撤销')) : null);
+    return tr;
+  };
+  // Retiring asks for the reason in the row itself; the label can never be given again afterwards.
+  const asking = (r) => {
+    const why = el('input', { type: 'text', class: 'retire-note', placeholder: `为什么撤销 ${r.label}（必填，比如起错版本了）`, size: 36 });
+    const err = el('span', { class: 'bad' });
+    const tr = el('tr', { class: 'asking' }, el('td', {}, el('span', { class: 'tag ver' }, r.label)), el('td', { colspan: '3' }, why, ' ',
+      el('span', { class: 'muted small' }, `撤销后 ${r.label} 不再指任何版本，以后也不能再起。`), err),
+    el('td', {}, el('div', { class: 'row' },
+      el('button', { class: 'danger retire-go', onclick: async (ev) => {
+        const button = ev.currentTarget;
+        button.disabled = true;
+        try { await (model ? api.retireModelLabel : api.retireLabel)(name, r.label, why.value.trim()); await done(); } catch (e) {
+          err.textContent = ` ${e.message}`;
+          button.disabled = false;
+        }
+      } }, '确认撤销'),
+      el('button', { onclick: () => tr.replaceWith(row(r)) }, '取消'))));
+    setTimeout(() => why.focus());
+    return tr;
+  };
   return [el('h2', {}, '版本号'),
     el('p', { class: 'muted' }, '给一个版本起 v主.次.修订 这样的版本号，例如冷启动 v0.0.1、加了数据 v0.1.0、稳定了 v1.0.0。'
       + `起了以后 ${name}@v0.1.0 就是这个版本，哪里都能用。一个版本可以有几个版本号；版本号定了就不能改到别的版本上。`),
@@ -339,13 +372,26 @@ async function labelForm(name, versions, model, done) {
       ['patch', 'minor', 'major'].map((k) => el('button', { id: `label-${k}`, title: { patch: '小改', minor: '加了数据', major: '大版本' }[k],
         onclick: () => { label.value = info.suggest[k]; } }, info.suggest[k])), note, go),
     msg,
+    alive.length ? el('table', { id: 'labels' }, el('tr', {}, ['版本号', '指向', '起的人', '备注', retire ? '' : null].filter((h) => h !== null)
+      .map((h) => el('th', {}, h))), alive.map(row)) : null,
     retired.length ? el('p', { class: 'muted' }, '已撤销、不能再用的版本号：'
       + retired.map((r) => `${r.label}（原来指 ${r.ref}，${r.retired_note}）`).join('、')) : null];
 }
 
+// The title of a page with what one can do there on its right.
+function pageHead(title, ...actions) {
+  return el('div', { class: 'page-head' }, el('h1', {}, title), el('div', { class: 'actions' }, ...actions));
+}
+
+// A model version's tags in words: candidate (候选) and deprecated (弃用).
+const TAG_NAMES = { candidate: '候选', deprecated: '弃用' };
+function tagChips(tags) {
+  return (tags || []).map((t) => [' ', el('span', { class: `tag ${t === 'deprecated' ? 'muted' : 'warn'}` }, TAG_NAMES[t] || t)]);
+}
+
 // --- where a page is: the path from the home page, and the way back ---------------------------------------
 const SECTIONS = { datasets: '数据集', batches: '标注批次', models: '模型', jobs: '任务', predictions: '预测集',
-  events: '操作记录', users: '账号', me: '我的凭据' };
+  events: '操作记录', users: '账号', me: '我的凭据', places: '现场和产线' };
 const PLACED = new Set(['datasets', 'batches', 'models']);  // the lists that are browsed by site and line
 
 // The path to a page as [[text, link or null], ...]: the home page (the overview), the site and line the thing
@@ -509,6 +555,7 @@ function placeTree(tree, at, counts, link) {
     aside.className = choosing ? 'choosing' : '';
     aside.replaceChildren(...present([
       el('div', { class: 'head' }, el('span', {}, '现场 / 产线'),
+        !choosing && can('sites.write') ? el('a', { id: 'places-manage', class: 'link', href: '#/places', title: '登记现场、产线，改显示名' }, '管理') : null,
         tree.sites.length ? el('button', { id: 'places-choose', class: 'link', type: 'button',
           title: '选哪些现场、产线显示在这里', onclick: () => {
             if (choosing) { render(); return; }  // done: the page shows the choice too
@@ -568,16 +615,15 @@ async function datasetsPage(query) {
   const pools = rows.filter((d) => d.kind !== 'trainset');
   const snapshots = rows.filter((d) => d.kind === 'trainset');
   const narrowed = at.site || at.q;
-  show(crumbs('datasets', at), el('h1', {}, '数据集'),
+  show(crumbs('datasets', at), pageHead('数据集', can('datasets.write') ? el('a', { id: 'dataset-new', class: 'button primary',
+    href: hrefOf(['dataset-new'], { site: at.site, line: at.line }) }, icon('plus'), '新建数据集') : null),
     browse(tree, at, ['datasets'], {}, datasetCounts(tree), '搜名称',
       el('h2', { id: 'pools' }, `数据池和测试集（${pools.length}）`),
       pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的数据池。'
-        : '还没有数据集：在下面新建一个数据池再上传目录，或者在服务器上用 fw dataset create 和 fw dataset import。'),
+        : '还没有数据集：点右上角「新建数据集」，建好后上传目录；或者在服务器上用 fw dataset create 和 fw dataset import。'),
       el('h2', { id: 'snapshots' }, `训练集快照（${snapshots.length}）`),
       snapshots.length ? table(snapshots, false) : el('p', { class: 'muted' }, narrowed ? '这里没有符合的训练集快照。' : '还没有训练集快照：用 fw trainset create 从数据池版本建。'),
-      at.line ? el('p', { class: 'muted' }, '训练集快照按它取过数据的产线算：从几条产线取数据的快照，在每条产线下都列出。') : null,
-      can('datasets.write') ? el('div', { style: 'margin-top:16px' }, newDatasetForm(tree, at)) : null,
-      can('sites.write') ? el('div', { style: 'margin-top:8px' }, newPlaceForm(() => datasetsPage(query))) : null));
+      at.line ? el('p', { class: 'muted' }, '训练集快照按它取过数据的产线算：从几条产线取数据的快照，在每条产线下都列出。') : null));
 }
 
 // A version's source: 'batch:NAME@N' (a labelling batch that was imported) links to the batch.
@@ -610,7 +656,7 @@ async function datasetPage(name) {
   placeCache.set(d.name, { site: d.site, line: d.line });
   show(crumbs('datasets', d, d.name),
     el('h1', {}, d.name),
-    el('dl', { class: 'kv' }, el('dt', {}, '类型'), el('dd', {}, d.kind), el('dt', {}, '现场 / 产线'),
+    el('dl', { class: 'kv' }, el('dt', {}, '类型'), el('dd', {}, KIND_NAMES[d.kind] || d.kind), el('dt', {}, '现场 / 产线'),
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
       el('dd', {}, `${d.created_by}，${when(d.created_at)}`), el('dt', {}, '备注'), el('dd', {}, d.note || '-')),
     el('h2', {}, '版本'),
@@ -880,11 +926,26 @@ async function diffPage(name, query) {
   const place = await placeOfDataset(name);
   const LIMIT = 500;
   const link = (v, path) => (IMAGE_EXTS.has(ext(path)) ? el('a', { href: hrefOf(['img', v.dataset, String(v.number), path]) }, path) : path);
-  const section = (title, cls, rows) => (rows.length ? [el('h2', {}, `${title}（${rows.length}）`),
-    el('table', {}, rows.slice(0, LIMIT).map((r) => el('tr', { class: cls }, el('td', { class: 'mark' }), el('td', {}, r)))),
-    rows.length > LIMIT ? el('p', { class: 'muted' }, `只列出前 ${LIMIT} 个；全部用 fw dataset diff --list 看`) : null] : []);
+  const section = (title, cls, rows) => {
+    if (!rows.length) return [];
+    const tr = (r) => el('tr', { class: cls }, el('td', { class: 'mark' }), el('td', {}, r));
+    const table = el('table', {}, rows.slice(0, LIMIT).map(tr));
+    const more = rows.length > LIMIT ? el('p', { class: 'muted' }, `先列出前 ${LIMIT} 个。`, el('button', { class: 'more-rows', onclick: () => {
+      table.append(...rows.slice(LIMIT).map(tr));
+      more.remove();
+    } }, `全部列出（${rows.length} 个）`)) : null;
+    return [el('h2', {}, `${title}（${rows.length}）`), table, more];
+  };
+  const save = el('button', { id: 'diff-download', onclick: () => {
+    const url = URL.createObjectURL(new Blob([diffListText(d)], { type: 'text/tab-separated-values' }));
+    const a2 = el('a', { href: url, download: `${a.ref}_${b.ref}.tsv`.replace(/@/g, '-') });
+    document.body.append(a2);
+    a2.click();
+    a2.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, title: '和 fw dataset diff --list 一样：每行「新增 / 修改 / 删除 / 改名」、制表符、路径，可以用表格打开' }, icon('download'), '下载变化清单');
   show(crumbs('datasets', place, [name, hrefOf(['d', name])], '比较'),
-    el('h1', {}, `${a.ref} → ${b.ref}`),
+    pageHead(`${a.ref} → ${b.ref}`, save),
     el('p', {}, `新增 ${d.added.length}，删除 ${d.deleted.length}，修改 ${d.modified.length}，改名 ${d.renamed.length}`),
     section('新增', 'change-added', d.added.map((p) => link(b, p))),
     section('删除', 'change-deleted', d.deleted.map((p) => link(a, p))),
@@ -894,8 +955,17 @@ async function diffPage(name, query) {
 }
 
 
+// Every change between two versions as fw dataset diff --list prints it: one line each, kind \t path (a rename:
+// 改名 \t old \t new), added, modified, deleted, then renamed.
+export function diffListText(d) {
+  const lines = [];
+  for (const [title, key] of [['新增', 'added'], ['修改', 'modified'], ['删除', 'deleted']]) for (const p of d[key]) lines.push(`${title}\t${p}`);
+  for (const [o, n] of d.renamed) lines.push(`改名\t${o}\t${n}`);
+  return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
 // --- models, evaluations, jobs, prediction sets -----------------------------------------------------------
-const KIND_NAMES = { pool: '数据池', test: '测试集', regression: '回归集', other: '其他' };
+const KIND_NAMES = { pool: '数据池', test: '测试集', regression: '回归集', other: '其他', trainset: '训练集快照' };
 const TASK_NAMES = { det: '检测', seg: '分割', obb: '旋转框', pose: '关键点', cls: '分类' };
 
 // The numbers of a metrics JSON as [dotted key, value], in file order (= fw.ops.flatten_metrics).
@@ -1014,7 +1084,7 @@ async function modelPage(name) {
       list.map((v) => el('tr', {}, el('td', {}, mref(v.ref)), el('td', {}, labelChips(v)), el('td', {}, vref(v.trainset.ref)),
         el('td', { class: 'mono' }, `${v.onnx_sha256.slice(0, 12)}（${sizeText(v.onnx_size || 0)}）`),
         el('td', { class: 'mono' }, v.code_commit ? v.code_commit.slice(0, 10) + (v.code_dirty ? '*' : '') : '-'),
-        el('td', {}, v.tags.map((t) => el('span', { class: 'tag' }, t))),
+        el('td', {}, tagChips(v.tags)),
         el('td', {}, v.created_by), el('td', {}, when(v.created_at)), el('td', { class: 'muted' }, v.note))))
       : el('p', { class: 'muted' }, '还没有版本；用 fw model register 登记。'),
     el('h2', {}, '评估'), evalTable(evals.slice().reverse(), true),
@@ -1048,8 +1118,11 @@ async function modelVersionPage(name, number) {
   const mv = await api.modelVersion(name, number);
   const [chain, sets] = await Promise.all([api.chain(mv.ref), api.predictionSets(mv.model)]);
   const mine = sets.filter((p) => p.model_version.id === mv.id).reverse();
+  const asking = el('div');
+  const history = chain.model_version.tag_history || [];  // the trace chain has it: every tag added or taken off
   show(crumbs('models', mv, [mv.model, hrefOf(['m', mv.model])], `@${mv.number}`),
-    el('h1', {}, mv.ref, labelChips(mv), ...mv.tags.map((t) => [' ', el('span', { class: 'tag' }, t)])),
+    pageHead([mv.ref, labelChips(mv), tagChips(mv.tags)], ...(can('models.write') ? tagButtons(mv, asking, () => modelVersionPage(name, number)) : [])),
+    asking,
     el('dl', { class: 'kv' },
       el('dt', {}, '训练集快照'), el('dd', {}, vref(mv.trainset.ref)),
       el('dt', {}, '来源数据池'), el('dd', {}, chain.sources.length ? chain.sources.map((v, i) => [i ? '、' : '', vref(v.ref)]) : '-'),
@@ -1058,12 +1131,39 @@ async function modelVersionPage(name, number) {
       el('dt', {}, '训练代码'), el('dd', {}, mv.code_commit ? `${mv.code_repo || ''} @ ${mv.code_commit}${mv.code_dirty ? '（有未提交的改动）' : ''}` : '没登记'),
       el('dt', {}, '发布'), el('dd', {}, chain.releases.length ? chain.releases.map((r) => r.ref).join('、') : '还没发布'),
       el('dt', {}, '登记'), el('dd', {}, `${mv.created_by}，${when(mv.created_at)}`),
-      el('dt', {}, '备注'), el('dd', {}, mv.note || '-')),
+      el('dt', {}, '备注'), el('dd', {}, mv.note || '-'),
+      history.length ? [el('dt', {}, '标签经过'), el('dd', {}, el('ul', { class: 'plain', id: 'tag-history' },
+        history.map((t) => el('li', {}, `${t.added ? '标成' : '去掉'}「${TAG_NAMES[t.tag] || t.tag}」，${t.by}，${when(t.at)}`
+          + (t.note ? `：${t.note}` : '')))))] : null),
     flattenMetrics(mv.metrics).length ? [el('h2', {}, '训练时的指标（metrics.json）'), metricsTable(mv.metrics, 20)] : null,
     el('h2', {}, '文件'), fileTable(mv.files),
     el('h2', {}, '评估'), evalTable(mv.evals.slice().reverse(), false),
     el('h2', {}, '预测集'), predictionTable(mine, false),
     can('jobs.write') ? await submitForms(mv) : null);
+}
+
+// Marking a model version a candidate (worth deploying) or deprecated (not to be used), or taking it back. Adding
+// 弃用 asks for a reason first, in the place below the title (asking); the rest happen at once.
+function tagButtons(mv, asking, done) {
+  const has = (t) => mv.tags.includes(t);
+  const set = async (button, tag, added, note = '') => {
+    button.disabled = true;
+    try { await api.setTag(mv.model, mv.number, tag, added, note); await done(); } catch (e) {
+      asking.replaceChildren(errorBox(e));
+      button.disabled = false;
+    }
+  };
+  const candidate = el('button', { id: 'tag-candidate', onclick: (ev) => set(ev.currentTarget, 'candidate', !has('candidate')) },
+    has('candidate') ? '去掉「候选」' : '标成候选');
+  const deprecated = el('button', { id: 'tag-deprecated', onclick: (ev) => {
+    if (has('deprecated')) { set(ev.currentTarget, 'deprecated', false); return; }
+    const why = el('input', { type: 'text', id: 'tag-note', size: 40, placeholder: '为什么弃用（可不写），例如 漏检多' });
+    const go = el('button', { id: 'tag-go', class: 'danger', onclick: () => set(go, 'deprecated', true, why.value.trim()) }, '标成弃用');
+    asking.replaceChildren(el('div', { class: 'panel row asking' }, why, go, el('button', { onclick: () => asking.replaceChildren() }, '取消'),
+      el('span', { class: 'muted small' }, '弃用只是提醒别再用它，文件和记录都还在，以后可以去掉。')));
+    why.focus();
+  } }, has('deprecated') ? '去掉「弃用」' : '标成弃用…');
+  return [candidate, deprecated];
 }
 
 // Forms for an evaluation or a prediction job of this model version on a GPU runner.
@@ -2314,12 +2414,15 @@ function placeText(p) {
 }
 
 // Two selects, the registered sites and the lines of the one chosen: a pool or model only takes those.
-function placePicker(tree, at = { site: '', line: '' }) {
-  const site = el('select', { id: 'site' }, tree.sites.map((x) => el('option', { value: x.code }, placeText(x))));
+// optional: a first choice 「不属于哪条产线」 (none, returned too) for what may belong to no line.
+function placePicker(tree, at = { site: '', line: '' }, optional = false) {
+  const none = optional ? el('option', { value: '' }, '不属于哪条产线') : null;
+  const site = el('select', { id: 'site' }, none, tree.sites.map((x) => el('option', { value: x.code }, placeText(x))));
   const line = el('select', { id: 'line' });
   const fill = () => {
     const at = tree.sites.find((x) => x.code === site.value);
     line.replaceChildren(...(at ? at.lines : []).map((x) => el('option', { value: x.code }, placeText(x))));
+    line.disabled = !at;
   };
   site.addEventListener('change', fill);
   const chosen = tree.sites.find((x) => x.code.toLowerCase() === at.site.toLowerCase());  // the one being browsed
@@ -2327,7 +2430,7 @@ function placePicker(tree, at = { site: '', line: '' }) {
   fill();
   const picked = chosen && chosen.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
   if (picked) line.value = picked.code;
-  return { site, line };
+  return { site, line, none };
 }
 
 // Registering a site or a line of it (codes are for good; the shown name can change later).
@@ -2339,30 +2442,87 @@ function newPlaceForm(done) {
     ev.preventDefault();
     try { await api.addSite(ref.value.trim(), name.value.trim()); await done(); } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
-  return el('details', { class: 'panel' }, el('summary', {}, '登记现场 / 产线'),
-    el('form', { class: 'form', onsubmit: go }, msg,
-      el('p', { class: 'muted' }, '数据池和模型只能建在登记过的现场和产线下。代号只能用汉字、字母、数字、_ 和 .，登记后不能改（它在训练集快照的目录和发布编号里）；显示名以后能改。只写现场（SES）就只登记现场。'),
-      el('label', {}, '现场 / 产线', ref), el('label', {}, '显示名', name),
-      el('button', { id: 'place-go', class: 'primary', type: 'submit' }, '登记')));
+  return el('form', { class: 'panel form narrow', onsubmit: go }, el('h2', {}, '登记现场 / 产线'), msg,
+    el('p', { class: 'muted small' }, '代号只能用汉字、字母、数字、_ 和 .。写 SES/TX 登记 SES 现场的 TX 产线（SES 还没登记就一起登记），只写 SES 就只登记现场。'),
+    el('label', {}, '现场 / 产线', ref), el('label', {}, '显示名', name),
+    el('div', { class: 'label' }, el('span'), el('div', {}, el('button', { id: 'place-go', class: 'primary', type: 'submit' }, '登记'))));
 }
 
-function newDatasetForm(tree, at = { site: '', line: '' }) {
-  const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX' });
-  const { site, line } = placePicker(tree, at);
-  const note = el('input', { type: 'text', placeholder: '备注' });
+// A new dataset: a pool (always of a line) or a test or regression set (of a line or of none), then its upload.
+async function datasetNewPage(query) {
+  const show = live();
+  if (!can('datasets.write')) throw new Error('这个账号不能新建数据集：请管理员或算法工程师来建。');  // say so before the form, not on submit
+  const at = scopeOf(query);
+  const tree = await api.sites();
+  const kinds = { pool: '数据池：一条产线采集的数据，以后一批批加目录', test: '测试集：评估模型用，可以不属于哪条产线',
+    regression: '回归集：每次发布前都要过的一批图，可以不属于哪条产线', other: '其他' };
+  const kind = el('select', { id: 'dataset-kind' }, Object.keys(kinds).map((k) => el('option', { value: k }, KIND_NAMES[k])));
+  const about = el('p', { class: 'muted small' });
+  const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX 或 SES-TX-test' });
+  const { site, line, none } = placePicker(tree, at, true);
+  const note = el('input', { id: 'dataset-note', type: 'text', placeholder: '备注（可不写）' });
   const msg = el('div');
+  const sync = () => {
+    about.textContent = kinds[kind.value];
+    none.disabled = kind.value === 'pool';  // a pool belongs to a line
+    if (none.disabled && !site.value && site.options.length > 1) { site.selectedIndex = 1; site.dispatchEvent(new Event('change')); }
+  };
+  kind.addEventListener('change', sync);
+  sync();
   const go = async (ev) => {
     ev.preventDefault();
     try {
-      const d = await api.createDataset({ name: name.value.trim(), site: site.value, line: line.value, note: note.value.trim() });
+      const d = await api.createDataset({ name: name.value.trim(), kind: kind.value, site: site.value, line: line.value, note: note.value.trim() });
       location.hash = hrefOf(['upload', d.name]);
     } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
-  return el('details', { class: 'panel' }, el('summary', {}, '新建数据池'),
-    el('form', { class: 'form', onsubmit: go }, msg,
-      tree.sites.some((x) => x.lines.length) ? null : el('p', { class: 'muted' }, '还没有登记产线：先在下面「登记现场 / 产线」里登记。'),
-      el('label', {}, '名称', name), el('label', {}, '现场', site),
-      el('label', {}, '产线', line), el('label', {}, '备注', note), el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '建好后上传')));
+  const noLines = !tree.sites.some((x) => x.lines.length);
+  show(crumbs('datasets', at, '新建数据集'), el('h1', {}, '新建数据集'),
+    el('form', { class: 'panel form narrow', onsubmit: go }, msg,
+      noLines ? el('p', { class: 'muted' }, '还没有登记产线：数据池要建在登记过的产线下。',
+        can('sites.write') ? el('a', { href: '#/places' }, '去登记现场和产线') : '请管理员或算法工程师先登记。') : null,
+      el('label', {}, '类型', kind), el('div', { class: 'label' }, el('span'), about),
+      el('label', {}, '名称', name), el('label', {}, '现场', site), el('label', {}, '产线', line), el('label', {}, '备注', note),
+      el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '建好后上传'),
+        el('span', { class: 'muted small' }, '建好是空的，下一步上传第一个版本。')))));
+}
+
+// The registered sites and lines, their shown names and how much each holds; register a new one, rename one.
+async function placesPage() {
+  const show = live();
+  const tree = await api.sites();
+  const write = can('sites.write');
+  const again = () => placesPage();
+  const counts = ['datasets', 'snapshots', 'models', 'batches', 'releases'];
+  const rename = (ref, p) => {  // the name cell, and in place of it an editor
+    const cell = el('td', { class: 'place-name' });
+    const view = () => cell.replaceChildren(el('span', {}, p.name || el('span', { class: 'muted' }, '（没有）')), ' ',
+      write ? el('button', { class: 'link rename', 'data-ref': ref, onclick: edit }, '改显示名') : null);
+    const edit = () => {
+      const input = el('input', { type: 'text', class: 'rename-text', value: p.name || '', size: 18, placeholder: '显示名' });
+      const err = el('span', { class: 'bad' });
+      const save = async (ev) => {
+        ev.preventDefault();
+        try { await api.renameSite(ref, input.value.trim()); await again(); } catch (e) { err.textContent = ` ${e.message}`; }
+      };
+      cell.replaceChildren(el('form', { class: 'row', onsubmit: save }, input, el('button', { class: 'primary rename-go', type: 'submit' }, '保存'),
+        el('button', { type: 'button', onclick: view }, '取消'), err));
+      input.focus();
+      input.select();
+    };
+    view();
+    return cell;
+  };
+  const rows = tree.sites.flatMap((s) => [
+    el('tr', { class: 'site-row' }, el('td', {}, el('a', { href: hrefOf([], { site: s.code }) }, s.code)), rename(s.code, s),
+      el('td', { class: 'muted', colspan: String(counts.length) }, `${s.lines.length} 条产线`)),
+    ...s.lines.map((x) => el('tr', {}, el('td', { class: 'indent' }, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${s.code} / ${x.code}`)),
+      rename(`${s.code}/${x.code}`, x), ...counts.map((k) => el('td', { class: 'num' }, String(x[k] || 0)))))]);
+  show(crumbs('places', null), el('h1', {}, '现场和产线'),
+    el('p', { class: 'muted' }, '数据池、模型和发布只能建在登记过的现场和产线下。代号（SES、TX）登记后不能改，它在训练集快照的目录和发布编号里；显示名只是给人看的，随时能改。'),
+    write ? newPlaceForm(again) : null,
+    rows.length ? el('table', { id: 'places-table' }, el('tr', {}, ['代号', '显示名', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数']
+      .map((h, i) => el('th', { class: i > 1 ? 'num' : '' }, h))), rows) : el('p', { class: 'muted' }, '还没有登记现场和产线。'));
 }
 
 // --- the overview of a line --------------------------------------------------------------------------------
@@ -2398,7 +2558,7 @@ function lineTable(tree, at) {
   const missing = at.site ? lines(all) - lines(sites) : shown.hidden;  // of what this page would list
   const left = missing ? el('p', { class: 'muted small' }, `有 ${missing} 个${at.site ? '产线' : '现场 / 产线'}没显示：在左边点「选择」勾上。`) : null;
   if (!rows.length) {
-    return [el('p', { class: 'muted' }, at.site ? '这个现场没有要显示的产线。' : tree.sites.length ? '没有要显示的产线。' : '还没有登记现场和产线：在「数据集」页最下面登记。'), left];
+    return [el('p', { class: 'muted' }, at.site ? '这个现场没有要显示的产线。' : tree.sites.length ? '没有要显示的产线。' : ['还没有登记现场和产线。', can('sites.write') ? el('a', { href: '#/places' }, '去登记') : null]), left];
   }
   return [el('table', { id: 'lines' }, el('tr', {}, ['现场 / 产线', '数据池和测试集', '训练集快照', '模型', '在办的批次', '发布次数'].map((h, i) => el('th', { class: i ? 'num' : '' }, h))), rows), left];
 }
@@ -2650,6 +2810,8 @@ async function render() {
   try {
     if (parts.length === 0 || parts[0] === 'overview') await overviewPage(query);  // #/overview: the address it had before it became the home page
     else if (parts[0] === 'datasets') await datasetsPage(query);
+    else if (parts[0] === 'dataset-new') await datasetNewPage(query);
+    else if (parts[0] === 'places') await placesPage();
     else if (parts[0] === 'd' && parts[1]) await datasetPage(parts[1]);
     else if (parts[0] === 'v' && parts[2]) await versionPage(parts[1], parts[2], query);
     else if (parts[0] === 'img' && parts[3]) await imagePage(parts[1], parts[2], parts.slice(3).join('/'), query);
