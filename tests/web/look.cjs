@@ -40,7 +40,7 @@ const { chromium } = require('playwright');
     state: await page.textContent('#release .state'), go: await page.getAttribute('#release a.go', 'href') };
   seen.models = await page.$$eval('table.models tr', (rows) => rows.slice(1).map((r) => [...r.querySelectorAll('td')].slice(0, 4).map((c) => c.textContent)));
   seen.data = await page.$$eval('table.data tr', (rows) => rows.slice(1).map((r) => [...r.querySelectorAll('td')].slice(0, 2).map((c) => c.textContent)));
-  seen.batches = await page.$$eval('table.batches tr', (rows) => rows.map((r) => r.querySelector('td.state').textContent));
+  seen.batches = await page.$$eval('table.batches tr', (rows) => rows.map((r) => [r.querySelector('td a').textContent, r.querySelector('td.state').textContent]));
   const layout = async () => {
     const [release, models, data, batches, mainBox] = await Promise.all(['#release', 'table.models', 'table.data', 'table.batches', 'main'].map(box));
     return { releaseFirst: release.bottom <= models.y && release.y < 300, dataUnderModels: data.y > models.bottom,

@@ -452,7 +452,8 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert rows[seg] == ['@1', '—', '—']                                                       # no evaluation yet
     kinds = {name.split('@')[0]: kind for name, kind in seen['data']}
     assert kinds[data] == '数据池' and kinds[snap['dataset']] == '训练集快照' and kinds[test] == '测试集'
-    assert sorted(seen['batches']) == sorted(['待复核', '待提交复核', '复核通过'])
+    mine = {name: state for name, state in seen['batches'] if name in batches}   # other tests add batches on SES/TX too
+    assert mine == dict(zip(batches, ['待复核', '待提交复核', '复核通过']))
     for at in (seen['at1440'], seen['at1920']):
         assert at['releaseFirst'] and at['dataUnderModels'] and at['sideBySide']
     assert seen['at1920']['main'] > 1600 and seen['at1920']['fills'] > 1500                  # no 1480 cap
