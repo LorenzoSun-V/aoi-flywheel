@@ -65,7 +65,7 @@ td.mark { width: 6px; padding: 0; }
          margin-bottom: 12px; white-space: pre-wrap; }
 .tag { display: inline-block; padding: 0 6px; border-radius: 4px; background: #eef2ff; color: #3730a3; font-size: 12px; }
 table.narrow { width: auto; min-width: 360px; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .warn { color: var(--warn); }
 .forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
 .form h2 { margin-top: 0; }
@@ -113,3 +113,4 @@ textarea { font: inherit; width: 100%; }
 .browse .list > form.row { margin-bottom: 12px; }
 .browse .list > h2:first-of-type { margin-top: 0; }
 .small { font-size: 12px; }
+.list h2 a.small { font-size: 13px; font-weight: 400; margin-left: 8px; }

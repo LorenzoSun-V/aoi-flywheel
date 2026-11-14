@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  scopeOf, scopeQuery,
+  scopeOf, scopeQuery, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -125,4 +125,15 @@ test('the site and line being browsed, from the address', () => {
   assert.deepEqual(scopeOf(new URLSearchParams('line=TX')), { site: '', line: '', q: '' });  // a line belongs to a site
   assert.deepEqual(scopeQuery({ site: 'SES', line: '', q: '' }, { todo: true, mine: false }), { todo: true, site: 'SES' });
   assert.deepEqual(scopeQuery({ site: '', line: '', q: '' }), {});
+});
+
+test('the overview of a line shows the numbers a report has, the batches under way and each model\'s last report', () => {
+  assert.deepEqual(keyMetrics({ mAP50: 0.8125, 'mAP50-95': 0.5, P: '0.9', images: 3, nested: { R: 1 } }), [['mAP50', '0.8125'], ['mAP50-95', '0.5']]);
+  assert.deepEqual(keyMetrics(null), []);
+  const b = (status) => ({ status });
+  assert.deepEqual(batchesUnderWay([b('open'), b('imported'), b('review'), b('closed'), b('rejected'), b('approved')]).map((x) => x.status),
+    ['open', 'review', 'rejected', 'approved']);
+  const e = (id, ref) => ({ id, model_version: { ref } });
+  const last = lastEvalByModel([e(1, 'A@1'), e(2, 'B@1'), e(3, 'A@2')]);
+  assert.deepEqual([last.A.id, last.B.id], [3, 2]);
 });
