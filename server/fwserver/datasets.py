@@ -190,10 +190,11 @@ def where_place(site: str, line: str, q: str, alias: str = 'd') -> Tuple[List[st
     return where, args
 
 
-def list_datasets(conn, site: str = '', line: str = '', q: str = '', kind: str = '') -> List[dict]:
+def list_datasets(conn, site: str = '', line: str = '', q: str = '', kind: str = '', source: str = '') -> List[dict]:
     """Without the datasets that hold the revisions of labelling batches: those are listed as batches.
     site, line: only what belongs there; a training snapshot also belongs to every line one of its versions
-    took data from. q: text in the name. kind: only that kind."""
+    took data from. q: text in the name. kind: only that kind. source: only the snapshots one of whose versions
+    took data from the dataset of that name."""
     where, args = ["d.kind <> 'batch'"], []
     own, own_args = where_place(site, line, '')
     if own:
@@ -202,6 +203,11 @@ def list_datasets(conn, site: str = '', line: str = '', q: str = '', kind: str =
                      f'JOIN trainset_sources ts ON ts.version_id = v.id JOIN versions sv ON sv.id = ts.source_id '
                      f'JOIN datasets sd ON sd.id = sv.dataset_id WHERE v.dataset_id = d.id AND {" AND ".join(src)}))')
         args += own_args + src_args
+    if source:
+        where.append('EXISTS (SELECT 1 FROM versions v JOIN trainset_sources ts ON ts.version_id = v.id '
+                     'JOIN versions sv ON sv.id = ts.source_id JOIN datasets sd ON sd.id = sv.dataset_id '
+                     'WHERE v.dataset_id = d.id AND lower(sd.name) = lower(%s))')
+        args.append(source)
     more, more_args = where_place('', '', q)
     if kind:
         more.append('d.kind = %s')

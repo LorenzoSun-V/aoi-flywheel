@@ -2,7 +2,8 @@
 // node trainset.cjs <url> <algo token> <field token> <pool with versions 1 and 2> <out dir>.
 // From the pool's first version: the name the page proposes, a class missing from the table refused, the preview,
 // the snapshot and how to fetch it; from the second version: the next version of that snapshot, continuing its
-// split; a pool's name refused as a snapshot name; a field account offered nothing. Prints one JSON line.
+// split; a snapshot's name typed and previewed at once; a line's newest pool as the source; a pool's name refused
+// as a snapshot name; a field account offered nothing. Prints one JSON line.
 const { chromium } = require('playwright');
 
 (async () => {
@@ -81,6 +82,11 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/trainset-new?name=${encodeURIComponent(snapshot)}`);
   seen.next = await form();
 
+  // started from the line: its newest pool is the source, the snapshot that took data from it continued
+  await page.goto(`${url}#/trainset-new?site=SES&line=TX`);
+  await page.reload();  // the form of the page before (the same route) is not taken for this one
+  seen.line = await form();
+
   // a pool's name is not a snapshot's
   await page.fill('#ts-name', pool);
   await page.dispatchEvent('#ts-name', 'change');
@@ -88,6 +94,17 @@ const { chromium } = require('playwright');
   await page.fill('#ts-classes', 'scratch\ndent');
   await preview();
   seen.taken = await page.textContent('#ts-result .error');
+
+  // a snapshot's name typed and 预览 pressed at once (the click blurs the name, which starts loading that
+  // snapshot): the preview is of its next version, on its classes and sources
+  await page.fill('#ts-classes', '');
+  await page.fill('#ts-name', snapshot);
+  await page.click('#ts-preview');
+  await page.waitForSelector('#ts-total, #ts-result .error');
+  await page.waitForTimeout(300);  // a load still running would wipe the preview
+  seen.typed = { mode: await page.textContent('#ts-mode'), classes: await page.inputValue('#ts-classes'),
+    error: await page.$$eval('#ts-result .error', (x) => x.map((e) => e.textContent).join('')),
+    create: await page.$$eval('#ts-create', (x) => x.map((e) => e.textContent).join('')) };
 
   // a field account sees the snapshot but nothing that builds one
   await page.evaluate((t) => localStorage.setItem('fw-token', t), field);

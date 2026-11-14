@@ -603,7 +603,8 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
         first[f'A/img{i}.json'] = label('scratch' if i % 2 else 'dent')
     first['A/neg0.png'] = real_png(200, 100, seed + 20)
     first['A/neg1.png'] = real_png(200, 100, seed + 21)
-    name = pool(api, tmp_path, first)
+    older = pool(api, tmp_path / 'older', {'A/old.png': real_png(200, 100, seed + 40)}, name=f'0{os.urandom(3).hex()}')
+    name = pool(api, tmp_path, first)  # the line's newest pool, though not the first by name
     both = dict(first, **{f'B/b{i}.png': real_png(200, 100, seed + 30 + i) for i in range(3)},
                 **{f'B/b{i}.json': label('scratch') for i in range(3)})
     add_version(api, tmp_path, name, both)
@@ -642,6 +643,10 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
     assert two['counts']['test']['samples'] == one['counts']['test']['samples'] + 3  # new samples go to test
     assert f'接着 {snap}@1' in seen['secondMade']
     assert seen['next']['mode'] == f'将接着 {snap}@2 的划分建立 {snap}@3' and seen['next']['sources'] == [f'{name}@latest']
+    assert seen['line']['sources'] == [f'{name}@latest'] and seen['line']['name'] == snap and older < name
+    # previewed as the next version of the name typed, on its classes: the same as its @2, so nothing to build
+    assert seen['typed']['mode'] == f'将接着 {snap}@2 的划分建立 {snap}@3' and seen['typed']['classes'] == 'scratch\ndent'
+    assert f'和 {snap}@2 完全一样' in seen['typed']['error'] and seen['typed']['create'] == ''
     assert '已经是一个数据集的名称' in seen['taken']
     assert seen['fieldButtons'] == 0 and '不能建立训练集快照' in seen['fieldPage']
 

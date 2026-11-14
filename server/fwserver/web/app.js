@@ -1148,15 +1148,13 @@ function snapshotSection(version) {
     commandBox(`fw get ${version.ref} --to ${version.ref}`, 'fetch-command')];
 }
 
+// The newest first (by their latest version); for the most recent pool of a line, or snapshot of a pool.
+const newest = (list) => list.filter((d) => d.latest).sort((a, b) => (a.latest.created_at < b.latest.created_at ? 1 : -1));
+
 // The snapshot that took data from this pool most recently (to be continued by default), or ''.
 async function snapshotOfPool(pool) {
-  const near = (await api.trainsets({ site: pool.site, line: pool.line }))
-    .filter((d) => d.latest).sort((a, b) => (a.latest.created_at < b.latest.created_at ? 1 : -1)).slice(0, 10);
-  for (const d of near) {
-    const t = await api.trainset(d.name, 'latest');
-    if (t.trainset.sources.some((ref) => splitRef(ref).name.toLowerCase() === pool.name.toLowerCase())) return d.name;
-  }
-  return '';
+  const [last] = newest(await api.trainsets({ source: pool.name }));
+  return last ? last.name : '';
 }
 
 // What the server would freeze: the split, the boxes, what changed against the previous snapshot, and why it
@@ -1206,8 +1204,9 @@ async function trainsetNewPage(query) {
     show(head, el('p', { class: 'muted' }, '暂无可用的数据池：数据池须属于已登记的产线，且已上传版本。'));
     return;
   }
-  const lineName = at.line ? pools.find((d) => same(d.site, at.site) && same(d.line, at.line)) : null;
-  const firstName = asked || (fromPool ? (await snapshotOfPool(fromPool)) || `${fromPool.name}-det` : lineName ? `${lineName.name}-det` : '');
+  const [lineName] = at.line ? newest(pools.filter((d) => same(d.site, at.site) && same(d.line, at.line))) : [];
+  const sourcePool = fromPool || lineName;
+  const firstName = asked || (sourcePool ? (await snapshotOfPool(sourcePool)) || `${sourcePool.name}-det` : '');
 
   const name = el('input', { id: 'ts-name', type: 'text', list: 'ts-names', value: firstName, placeholder: '例如 SES-TX-det' });
   const names = el('datalist', { id: 'ts-names' }, snapshots.map((n) => el('option', { value: n })));
@@ -1305,6 +1304,18 @@ async function trainsetNewPage(query) {
     shown();
     stale();
   };
+  // the load of the name typed last: 预览 waits for it, so a name typed just before the click is previewed with
+  // its own classes and split (the click's blur starts the load, the click comes before it is done)
+  let pending = null;
+  let pendingFor = null;
+  const reload = () => {
+    pendingFor = name.value.trim();
+    const p = load();
+    pending = p;
+    p.catch(() => { if (pending === p) pending = null; });  // a load that failed is tried again on the next 预览
+    return p;
+  };
+  const ready = () => (pending && name.value.trim() === pendingFor ? pending : reload());
   const shown = () => { classCount.textContent = `共 ${parseClasses(classes.value).length} 个类别`; };
   const keepTest = () => {  // the old test goes back into train and val: no new test share next to it
     test.disabled = mergeTest.checked;
@@ -1328,17 +1339,20 @@ async function trainsetNewPage(query) {
       fresh: !!prev && fresh.checked, require_labels: requireLabels.checked, note: note.value.trim() };
   };
   go.addEventListener('click', async () => {
-    const mine = ++round;
-    const target = name.value.trim();
+    let mine = null;
+    let target;
     let b;
     let p;
     go.disabled = true;
-    result.replaceChildren(el('p', { class: 'muted' }, '正在读取来源版本的标注并划分，图片较多时需要一些时间…'));
     try {
+      await ready();
+      mine = ++round;
+      target = name.value.trim();
+      result.replaceChildren(el('p', { class: 'muted' }, '正在读取来源版本的标注并划分，图片较多时需要一些时间…'));
       b = body();
       p = await api.previewTrainset(target, b);
     } catch (e) {
-      if (mine === round) result.replaceChildren(errorBox(e));
+      if (mine === null || mine === round) result.replaceChildren(errorBox(e));
       return;
     } finally { go.disabled = false; }
     if (mine !== round) return;
@@ -1368,7 +1382,7 @@ async function trainsetNewPage(query) {
   });
   classes.addEventListener('input', shown);
   mergeTest.addEventListener('change', keepTest);
-  name.addEventListener('change', () => { load().catch((e) => result.replaceChildren(errorBox(e))); });
+  name.addEventListener('change', () => { reload().catch((e) => result.replaceChildren(errorBox(e))); });
   const form = el('div', { class: 'panel form', id: 'ts-form' },
     field('快照名称', name, ['填写已有快照的名称时，建立该快照的下一版；填写新名称时，建立一个新快照。',
       '名称只能使用字母、数字和 . _ -，且与数据集名称不能相同。']),
@@ -1396,7 +1410,7 @@ async function trainsetNewPage(query) {
     el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, go)));
   form.addEventListener('input', (ev) => { if (ev.target !== name) stale(); });
   form.addEventListener('change', (ev) => { if (ev.target !== name && ev.target !== classFile) stale(); });
-  await load();
+  await reload();
   show(head, form, result);
   keepTest();
 }
