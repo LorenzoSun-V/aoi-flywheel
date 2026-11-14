@@ -503,8 +503,10 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
-def test_the_class_table_of_a_pool_is_set_and_grown_in_the_browser(service, tokens, api, tmp_path):
+def test_the_class_table_of_a_pool_is_set_and_grown_in_the_browser(service, tokens, api, tmp_path, monkeypatch):
+    from fwserver import datasets as server_datasets
     from test_trainsets import old_pool
+    monkeypatch.setattr(server_datasets, 'LATEST_CHECK_FILES', 1)  # as for a large pool: only A/a.json is looked at
     seed = int.from_bytes(os.urandom(2), 'big')
     name = old_pool(api, tmp_path, {'A/a.png': real_png(64, 32, seed), 'A/a.json': label('Scratch'),
                                     'B/b.png': real_png(64, 32, seed + 1), 'B/b.json': label('dent')})
@@ -520,7 +522,8 @@ def test_the_class_table_of_a_pool_is_set_and_grown_in_the_browser(service, toke
     assert '尚未填写类别表' in seen['none'] and seen['uploadButtons'] == [] and seen['formOpen'] is True
     assert seen['button'] == '保存类别表' and '类别表里已有' not in seen['duplicate'] and '重复' in seen['duplicate']
     assert seen['saved'] == ['scratch', 'dent'] and seen['noneAfter'] is False and seen['formOpenAfter'] is False
-    assert f'{name}@1 中有不符合类别表的标注' in seen['check'] and 'Scratch' in seen['check'] and 'A/a.json' in seen['check']
+    assert f'{name}@1 中有不符合类别表的标注（已核对其中 1 个标注文件，共 2 个；其余的将在下一次上传时核对）' in seen['check']
+    assert 'Scratch' in seen['check'] and 'A/a.json' in seen['check']
     assert seen['buttonAfter'] == '添加到类别表末尾'
     assert seen['added'] == ['scratch', 'dent', 'crack'] and seen['checkAfter'] is False
     assert seen['fieldRows'] == ['scratch', 'dent', 'crack'] and seen['fieldForm'] is False

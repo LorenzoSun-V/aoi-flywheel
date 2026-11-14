@@ -12,6 +12,7 @@ A failure anywhere leaves no version behind; objects already uploaded stay and a
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Callable, Collection, Dict, List, Optional, Set, Tuple
 
 from fw.contract import LABEL_HELP, ContractError, classify_changes, is_label, parse_manifest, split_ref
@@ -267,6 +268,8 @@ def _insert_dataset(conn, user_id: int, name: str, site: str, line: str, kind: s
 MAX_CLASSES = 1000
 CLASS_NAME_MAX = 128
 CLASS_EXAMPLES = 20  # classes, and files that cannot be read, named in a refusal
+LATEST_CHECK_FILES = 5000   # labels of an old pool's newest version looked at when its first table is saved
+LATEST_CHECK_SECONDS = 10.0
 
 
 def classes_of(conn, dataset_id: int) -> List[str]:
@@ -318,44 +321,71 @@ def add_classes(conn, store: Store, user_id: int, name: str, names: Any) -> dict
     dataset = get_dataset(conn, d['name'])
     out = {'dataset': dataset, 'added': names, 'latest_check': None}
     if not existing and dataset['latest'] is not None:
+        # bounded, so that saving the table of a large pool answers in time; what is not looked at here is
+        # checked with the next upload all the same
         latest = dataset['latest']
-        problem = class_problems(conn, store, dataset, version_files(conn, latest['id']))
-        out['latest_check'] = {'ref': latest['ref'], 'problem': problem}
+        problem, looked, total = class_check(conn, store, dataset, version_files(conn, latest['id']),
+                                             max_files=LATEST_CHECK_FILES, seconds=LATEST_CHECK_SECONDS)
+        out['latest_check'] = {'ref': latest['ref'], 'problem': problem, 'checked': looked, 'total': total,
+                               'complete': looked == total}
     return out
 
 
-def checked_contents(conn, dataset_id: int, version_id: Optional[int]) -> Set[str]:
-    """The labels and class lists (sha256) of a pool's version that was checked against its class table when
-    it was made, i.e. made after the table's first class: what the next version takes from it unchanged need
-    not be read again. Empty for a version from before the table: the next one is checked in full."""
+def checked_contents(conn, dataset_id: int, version_id: Optional[int]) -> Set[Tuple[str, str]]:
+    """The labels and class lists, as (kind, sha256) (formats.class_kind), of a pool's version that was checked
+    against its class table when it was made, i.e. made after the table's first class: what the next version
+    takes from it unchanged need not be read again. The same bytes under another kind of name are read again
+    (a YOLO label's bytes are no JSON label). Empty for a version from before the table: the next one is
+    checked in full."""
     if version_id is None:
         return set()
     rows = conn.execute(
-        "SELECT DISTINCT encode(f.sha256, 'hex') AS d FROM version_files f JOIN versions v ON v.id = f.version_id "
+        "SELECT f.path, encode(f.sha256, 'hex') AS d FROM version_files f JOIN versions v ON v.id = f.version_id "
         'WHERE f.version_id = %s AND v.created_at > (SELECT min(created_at) FROM dataset_classes WHERE dataset_id = %s) '
         "AND (lower(f.path) LIKE '%%.json' OR lower(f.path) LIKE '%%.txt' OR lower(f.path) LIKE '%%.names')",
         (version_id, dataset_id)).fetchall()
-    return {r['d'] for r in rows}
+    out = set()
+    for r in rows:
+        kind = formats.class_kind(r['path'])
+        if kind is not None:
+            out.add((kind, r['d']))
+    return out
 
 
 def class_problems(conn, store: Store, pool: dict, entries: List[Tuple[str, str, int]],
-                   checked: Collection[str] = ()) -> Optional[str]:
+                   checked: Collection[Tuple[str, str]] = ()) -> Optional[str]:
     """Why these files may not be a version of the pool (or a batch for it), against the pool's class table;
     None when they may, and always for a dataset that is not a pool. checked: contents that were checked
     before (checked_contents) and are not read again. A file not in the store is passed over: the version is
     refused for it anyway (create_version)."""
+    return class_check(conn, store, pool, entries, checked)[0]
+
+
+def class_check(conn, store: Store, pool: dict, entries: List[Tuple[str, str, int]],
+                checked: Collection[Tuple[str, str]] = (), max_files: Optional[int] = None,
+                seconds: Optional[float] = None) -> Tuple[Optional[str], int, int]:
+    """class_problems, and how far it got: (the refusal or None, label files looked at, label files to look
+    at). max_files, seconds: stop after looking at that many files, or after that long (what was not looked
+    at is then neither refused nor passed: only a check that saw every file may let a version be made)."""
     if pool['kind'] != 'pool':
-        return None
+        return None, 0, 0
     classes = classes_of(conn, pool['id'])
     if not classes:
-        return f'数据池 {pool["name"]} 还没有类别表；请先在网页的数据池页面填写类别表，再上传'
+        return f'数据池 {pool["name"]} 还没有类别表；请先在网页的数据池页面填写类别表，再上传', 0, 0
+    todo = []
+    for path, digest, _ in entries:
+        kind = formats.class_kind(path)
+        if kind is not None and (kind, digest) not in checked:
+            todo.append((path, digest, kind))
+    deadline = None if seconds is None else time.monotonic() + seconds
     unknown: Dict[str, List[str]] = {}
     unreadable: List[str] = []
     seen: Dict[Tuple[str, str], Tuple[Optional[str], List[str]]] = {}
-    for path, digest, _ in entries:
-        kind = formats.class_kind(path)
-        if kind is None or digest in checked:
-            continue
+    looked = 0
+    for path, digest, kind in todo:
+        if (max_files is not None and looked >= max_files) or (deadline is not None and time.monotonic() >= deadline):
+            break
+        looked += 1
         if (kind, digest) not in seen:
             data = store.read(digest)
             if data is None:
@@ -367,7 +397,11 @@ def class_problems(conn, store: Store, pool: dict, entries: List[Tuple[str, str,
         for n in names:
             unknown.setdefault(n, []).append(path)
     if not unknown and not unreadable:
-        return None
+        return None, looked, len(todo)
+    return _class_refusal(pool, classes, unknown, unreadable), looked, len(todo)
+
+
+def _class_refusal(pool: dict, classes: List[str], unknown: Dict[str, List[str]], unreadable: List[str]) -> str:
     lower = {c.lower(): c for c in classes}
     parts = []
     if unknown:
