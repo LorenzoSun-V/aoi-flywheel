@@ -186,6 +186,10 @@ export const api = {
   folderCheck: (paths, allowOtherFiles, force) => call('/folder-check', { method: 'POST', body: { paths, allow_other_files: allowOtherFiles, force } }),
   missing: async (objects) => (await call('/objects/missing', { method: 'POST', body: { objects } })).missing,
   putObject: (digest, blob) => call(`/objects/${digest}`, { method: 'PUT', blob }),
+  trainsets: (query = {}) => call(`/trainsets?${new URLSearchParams(query)}`),
+  trainset: (name, number) => call(`/trainsets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}`),
+  previewTrainset: (name, body) => call(`/trainsets/${encodeURIComponent(name)}/preview`, { method: 'POST', body }),
+  createTrainset: (name, body) => call(`/trainsets/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
   trainsetLayout: (name, number) => call(`/trainsets/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/layout`),
   createVersion: (name, body) => call(`/datasets/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
   previewChange: (name, body) => call(`/datasets/${encodeURIComponent(name)}/changes/preview`, { method: 'POST', body }),
@@ -686,8 +690,10 @@ async function datasetsPage(query) {
       el('h2', { id: 'pools' }, `数据池和测试集（${pools.length}）`),
       pools.length ? table(pools, true) : el('p', { class: 'muted' }, narrowed ? '没有符合条件的数据集。'
         : '暂无数据集，可点击右上角「新建数据集」创建。'),
-      el('h2', { id: 'snapshots' }, `训练集快照（${snapshots.length}）`, info(['训练集快照由数据池版本生成，使用 fw trainset create 创建。',
+      el('div', { class: 'section-head', id: 'snapshots' }, el('h2', {}, `训练集快照（${snapshots.length}）`, info(['训练集快照由数据池版本生成，在网页上建立，或使用 fw trainset create。',
         '快照按其取用数据的产线归类：从多条产线取用数据的快照，在每条产线下均会列出。'], '训练集快照说明')),
+        can('datasets.write') ? el('div', { class: 'links' }, el('a', { id: 'trainset-new', class: 'small with-icon', href: hrefOf(['trainset-new'], { site: at.site, line: at.line }) },
+          icon('plus'), '建立训练集快照')) : null),
       snapshots.length ? table(snapshots, false) : el('p', { class: 'muted' }, narrowed ? '没有符合条件的训练集快照。' : '暂无训练集快照。')));
 }
 
@@ -733,13 +739,15 @@ async function datasetPage(name) {
         el('td', {}, String(v.file_count)), el('td', {}, sizeText(v.total_bytes)),
         el('td', {}, opsText(v.ops)), el('td', { class: 'muted' }, sourceNode(v.source)), el('td', {}, v.created_by), el('td', {}, when(v.created_at)),
         el('td', { class: 'muted' }, v.note)))),
-    d.kind === 'trainset' || !can('datasets.write') ? null : el('div', { class: 'row', style: 'margin-top:12px' },
+    !can('datasets.write') ? null : d.kind === 'trainset' ? el('div', { class: 'row', style: 'margin-top:12px' },
+      el('a', { id: 'trainset-next', class: 'button primary', href: hrefOf(['trainset-new'], { name: d.name }) }, '建立下一版')) : el('div', { class: 'row', style: 'margin-top:12px' },
       el('a', { class: 'button primary', href: hrefOf(['add', d.name]) }, '上传新增目录'),
       d.latest ? el('a', { class: 'button', href: hrefOf(['remove', d.name]) }, '去掉目录') : null,
       el('a', { class: 'button', href: hrefOf(['upload', d.name]) }, '上传完整版本'),
       info(['上传新增目录：仅上传新增的目录，数据池中原有文件保持不变，适用于日常追加数据。',
         '去掉目录：新版本不再包含所选目录，此前的版本保持不变。',
-        '上传完整版本：以所选目录的全部内容作为新版本，其中不存在的文件将从新版本中删除。'], '上传方式说明')),
+        '上传完整版本：以所选目录的全部内容作为新版本，其中不存在的文件将从新版本中删除。'], '上传方式说明'),
+      d.kind === 'pool' && d.latest && d.site && d.line ? el('a', { id: 'trainset-from', class: 'button', href: hrefOf(['trainset-new'], { from: d.latest.ref }) }, '建立训练集快照') : null),
     el('h2', {}, '比较两个版本'),
     el('div', { class: 'row' }, '从', a, '到', b, compare),
     list.length && can('datasets.write') ? await labelForm(d.name, list, false, () => datasetPage(name)) : null);
@@ -809,16 +817,23 @@ async function versionPage(name, number, query) {
     `第 ${page + 1} / ${pages} 页`,
     el('button', { disabled: page + 1 >= pages, onclick: () => { location.hash = hrefOf(vparts, { dir, page: page + 1 }); } }, '下一页')) : null;
   const labeled = images.filter((f) => labelOf(f)).length;
+  const detail = snapshot && !dir ? await api.trainset(version.dataset, String(version.number)) : null;
+  const writer = !dir && can('datasets.write');
   show(crumbsFor(version, dir, place),
-    el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version),
+    el('div', { class: 'page-head' }, el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version),
       snapshot && flat && !dir ? info(['此处的目录结构与 fw get 默认取回的结构一致：train 中有标注框的图片位于 train/images，没有标注框的图片位于 neg_train；',
         'val 和 test 的图片不区分有无标注框，均位于各自的 images 目录中。'], '快照目录说明') : null),
+    el('div', { class: 'actions' },
+      writer && version.kind === 'pool' ? el('a', { id: 'trainset-from', class: 'button primary', href: hrefOf(['trainset-new'], { from: version.ref }) }, '建立训练集快照') : null,
+      writer && snapshot ? el('a', { id: 'trainset-next', class: 'button', href: hrefOf(['trainset-new'], { name: version.dataset }) }, '建立下一版') : null)),
     dir ? null : el('dl', { class: 'kv' },
       el('dt', {}, '文件'), el('dd', {}, `${version.file_count} 个，${sizeText(version.total_bytes)}`),
       el('dt', {}, '父版本'), el('dd', {}, version.parent ? version.parent.ref : '-'),
       el('dt', {}, '登记'), el('dd', {}, `${version.created_by}，${when(version.created_at)}`),
       el('dt', {}, '来源'), el('dd', {}, sourceNode(version.source)),
       el('dt', {}, '清单哈希'), el('dd', { class: 'mono' }, version.manifest_sha256)),
+    detail ? snapshotSection(detail) : null,
+    detail ? el('h2', {}, '文件') : null,
     !snapshot || dir || flat ? null : el('p', { class: 'muted' },
       `该快照中有文件平铺后重名（例如 ${problems.join('；')}），无法按 fw get 默认的平铺目录显示，此处按存储目录显示。取回时请使用 fw get --format yolo-tree。`),
     folders.length ? el('div', { class: 'folders' }, folders.map(([f, n]) =>
@@ -1030,6 +1045,360 @@ export function diffListText(d) {
   for (const [title, key] of [['新增', 'added'], ['修改', 'modified'], ['删除', 'deleted']]) for (const p of d[key]) lines.push(`${title}\t${p}`);
   for (const [o, n] of d.renamed) lines.push(`改名\t${o}\t${n}`);
   return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
+// --- training-set snapshots: built on the web from pool versions, the same request as fw trainset create -------
+// Only the standard path is offered here: the sources, the class table and the split. Labels that do not fit (a
+// class outside the table, two labels for one image) are refused, to be fixed in the pool; the class maps and
+// label sources of fw trainset create are not offered on the web.
+const SPLITS = ['train', 'val', 'test'];
+const FORMAT_NAMES = { yolo: 'YOLO', coco: 'COCO', json: 'LiteAnno JSON' };
+
+// The class table as typed or read from a classes.txt: one name per line, blank lines left out. Names are kept as
+// they are: the server refuses one with spaces at either end rather than trimming it silently.
+export function parseClasses(text) {
+  return String(text || '').replace(/^﻿/, '').split('\n').map((x) => x.replace(/\r$/, '')).filter((x) => x.trim() !== '');
+}
+
+// Folders whose new samples go to test, as typed: separated by commas, 、 or new lines.
+export function dirsOf(text) {
+  return String(text || '').split(/[,，、\n]/).map((x) => x.trim()).filter(Boolean);
+}
+
+// name@number (or name@v0.1.0, name@latest) as {name, number}; null when it is not one.
+export function splitRef(ref) {
+  const at = String(ref || '').lastIndexOf('@');
+  return at > 0 && at < ref.length - 1 ? { name: ref.slice(0, at), number: ref.slice(at + 1) } : null;
+}
+
+// The reference the next version of a snapshot gets: name@1, or the one after its newest (a ref such as X@3,
+// whose spelling of the name wins).
+export function nextRef(name, latest) {
+  const last = latest ? splitRef(latest) : null;
+  return last ? `${last.name}@${Number(last.number) + 1}` : `${name}@1`;
+}
+
+const share = (x) => `${Math.round(Number(x || 0) * 1000) / 10}%`;
+
+// How a snapshot split its samples (its rule), in words.
+export function ruleText(rule) {
+  if (!rule) return '';
+  if (rule.mode === 'split-file') return `按划分清单划分（${rule.split_count} 个样本）`;
+  const ratio = `val ${share(rule.val)}，test ${share(rule.test)}，随机种子 ${rule.seed}`;
+  const parts = [rule.mode === 'continue'
+    ? `接着上一版的划分；新样本${rule.new_to === 'trainval' ? `按比例划分（${ratio}）` : '全部进入 test'}`
+    : `按比例划分（${ratio}）`];
+  if ((rule.test_dirs || []).length) parts.push(`${rule.test_dirs.join('、')} 中的新样本进入 test`);
+  if (rule.merge_test) parts.push('上一版 test 中的样本重新划分到 train 和 val');
+  if (rule.label_source) parts.push(`同时有 JSON 和 txt 标注的图片使用 ${rule.label_source}`);
+  if (rule.class_map) parts.push(`类别映射 ${Object.entries(rule.class_map).map(([a, b]) => `${a}→${b || '去掉'}`).join('、')}`);
+  return parts.join('；');
+}
+
+// A command to run on another machine, shown whole, with a button that copies it. Where the browser does not let
+// the page write the clipboard (an http address on the intranet), the command is selected for Ctrl+C instead.
+function commandBox(text, id) {
+  const field = el('input', { id, class: 'mono command', type: 'text', readonly: true, value: text, 'aria-label': '命令' });
+  const copy = el('button', { type: 'button', class: 'with-icon', onclick: async () => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
+      await navigator.clipboard.writeText(text);
+      toast('已复制命令');
+    } catch {
+      field.focus();
+      field.select();
+      let copied = false;
+      try { copied = document.execCommand('copy'); } catch { /* not there either */ }
+      toast(copied ? '已复制命令' : '浏览器不允许本页面写入剪贴板，请按 Ctrl+C 复制');
+    }
+  } }, icon('copy'), '复制');
+  return el('div', { class: 'command-row' }, field, copy);
+}
+
+// Images and boxes per split: rows of images, images without a box, then the boxes of every class (by its id).
+function countsTable(counts, classes, id) {
+  const row = (name, of, cls = '') => el('tr', { class: cls }, el('td', {}, name),
+    SPLITS.map((s) => el('td', { class: 'num' }, String(of(counts[s] || {}) || 0))));
+  return el('table', { id, class: 'counts' }, el('tr', {}, el('th', {}, ''), SPLITS.map((s) => el('th', { class: 'num' }, s))),
+    row('图片', (c) => c.samples), row('其中无标注框', (c) => c.no_boxes ?? c.negatives, 'muted'),
+    classes.map((name, i) => row(`${i} ${name}（框）`, (c) => (c.boxes || {})[name])));
+}
+
+// What a snapshot holds and how to get it onto the training machine (the version page of a snapshot).
+function snapshotSection(version) {
+  const t = version.trainset;
+  const unused = t.classes.filter((c) => !SPLITS.some((s) => ((t.counts[s] || {}).boxes || {})[c]));
+  return [
+    el('h2', {}, '快照内容'),
+    el('dl', { class: 'kv', id: 'snapshot-info' },
+      el('dt', {}, `类别（${t.classes.length} 个）`), el('dd', {}, t.classes.map((c, i) => `${i} ${c}`).join('、')),
+      el('dt', {}, '来源'), el('dd', {}, t.sources.map((ref, i) => {
+        const s = splitRef(ref);
+        return [i ? '、' : null, el('a', { href: hrefOf(['v', s.name, s.number]) }, ref)];
+      })),
+      el('dt', {}, '划分'), el('dd', {}, ruleText(t.rule) + (t.based_on ? `（接着 ${t.based_on}）` : '')),
+      el('dt', {}, '标注格式'), el('dd', {}, (t.formats || []).map((f) => FORMAT_NAMES[f] || f).join('、') || '-')),
+    countsTable(t.counts, t.classes, 'snapshot-counts'),
+    unused.length ? el('p', { class: 'warn' }, `类别表中有 ${unused.length} 个类别没有任何标注框：${unused.join('、')}`) : null,
+    el('h2', {}, '取回到训练机', info([
+      '请在训练机上运行该命令（需先使用 fw login 登录）。取回的目录为平铺的 YOLO 结构：train、val、test 各含 images 和 labels，'
+        + 'train 中无标注框的图片位于 neg_train，并生成 data.yaml，可直接用于训练。',
+      '--to 之后为保存目录，可修改；需要 COCO 或 LiteAnno JSON 格式时，加上 --format coco 或 --format json。',
+      `登记模型版本时，训练集快照填写 ${version.ref}。`], '取回说明')),
+    commandBox(`fw get ${version.ref} --to ${version.ref}`, 'fetch-command')];
+}
+
+// The snapshot that took data from this pool most recently (to be continued by default), or ''.
+async function snapshotOfPool(pool) {
+  const near = (await api.trainsets({ site: pool.site, line: pool.line }))
+    .filter((d) => d.latest).sort((a, b) => (a.latest.created_at < b.latest.created_at ? 1 : -1)).slice(0, 10);
+  for (const d of near) {
+    const t = await api.trainset(d.name, 'latest');
+    if (t.trainset.sources.some((ref) => splitRef(ref).name.toLowerCase() === pool.name.toLowerCase())) return d.name;
+  }
+  return '';
+}
+
+// What the server would freeze: the split, the boxes, what changed against the previous snapshot, and why it
+// cannot be made when it cannot.
+function trainsetReport(p, classes, next) {
+  const how = p.based_on ? `接着 ${p.based_on} 的划分` : p.latest ? `重新划分，不接着 ${p.latest}` : '第一版';
+  const unused = classes.filter((c) => !SPLITS.some((s) => ((p.counts[s] || {}).boxes || {})[c]));
+  const ch = p.changes || {};
+  const bare = (p.counts.train || {}).no_boxes ?? (p.counts.train || {}).negatives;
+  return [
+    el('h3', {}, `${next}：${how}`, bare ? info(`取回时，train 中无标注框的 ${bare} 张图片位于 neg_train；val 和 test 中无标注框的图片与其他图片位于同一目录。`, '无标注框图片的说明') : null),
+    el('p', {}, `来源：${p.sources.join('、')}`),
+    countsTable(p.counts, classes, 'ts-counts'),
+    unused.length ? el('p', { class: 'warn' }, `类别表中有 ${unused.length} 个类别没有任何标注框：${unused.join('、')}`) : null,
+    p.based_on ? el('p', { id: 'ts-changes' }, `相比 ${p.based_on}：新增 ${ch.added || 0} 个样本，移除 ${ch.removed || 0} 个，`
+      + `划分改变 ${ch.moved || 0} 个，标注改变 ${ch.relabeled || 0} 个`) : null,
+    (p.notices || []).length ? el('ul', { class: 'warn', id: 'ts-notices' }, p.notices.map((x) => el('li', {}, x))) : null,
+    p.problems.length ? el('div', { class: 'error', id: 'ts-problems' }, '无法建立训练集快照，请修改后重新预览：\n' + p.problems.join('\n')) : null,
+    p.problems.length ? null : el('p', {}, `标注格式：${p.formats.map((f) => FORMAT_NAMES[f] || f).join('、')}（检测框，类别编号即类别表中的行号，从 0 开始）`),
+    Object.entries(p.missing_formats || {}).map(([f, why]) => el('p', { class: 'warn' }, `不生成 ${FORMAT_NAMES[f] || f}：${why}`)),
+    el('p', { id: 'ts-total' }, `${next}：${p.samples} 个样本，${p.file_count} 个文件，${sizeText(p.total_bytes)}`)];
+}
+
+// A snapshot from pool versions: the form, the server's preview, then the snapshot (fw trainset create).
+// from=<pool>@<version>: started from a pool version (continues the snapshot that took data from that pool);
+// name=<snapshot>: its next version; site/line: started from a line (its pool is the source).
+async function trainsetNewPage(query) {
+  const show = live();
+  if (!can('datasets.write')) throw new Error('当前账号不能建立训练集快照，请联系管理员或算法工程师。');
+  const at = scopeOf(query);
+  const from = splitRef(query.get('from') || '');
+  const all = await api.datasets();
+  const pools = all.filter((d) => d.kind === 'pool' && d.site && d.line && d.latest).sort((a, b) => a.name.localeCompare(b.name));
+  const snapshots = all.filter((d) => d.kind === 'trainset').map((d) => d.name);
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const fromPool = from && pools.find((d) => same(d.name, from.name));
+  if (from && !fromPool) throw new Error(`${from.name} 不是可用的数据池（数据池须属于已登记的产线，且已上传版本），无法作为训练集快照的来源。`);
+  const asked = query.get('name') || '';
+  const askedPlace = asked ? all.find((d) => same(d.name, asked)) : null;
+  const place = fromPool || (askedPlace && askedPlace.site ? askedPlace : at);
+  const head = [crumbs('datasets', place, '建立训练集快照'), el('h1', {}, '建立训练集快照', info([
+    '训练集快照由一个或多个数据池版本生成：每张图片分配到 train、val 或 test，连同类别表一起冻结。训练时取回该快照，登记模型版本时引用它，即可从模型追溯到训练使用的每个文件。',
+    '同一名称再次建立即为该快照的下一版，默认接着上一版的划分：原有样本的划分不变。',
+    '标注中出现类别表以外的类别、同一张图片有多份标注等情况时，快照无法建立，请先在数据池中修正标注。',
+    '功能与 fw trainset create 相同。'], '建立训练集快照说明'))];
+  if (!pools.length) {
+    show(head, el('p', { class: 'muted' }, '暂无可用的数据池：数据池须属于已登记的产线，且已上传版本。'));
+    return;
+  }
+  const lineName = at.line ? pools.find((d) => same(d.site, at.site) && same(d.line, at.line)) : null;
+  const firstName = asked || (fromPool ? (await snapshotOfPool(fromPool)) || `${fromPool.name}-det` : lineName ? `${lineName.name}-det` : '');
+
+  const name = el('input', { id: 'ts-name', type: 'text', list: 'ts-names', value: firstName, placeholder: '例如 SES-TX-det' });
+  const names = el('datalist', { id: 'ts-names' }, snapshots.map((n) => el('option', { value: n })));
+  const mode = el('span', { id: 'ts-mode', class: 'muted small' });
+  const sources = el('div', { id: 'ts-sources' });
+  const classes = el('textarea', { id: 'ts-classes', rows: 6, class: 'mono', 'aria-label': '类别表', placeholder: '每行一个类别名，行号（从 0 开始）即类别编号' });
+  const classFile = el('input', { type: 'file', accept: '.txt,text/plain', hidden: true });
+  const classCount = el('span', { class: 'muted small', id: 'ts-class-count' });
+  const val = el('input', { id: 'ts-val', type: 'number', min: '0', max: '0.95', step: '0.05', value: '0.2' });
+  const test = el('input', { id: 'ts-test', type: 'number', min: '0', max: '0.95', step: '0.05', value: '0.1' });
+  const newTo = el('select', { id: 'ts-new-to' }, el('option', { value: 'test' }, '全部进入 test'),
+    el('option', { value: 'trainval' }, '按比例划分到 train、val、test'));
+  const seed = el('input', { id: 'ts-seed', type: 'number', min: '0', step: '1', value: '0' });
+  const testDirs = el('input', { id: 'ts-test-dirs', type: 'text', placeholder: '选填，例如 2026-10 或 SES/TX/2026-10，多个以逗号分隔' });
+  const fresh = el('input', { id: 'ts-fresh', type: 'checkbox' });
+  const mergeTest = el('input', { id: 'ts-merge-test', type: 'checkbox' });
+  const requireLabels = el('input', { id: 'ts-require-labels', type: 'checkbox' });
+  const note = el('input', { id: 'ts-note', type: 'text', placeholder: '备注（选填），记入快照' });
+  const result = el('div', { id: 'ts-result' });
+  const go = el('button', { id: 'ts-preview', class: 'primary', type: 'button' }, '预览');
+
+  // the pool versions it takes: a pool and one of its versions (or its newest) per row
+  const versionsOf = new Map();
+  const sourceRow = (pick = {}) => {
+    const pool = el('select', { class: 'ts-pool', 'aria-label': '数据池' }, pools.map((d) => el('option', { value: d.name }, `${d.name}（${d.site} / ${d.line}）`)));
+    const version = el('select', { class: 'ts-version', 'aria-label': '版本' });
+    const fill = async (want) => {
+      const chosen = pool.value;
+      if (!versionsOf.has(chosen)) versionsOf.set(chosen, api.versions(chosen));
+      const list = (await versionsOf.get(chosen)).slice().reverse();
+      if (pool.value !== chosen) return;
+      version.replaceChildren(el('option', { value: 'latest' }, `最新版本（当前为 ${list[0].ref}）`),
+        ...list.map((v) => el('option', { value: String(v.number) }, v.ref + ((v.labels || []).length ? `（${v.labels.join('、')}）` : ''))));
+      const hit = list.find((v) => String(v.number) === String(want) || (v.labels || []).includes(want));
+      version.value = hit ? String(hit.number) : 'latest';
+    };
+    const known = pick.name && pools.find((d) => same(d.name, pick.name));
+    if (known) pool.value = known.name;
+    pool.addEventListener('change', () => { fill('latest').catch((e) => result.replaceChildren(errorBox(e))); });
+    const drop = el('button', { type: 'button', class: 'ts-drop', onclick: () => { row.remove(); counted(); stale(); } }, '移除');
+    const row = el('div', { class: 'row ts-source' }, pool, version, drop);
+    row.ref = () => `${pool.value}@${version.value}`;
+    row.ready = fill(pick.number || 'latest');
+    return row;
+  };
+  const counted = () => {
+    const rows = [...sources.children];
+    for (const r of rows) r.querySelector('.ts-drop').disabled = rows.length < 2;
+  };
+  const setSources = async (picks) => {
+    const rows = picks.map(sourceRow);
+    sources.replaceChildren(...rows);
+    counted();
+    await Promise.all(rows.map((r) => r.ready));
+  };
+  const more = el('button', { id: 'ts-add-source', type: 'button', onclick: () => {
+    const used = new Set([...sources.children].map((r) => r.querySelector('.ts-pool').value));
+    const next = pools.find((d) => !used.has(d.name)) || pools[0];
+    const r = sourceRow({ name: next.name });
+    sources.append(r);
+    counted();
+    stale();
+  } }, icon('plus'), '添加来源');
+
+  // a snapshot of that name already: its next version takes its classes and split by default
+  let prev = null;
+  let loading = 0;
+  const continuing = [];
+  const load = async () => {
+    const mine = ++loading;
+    const typed = name.value.trim();
+    const known = snapshots.find((n) => same(n, typed));
+    const got = known ? await api.trainset(known, 'latest') : null;
+    if (mine !== loading) return;
+    const switched = (got && got.ref) !== (prev && prev.ref);
+    prev = got;
+    if (prev && switched) {
+      const t = prev.trainset;
+      const rule = t.rule || {};
+      classes.value = t.classes.join('\n');
+      if (rule.mode !== 'split-file') {
+        val.value = String(rule.val);
+        test.value = String(rule.test || 0);
+        seed.value = String(rule.seed);
+      }
+      newTo.value = rule.new_to || 'test';
+      const picks = t.sources.map(splitRef).map((s) => (from && same(s.name, from.name) ? from : { name: s.name, number: 'latest' }));
+      if (from && !picks.some((s) => same(s.name, from.name))) picks.push(from);
+      await setSources(picks);
+    } else if (!sources.children.length) {
+      await setSources([from || (lineName ? { name: lineName.name } : {})]);
+    }
+    for (const node of continuing) node.hidden = !prev;
+    mode.textContent = prev ? `将接着 ${prev.ref} 的划分建立 ${nextRef(typed, prev.ref)}` : typed ? `将建立 ${typed}@1` : '';
+    shown();
+    stale();
+  };
+  const shown = () => { classCount.textContent = `共 ${parseClasses(classes.value).length} 个类别`; };
+  const keepTest = () => {  // the old test goes back into train and val: no new test share next to it
+    test.disabled = mergeTest.checked;
+    if (mergeTest.checked) test.value = '0';
+  };
+
+  let round = 0;
+  const stale = () => { round++; result.replaceChildren(); };
+  const ratio = (input, what) => {
+    const x = Number(input.value);
+    if (input.value.trim() === '' || !Number.isFinite(x) || x < 0 || x >= 1) throw new Error(`${what}应为 0 到 1 之间的小数（不含 1），例如 0.2。`);
+    return x;
+  };
+  const body = () => {
+    const list = parseClasses(classes.value);
+    if (!list.length) throw new Error('请填写类别表：每行一个类别名。');
+    const s = Number(seed.value);
+    if (!Number.isInteger(s) || s < 0) throw new Error('随机种子应为非负整数。');
+    return { sources: [...sources.children].map((r) => r.ref()), classes: list, val: ratio(val, 'val 比例'), test: ratio(test, 'test 比例'),
+      seed: s, test_dirs: dirsOf(testDirs.value), merge_test: !!prev && mergeTest.checked, new_to: prev ? newTo.value : 'test',
+      fresh: !!prev && fresh.checked, require_labels: requireLabels.checked, note: note.value.trim() };
+  };
+  go.addEventListener('click', async () => {
+    const mine = ++round;
+    const target = name.value.trim();
+    let b;
+    let p;
+    go.disabled = true;
+    result.replaceChildren(el('p', { class: 'muted' }, '正在读取来源版本的标注并划分，图片较多时需要一些时间…'));
+    try {
+      b = body();
+      p = await api.previewTrainset(target, b);
+    } catch (e) {
+      if (mine === round) result.replaceChildren(errorBox(e));
+      return;
+    } finally { go.disabled = false; }
+    if (mine !== round) return;
+    const next = nextRef(target, p.latest);
+    const make = p.problems.length ? null : el('button', { id: 'ts-create', class: 'primary', onclick: async () => {
+      make.disabled = true;
+      go.disabled = true;
+      try {
+        const v = await api.createTrainset(target, { ...b, sources: p.sources, expect_latest_id: p.expect_latest_id });
+        location.hash = hrefOf(['v', v.dataset, String(v.number)]);
+      } catch (e) {
+        result.append(errorBox(e));
+        make.disabled = false;
+        go.disabled = false;
+      }
+    } }, `建立 ${next}`);
+    result.replaceChildren(...present([trainsetReport(p, b.classes, next), make ? el('div', { class: 'row' }, make) : null]));
+  });
+
+  classFile.addEventListener('change', async () => {
+    const f = classFile.files[0];
+    if (!f) return;
+    classes.value = parseClasses(await f.text()).join('\n');
+    classFile.value = '';
+    shown();
+    stale();
+  });
+  classes.addEventListener('input', shown);
+  mergeTest.addEventListener('change', keepTest);
+  name.addEventListener('change', () => { load().catch((e) => result.replaceChildren(errorBox(e))); });
+  const form = el('div', { class: 'panel form', id: 'ts-form' },
+    field('快照名称', name, ['填写已有快照的名称时，建立该快照的下一版；填写新名称时，建立一个新快照。',
+      '名称只能使用字母、数字和 . _ -，且与数据集名称不能相同。']),
+    el('div', { class: 'label' }, el('span'), mode), names,
+    el('div', { class: 'label' }, el('span', { class: 'name' }, '来源', info(['训练使用的数据池版本，可添加多个（例如多条产线的数据池）。',
+      '选择「最新版本」时，以预览时的最新版本为准；预览之后上传的新版本不会进入本次快照。'], '来源的说明')),
+    el('div', {}, sources, el('div', { class: 'row' }, more))),
+    el('div', { class: 'label' }, el('span', { class: 'name' }, '类别表', info(['每行一个类别名，行号（从 0 开始）即 YOLO 和 COCO 中的类别编号。登记的模型的类别顺序须与此完全一致。',
+      '建立下一版时默认沿用上一版的类别表；修改后类别编号可能改变。'], '类别表的说明')),
+    el('div', {}, classes, el('div', { class: 'row' }, el('button', { type: 'button', onclick: () => classFile.click() }, '读取 classes.txt'), classFile, classCount))),
+    field('val 比例', val, '按比例划分时 val 所占的比例，默认 0.2。有标注框和无标注框的图片分别按比例划分。'),
+    field('test 比例', test, 'test 所占的比例，默认 0.1，即 train、val、test 为 7:2:1。'),
+    ...(() => {
+      const rows = [field('新样本', newTo, '接着上一版时，上一版没有的样本的去向：全部进入 test，或与第一版一样按比例划分。'),
+        checkRow(mergeTest, '上一版 test 中的样本重新划分到 train 和 val', '适用于上一版的 test 已完成评估、需要并入训练的情况。对应命令行选项 --merge-test。'),
+        checkRow(fresh, '重新划分，不接着上一版', '全部样本按比例重新划分，原有样本的划分可能改变。对应命令行选项 --fresh。')];
+      continuing.push(...rows);
+      return rows;
+    })(),
+    el('details', { id: 'ts-more' }, el('summary', {}, '更多选项'),
+      field('随机种子', seed, '相同的样本、比例和种子，划分结果总是相同。默认 0。'),
+      field('进入 test 的目录', testDirs, '这些目录中的新样本直接进入 test，例如按日期采集的 2026-10。对应命令行选项 --test-dirs。'),
+      checkRow(requireLabels, '每张图片必须有标注', '勾选后，有图片没有标注时不建立快照。默认没有标注的图片作为无缺陷的负样本收入。对应命令行选项 --require-labels。')),
+    el('label', {}, '备注', note),
+    el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, go)));
+  form.addEventListener('input', (ev) => { if (ev.target !== name) stale(); });
+  form.addEventListener('change', (ev) => { if (ev.target !== name && ev.target !== classFile) stale(); });
+  await load();
+  show(head, form, result);
+  keepTest();
 }
 
 // --- models, evaluations, jobs, prediction sets -----------------------------------------------------------
@@ -2838,6 +3207,8 @@ async function overviewPage(query) {
     el('div', { class: 'links' }, ...more,
       el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link)));
   const newData = can('datasets.write') ? el('a', { id: 'data-new', class: 'small with-icon', href: hrefOf(['dataset-new'], where) }, icon('plus'), '新建数据集') : null;
+  const newSnapshot = can('datasets.write') && data.some((d) => d.kind === 'pool' && d.latest)
+    ? el('a', { id: 'snapshot-new', class: 'small with-icon', href: hrefOf(['trainset-new'], where) }, icon('plus'), '建立训练集快照') : null;
   const line = site && site.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
   const mvHref = (ref) => { const [n, k] = ref.split('@'); return hrefOf(['mv', n, k]); };
 
@@ -2892,7 +3263,7 @@ async function overviewPage(query) {
       card,
       el('div', { class: `cols${batchList ? '' : ' one'}` },
         el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型'), modelTable,
-          head('data', '数据池与快照', ['datasets'], '全部数据集', newData), dataTable),
+          head('data', '数据池与快照', ['datasets'], '全部数据集', newData, newSnapshot), dataTable),
         batchList ? el('div', { class: 'col right' }, head('batches', ['在办的批次', info('在办批次指尚未入库且未关闭的批次。', '在办批次说明')], ['batches'], '全部批次'), batchList) : null))));
 }
 
@@ -2957,6 +3328,7 @@ async function render() {
     if (parts.length === 0 || parts[0] === 'overview') await overviewPage(query);  // #/overview: the address it had before it became the home page
     else if (parts[0] === 'datasets') await datasetsPage(query);
     else if (parts[0] === 'dataset-new') await datasetNewPage(query);
+    else if (parts[0] === 'trainset-new') await trainsetNewPage(query);
     else if (parts[0] === 'places') await placesPage();
     else if (parts[0] === 'd' && parts[1]) await datasetPage(parts[1]);
     else if (parts[0] === 'v' && parts[2]) await versionPage(parts[1], parts[2], query);

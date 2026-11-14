@@ -33,7 +33,7 @@ const LONG = 60;  // a grey line longer than this on a page is a hint that belon
   try {
     await as(algo);
     for (const hash of ['#/', '#/?site=SES&line=TX', '#/datasets', `#/d/${pool}`, `#/v/${pool}/1`, `#/add/${pool}`, `#/upload/${pool}`,
-      `#/remove/${pool}`, '#/dataset-new', '#/places', '#/models', '#/batches', '#/batch-new', '#/jobs', '#/predictions',
+      `#/remove/${pool}`, '#/dataset-new', `#/trainset-new?from=${pool}@1`, '#/places', '#/models', '#/batches', '#/batch-new', '#/jobs', '#/predictions',
       '#/events', '#/me']) await visit(hash);
     await as(admin);
     await visit('#/users');

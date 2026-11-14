@@ -116,7 +116,7 @@ td.indent { padding-left: 28px; }
 td.place-name form { margin: 0; flex-wrap: nowrap; }
 tr.asking td { background: var(--del); }
 .panel.asking { margin: -8px 0 18px; padding: 12px 16px; }
-input[type=text], input[type=password], input:not([type]), select, textarea {
+input[type=text], input[type=password], input[type=number], input:not([type]), select, textarea {
   padding: 5px 10px; border: 1px solid #d2d2d7; border-radius: 8px; background: #fff; }
 textarea { width: 100%; }
 input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible {
@@ -329,3 +329,17 @@ h1 button.info .icon { width: 19px; height: 19px; }
 .tip p { margin: 0 0 6px; }
 .tip p:last-child { margin: 0; }
 .form h3 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+
+/* building a training-set snapshot, and the command that fetches one */
+[hidden] { display: none !important; }
+.command-row { display: flex; gap: 8px; align-items: center; max-width: 760px; margin: 0 0 16px; }
+.command-row input.command { flex: 1; min-width: 0; background: var(--panel); }
+table.counts { width: auto; min-width: 360px; margin-bottom: 12px; }
+table.counts td.num, table.counts th.num { text-align: right; padding-left: 28px; }
+#ts-sources .ts-source { margin-bottom: 8px; flex-wrap: nowrap; }
+#ts-sources select { width: auto; min-width: 0; }
+#ts-sources .ts-pool { flex: 1 1 auto; }
+#ts-more { margin: 4px 0 12px; }
+#ts-form input[type=number] { width: 140px; }
+#ts-more summary { cursor: pointer; color: var(--muted); margin-bottom: 10px; }
+#ts-result h3 { margin: 18px 0 8px; font-size: 16px; }

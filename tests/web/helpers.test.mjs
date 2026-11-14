@@ -5,6 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   shortWhen, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
+  parseClasses, dirsOf, splitRef, nextRef, ruleText,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -254,4 +255,21 @@ test('the first-level folders of a folder, and how a few names are said', () => 
   assert.equal(namesText(['a', 'b']), 'a/、b/');
   assert.equal(namesText(['a', 'b', 'c', 'd']), 'a/、b/、c/ 等 4 个');
   assert.equal(namesText(['a', 'b', 'c'], 2, ''), 'a、b 等 3 个');
+});
+
+test('a class table is read as typed or from a classes.txt, and a snapshot is told by its rule', () => {
+  assert.deepEqual(parseClasses('\uFEFFscratch\r\ndent\r\n\r\n  \nshort \n'), ['scratch', 'dent', 'short ']);  // the server refuses 'short '
+  assert.deepEqual(parseClasses(''), []);
+  assert.deepEqual(dirsOf('2026-10, SES/TX/2026-11、x\n\n'), ['2026-10', 'SES/TX/2026-11', 'x']);
+  assert.deepEqual(splitRef('SES-TX@v0.1.0'), { name: 'SES-TX', number: 'v0.1.0' });
+  assert.equal(splitRef('SES-TX'), null);
+  assert.equal(splitRef('SES-TX@'), null);
+  assert.equal(nextRef('ses-tx-det', null), 'ses-tx-det@1');
+  assert.equal(nextRef('ses-tx-det', 'SES-TX-det@3'), 'SES-TX-det@4');
+  assert.equal(ruleText({ mode: 'fresh', val: 0.2, test: 0.1, seed: 0, test_dirs: [] }), '按比例划分（val 20%，test 10%，随机种子 0）');
+  assert.equal(ruleText({ mode: 'continue', val: 0.2, seed: 3, new_to: 'test', test_dirs: ['2026-10'], merge_test: false }),
+    '接着上一版的划分；新样本全部进入 test；2026-10 中的新样本进入 test');
+  assert.equal(ruleText({ mode: 'continue', val: 0.25, test: 0, seed: 0, new_to: 'trainval', merge_test: true, class_map: { DL1: 'DL', others: '' } }),
+    '接着上一版的划分；新样本按比例划分（val 25%，test 0%，随机种子 0）；上一版 test 中的样本重新划分到 train 和 val；类别映射 DL1→DL、others→去掉');
+  assert.equal(ruleText({ mode: 'split-file', split_count: 12 }), '按划分清单划分（12 个样本）');
 });
