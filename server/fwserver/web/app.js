@@ -721,9 +721,11 @@ function classSection(d, added) {
       d.classes.map((c, i) => el('tr', {}, el('td', {}, String(i)), el('td', {}, c))))
     : el('p', { class: 'muted' }, '暂无类别表。');
   const check = added && added.latest_check;
+  // a large pool is checked only in part when its table is saved; the next upload checks the rest all the same
+  const part = check && check.complete === false ? `（已核对其中 ${check.checked} 个标注文件，共 ${check.total} 个；其余的将在下一次上传时核对）` : '';
   const fits = !check ? null : check.problem
-    ? el('div', { class: 'error', id: 'class-check' }, `${check.ref} 中有不符合类别表的标注，下一次上传时须一并改正：${check.problem}`)
-    : el('p', { class: 'muted', id: 'class-check' }, `${check.ref} 中的标注均符合类别表。`);
+    ? el('div', { class: 'error', id: 'class-check' }, `${check.ref} 中有不符合类别表的标注${part}，下一次上传时须一并改正：${check.problem}`)
+    : el('p', { class: 'muted', id: 'class-check' }, part ? `${check.ref} 中已核对的标注均符合类别表${part}。` : `${check.ref} 中的标注均符合类别表。`);
   if (!can('datasets.write')) return [head, table];
   const input = classInput('class-add', d.classes.length ? '每行一个新类别名，依次添加到类别表末尾' : '每行一个类别名，行号（从 0 开始）即类别编号');
   const msg = el('div');

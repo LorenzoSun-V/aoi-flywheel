@@ -1,5 +1,6 @@
 """The class table of a data pool: labels that go into a pool may only name its classes."""
 import json
+import re
 import uuid
 from unittest import mock
 
@@ -130,6 +131,23 @@ def test_batches_are_checked_against_the_pool_they_are_for(api, make_api, tokens
     assert ops.import_batch(api, batch, echo=quiet)['number'] == 2
 
 
+def test_a_checked_file_is_read_again_as_another_kind_of_file(api, tmp_path):
+    """Contents checked as one kind of file count as checked for that kind only (review of #41): the bytes of
+    a YOLO label already in the pool are no JSON label, and those of a JSON label are no YOLO label."""
+    name = new_pool(api)
+    yolo, doc = b'0 0.5 0.5 0.1 0.1\n', label('dent', 'scratch')
+    ops.import_folder(api, name, folder(tmp_path, {'A/x.png': image(), 'A/x.txt': yolo,
+                                                   'A/y.png': image(), 'A/y.json': doc}), echo=quiet)
+    for files, message in (({'b.png': image(), 'b.json': yolo}, 'B/b.json（不是合法的 JSON'),
+                           ({'b.png': image(), 'b.txt': doc}, 'B/b.txt（第 1 行的类别编号不是整数）')):
+        with pytest.raises(ops.FwError, match=re.escape(message)):  # said in the preview
+            ops.add_folders(api, name, [folder(tmp_path, files)], to='B', echo=quiet)
+        whole = folder(tmp_path, {'A/x.png': image(), 'A/x.txt': yolo, **{f'B/{k}': v for k, v in files.items()}})
+        with pytest.raises(ApiError, match=re.escape(message)):  # and by a full upload
+            ops.import_folder(api, name, whole, echo=quiet)
+    assert api.dataset(name)['latest']['number'] == 1
+
+
 # --- the table ------------------------------------------------------------------------------------------
 def test_classes_are_only_added_at_the_end_of_the_table(api, make_api, tokens):
     name = new_pool(api)
@@ -207,10 +225,31 @@ def test_the_first_table_of_an_old_pool_is_checked_on_its_newest_version(api, tm
 
 def test_an_old_pool_whose_labels_fit_is_said_to_fit(api, tmp_path):
     name = old_pool(api, tmp_path, {'A/1.png': image(), 'A/1.json': label('dent')})
-    assert api.add_classes(name, CLASSES)['latest_check'] == {'ref': f'{name}@1', 'problem': None}
+    assert api.add_classes(name, CLASSES)['latest_check'] == {'ref': f'{name}@1', 'problem': None, 'checked': 1,
+                                                              'total': 1, 'complete': True}
     empty = f'C-{uuid.uuid4().hex[:8]}'
     api.create_dataset(empty, 'SES', 'TX', 'pool', '')
     assert api.add_classes(empty, CLASSES)['latest_check'] is None  # no version to check
+
+
+def test_saving_the_first_table_of_a_large_pool_checks_only_part_of_it(api, tmp_path, monkeypatch):
+    """Saving the table answers in time however large the pool (review of #41): its newest version is looked
+    at only so far, the answer says how far, and the next upload checks all of it."""
+    files = {f'A/{i}.png': image() for i in range(4)}
+    files.update({f'A/{i}.json': label('dent') for i in range(3)})
+    files['A/3.json'] = label('dirt')  # past what is looked at
+    name = old_pool(api, tmp_path, files)
+    monkeypatch.setattr(server_datasets, 'LATEST_CHECK_FILES', 2)
+    check = api.add_classes(name, CLASSES)['latest_check']
+    assert check == {'ref': f'{name}@1', 'problem': None, 'checked': 2, 'total': 4, 'complete': False}
+    day = folder(tmp_path, {'4.png': image(), '4.json': label('dent')})
+    with pytest.raises(ops.FwError, match=re.escape('dirt（1 个文件，例如 A/3.json）')):
+        ops.add_folders(api, name, [day], to='B', echo=quiet)
+    monkeypatch.setattr(server_datasets, 'LATEST_CHECK_FILES', 5000)
+    monkeypatch.setattr(server_datasets, 'LATEST_CHECK_SECONDS', 0.0)  # out of time before the first file
+    other = old_pool(api, tmp_path, {'x.png': image(), 'x.json': label('dent')})
+    assert api.add_classes(other, CLASSES)['latest_check'] == {'ref': f'{other}@1', 'problem': None, 'checked': 0,
+                                                               'total': 1, 'complete': False}
 
 
 # --- reading a file for its classes (pure) ------------------------------------------------------------------
