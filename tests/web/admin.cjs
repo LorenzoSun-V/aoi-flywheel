@@ -132,6 +132,9 @@ const { chromium } = require('playwright');
   await field.goto(`${url}#/datasets`);
   await field.waitForSelector('.page-head h1');
   seen.field.newDataset = await field.locator('#dataset-new').count();
+  await field.goto(`${url}#/dataset-new`);
+  await field.waitForSelector('main .error');
+  seen.field.newPage = [await field.textContent('main .error'), await field.locator('#dataset-kind').count()];
 
   seen.errors = errors;
   console.log(JSON.stringify(seen));

@@ -545,7 +545,9 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
     assert seen['firstRows'] == 500 and seen['more'] == '全部列出（510 个）' and seen['allRows'] == 510
     assert seen['lines'] == {'新增': 510, '删除': 1} and seen['firstLine'] == '新增\td/0000.png'
     assert seen['file'] == f'{big}-1_{big}-2.tsv'
+    page = seen['field'].pop('newPage')
     assert seen['field'] == {'rename': 0, 'register': 0, 'manage': 0, 'tags': 0, 'newDataset': 0}
+    assert '不能新建数据集' in page[0] and page[1] == 0                      # said on opening, not on submitting
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

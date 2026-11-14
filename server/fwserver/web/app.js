@@ -2451,6 +2451,7 @@ function newPlaceForm(done) {
 // A new dataset: a pool (always of a line) or a test or regression set (of a line or of none), then its upload.
 async function datasetNewPage(query) {
   const show = live();
+  if (!can('datasets.write')) throw new Error('这个账号不能新建数据集：请管理员或算法工程师来建。');  // say so before the form, not on submit
   const at = scopeOf(query);
   const tree = await api.sites();
   const kinds = { pool: '数据池：一条产线采集的数据，以后一批批加目录', test: '测试集：评估模型用，可以不属于哪条产线',
