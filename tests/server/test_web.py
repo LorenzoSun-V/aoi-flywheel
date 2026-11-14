@@ -265,7 +265,7 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     assert sorted(seen['site']['pools']) == sorted([a, b]) and seen['site']['snapshots'] == [ts]
     assert seen['ty'] == {'pools': [b], 'snapshots': []} and f'site={site}' in seen['tyHash']
     assert seen['tx'] == {'pools': [a], 'snapshots': [ts]}           # the snapshot took its data from TX
-    assert (seen['formSite'], seen['formLine']) == (site, 'TX')      # a new pool starts on the line being browsed
+    assert seen['newHref'] == f'#/dataset-new?site={site}&line=TX'    # a new pool starts on the line being browsed
     assert '这里没有符合的数据池' in seen['none']
     assert seen['navModels'] == f'#/models?site={site}&line=TX' and seen['models'] == [model] and seen['navOn'] == '模型'
     assert seen['navAfter'] == '#/datasets'
@@ -499,6 +499,53 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
     assert f'已经用在 {name}@1 上' in seen['taken']
     assert seen['title'].startswith(f'{name}@1') and 'v0.1.0' in seen['title']
     assert api.version(name, 'v0.1.0')['number'] == 1 and api.labels(name)['labels'][0]['note'] == '冷启动'
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, api, model, snapshot, database, tmp_path):  # noqa: F811
+    """A test set of no line, registering and renaming a line, retiring a label, candidate and deprecated, every
+    change of a large comparison; refused cases say why; a field account gets none of the buttons."""
+    from fw import ops
+    from helpers import quiet
+    from test_models import files_in, register
+    seed = int.from_bytes(os.urandom(2), 'big')
+    labelled = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(labelled, 'SES', 'TX', 'pool', '')
+    ops.import_folder(api, labelled, write_tree(tmp_path / 'one', {'a.png': real_png(8, 8, seed)}), echo=quiet)
+    api.add_label(labelled, 1, 'v0.1.0', '冷启动')
+    mv = register(api, model, snapshot, files_in(tmp_path, 'web-tags'))
+    big = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(big, 'SES', 'TX', 'pool', '')
+    ops.import_folder(api, big, write_tree(tmp_path / 'b1', {'old.png': real_png(3, 3, seed)}), echo=quiet)
+    many = {f'd/{i:04d}.png': real_png(4, 4 + i // 256, seed + i) for i in range(510)}  # all different: no renames
+    ops.import_folder(api, big, write_tree(tmp_path / 'b2', many), echo=quiet)
+    site = f'S{os.urandom(3).hex().upper()}'
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'admin.cjs'), service.url + '/', tokens['algo'], tokens['admin'], tokens['field'],
+                        str(shots), labelled, mv['ref'], big, site], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['newHref'] == '#/dataset-new?site=SES&line=TX'
+    assert seen['poolNoneOff'] and seen['poolAt'] == ['SES', 'TX'] and seen['noLine']
+    made = api.dataset(f'T-{site}')
+    assert made['kind'] == 'test' and made['site'] == '' and made['line'] == ''
+    assert '已经存在' in seen['taken']
+    assert seen['badCode'].strip() and f'{site}/L1' not in json.dumps(api.sites())
+    lines = {(s['code'], x['code']): x['name'] for s in api.sites()['sites'] for x in s['lines']}
+    assert lines[(site, 'L1')] == '一号线' and 'L1 一号线' in seen['tree']
+    assert seen['algoRetire'] == 0 and '原因' in seen['noReason']
+    assert '已撤销' in seen['retired'] and '起错版本了' in seen['retired']
+    assert [x['label'] for x in api.labels(labelled)['labels'] if x['retired']] == ['v0.1.0']
+    assert seen['metricsShown']
+    assert '候选' in seen['candidate'] and '候选' in seen['both'] and '弃用' in seen['both']
+    assert seen['history'] == ['标成「候选」', '标成「弃用」：漏检多', '去掉「候选」']
+    assert api.model_version(model, mv['number'])['tags'] == ['deprecated'] and '弃用' in seen['listTags']
+    assert seen['firstRows'] == 500 and seen['more'] == '全部列出（510 个）' and seen['allRows'] == 510
+    assert seen['lines'] == {'新增': 510, '删除': 1} and seen['firstLine'] == '新增\td/0000.png'
+    assert seen['file'] == f'{big}-1_{big}-2.tsv'
+    assert seen['field'] == {'rename': 0, 'register': 0, 'manage': 0, 'tags': 0, 'newDataset': 0}
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

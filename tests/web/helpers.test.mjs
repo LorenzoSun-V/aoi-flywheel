@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  shortWhen, modelRow, downloadText, readDropped,
+  shortWhen, modelRow, downloadText, readDropped, diffListText,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
@@ -239,4 +239,10 @@ test('a dragged folder is read through all its batches and subfolders, with path
   const broken = dir('/x', []);
   broken.createReader = () => ({ readEntries: (ok, no) => no(new Error('读不了')) });
   await assert.rejects(readDropped(broken), /读不了/);
+});
+
+test('the list of changes saved from a comparison is the one fw dataset diff --list prints', () => {
+  const d = { added: ['a/1.png', 'a/2.png'], modified: ['b.json'], deleted: ['c.png'], renamed: [['old.png', 'new.png']] };
+  assert.equal(diffListText(d), '新增\ta/1.png\n新增\ta/2.png\n修改\tb.json\n删除\tc.png\n改名\told.png\tnew.png\n');
+  assert.equal(diffListText({ added: [], modified: [], deleted: [], renamed: [] }), '');
 });
