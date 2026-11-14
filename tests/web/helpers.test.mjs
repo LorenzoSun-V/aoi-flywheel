@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  scopeOf, scopeQuery, keyMetrics, batchesUnderWay, lastEvalByModel,
+  scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -136,4 +136,18 @@ test('the overview of a line shows the numbers a report has, the batches under w
   const e = (id, ref) => ({ id, model_version: { ref } });
   const last = lastEvalByModel([e(1, 'A@1'), e(2, 'B@1'), e(3, 'A@2')]);
   assert.deepEqual([last.A.id, last.B.id], [3, 2]);
+});
+
+test('a number in the tree of sites and lines is the number of rows choosing it lists', () => {
+  const line = (code, n) => ({ code, name: '', datasets: n.d, trainsets: n.own, snapshots: n.s, models: n.m, batches: 0, releases: 0 });
+  const tree = {
+    sites: [{ code: 'S', name: '', lines: [line('TX', { d: 1, own: 1, s: 2, m: 3 }), line('TY', { d: 1, own: 0, s: 1, m: 0 })], listed: { datasets: 3, trainsets: 2 } }],
+    other: { datasets: 2, trainsets: 1, models: 1, batches: 0, releases: 0 },
+    listed: { datasets: 4, trainsets: 2 }, unplaced: { datasets: 1, trainsets: 0 },
+  };
+  const d = datasetCounts(tree);
+  // a snapshot from both lines: once on each line, once on the site; a dataset of the site without a line: on the site
+  assert.deepEqual([d.line(tree.sites[0].lines[0]), d.line(tree.sites[0].lines[1]), d.site(tree.sites[0]), d.all, d.loose], [3, 2, 5, 6, 1]);
+  const m = countsBy(tree, ['models']);
+  assert.deepEqual([m.line(tree.sites[0].lines[0]), m.site(tree.sites[0]), m.all, m.loose], [3, 3, 4, 1]);
 });

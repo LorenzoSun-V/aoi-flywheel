@@ -505,6 +505,7 @@ def work_dir() -> Path:
 # clears what dead workers left on this machine when it starts and each time it claims a job.
 OWNER_ENV = 'FW_WORKER_OWNER'
 JOB_FOLDER = re.compile(r'job-\d+-\d+')
+BUILD_FOLDER = re.compile(r'build-[0-9a-f]{64}-\d+')  # where an engine is being built, in engines/ of the cache
 
 
 def _started(pid: int) -> Optional[str]:
@@ -589,19 +590,24 @@ def _try_hold(lock: Path):
 
 
 @contextlib.contextmanager
-def held_folder(folder: Path):
-    """A job folder for as long as the block runs: held with a lock next to it (<folder>.lock) so that another
-    worker on this machine knows it is in use, removed with it at the end (kept with FW_KEEP_WORK)."""
+def held_folder(folder: Path, keep: Optional[bool] = None):
+    """A job folder (or the folder an engine is built in) for as long as the block runs: held with a lock next
+    to it (<folder>.lock) so that another worker on this machine knows it is in use, removed with it at the end
+    (keep: left there; by default when FW_KEEP_WORK is set)."""
+    if keep is None:
+        keep = bool(os.environ.get('FW_KEEP_WORK'))
     held = None
     if os.name == 'posix':
         held = _try_hold(_lock_of(folder))
         if held is None:
-            raise WorkerError(f'任务目录 {folder} 正被这台机器上另一个 worker 用着（它连的多半是另一个平台）；'
-                              f'给每个 worker 设各自的 FW_WORK_DIR 再启动')
+            build = BUILD_FOLDER.fullmatch(folder.name) is not None
+            raise WorkerError(f'{"建引擎的目录" if build else "任务目录"} {folder} 正被另一个 worker 用着'
+                              f'（{"两个容器共用了一个缓存目录" if build else "它连的多半是另一个平台"}）；'
+                              f'给每个 worker 设各自的 {"FW_CACHE" if build else "FW_WORK_DIR"} 再启动')
     try:
         yield folder
     finally:
-        if not os.environ.get('FW_KEEP_WORK'):
+        if not keep:
             shutil.rmtree(folder, ignore_errors=True)
         if held is not None:
             try:
@@ -611,14 +617,15 @@ def held_folder(folder: Path):
             held.close()
 
 
-def sweep_folders(root: Path) -> int:
-    """Remove the job folders under root that no running worker holds (left by a worker that was killed or lost
-    power, or by one older than the locks). Only names like job-<id>-<attempt>. Returns how many folders."""
+def sweep_folders(root: Path, named=JOB_FOLDER) -> int:
+    """Remove the folders under root that no running worker holds (left by a worker that was killed or lost
+    power, or by one older than the locks). Only names like job-<id>-<attempt> (named: another pattern).
+    Returns how many folders."""
     if os.name != 'posix' or not root.is_dir():
         return 0
     removed = 0
     names = {p.name[:-5] if p.name.endswith('.lock') else p.name for p in root.iterdir()}
-    for name in sorted(n for n in names if JOB_FOLDER.fullmatch(n)):
+    for name in sorted(n for n in names if named.fullmatch(n)):
         folder = root / name
         held = _try_hold(_lock_of(folder))
         if held is None:
@@ -641,11 +648,14 @@ def sweep(echo: Echo) -> None:
     try:
         killed = sweep_processes()
         removed = 0 if os.environ.get('FW_KEEP_WORK') else sweep_folders(work_dir())
+        from .config import cache_dir
+        builds = sweep_folders(cache_dir() / 'engines', BUILD_FOLDER)  # never kept: half an engine is of no use
     except OSError as e:
         echo(f'清理上一个 worker 留下的东西时出错（{e}），继续领任务')
         return
-    if killed or removed:
-        echo(f'这台机器上有 worker 没来得及收场就没了：停掉了它留下的 {killed} 个进程，删掉了它留下的 {removed} 个任务目录')
+    if killed or removed or builds:
+        echo(f'这台机器上有 worker 没来得及收场就没了：停掉了它留下的 {killed} 个进程，删掉了它留下的 {removed} 个任务目录'
+             + (f'、{builds} 个建到一半的引擎目录' if builds else ''))
 
 
 def conda_run(env: str, *argv: str) -> List[str]:
@@ -795,9 +805,9 @@ def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tup
         run.log(f'用缓存的引擎（{gpu}，TensorRT {trt}）')
     else:
         build = cache / f'build-{key}-{os.getpid()}'
-        shutil.rmtree(build, ignore_errors=True)
-        build.mkdir()
-        try:
+        with held_folder(build, keep=False):  # gone at the end; held, so a later worker can tell a dead build
+            shutil.rmtree(build, ignore_errors=True)
+            build.mkdir()
             shutil.copyfile(onnx, build / 'model.onnx')  # alone in its folder: nothing else to read next to it
             run.log(f'用 onnx2engine 在这台机器上建引擎（onnx2engine 设的精度 {ENGINE_PRECISION.upper()}；'
                     f'{gpu}，TensorRT {trt}）')
@@ -818,8 +828,6 @@ def build_engine(run: JobRun, runner: dict, onnx: Path, onnx_sha256: str) -> Tup
             _fsync(sidecar)
             os.replace(sidecar, engine.with_name(engine.name + '.sha256'))
             _fsync(cache)
-        finally:
-            shutil.rmtree(build, ignore_errors=True)
     return engine, dict(info, engine_sha256=digest, engine_size=engine.stat().st_size,
                         precision_from='onnx2engine')
 

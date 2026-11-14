@@ -350,7 +350,24 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             raise RuntimeError('；'.join(problems))
         state['pool'] = pool
         store.clean_tmp()
+        # Lost claims are also taken back when nobody asks: without this a job whose only worker is gone stays
+        # 'running' until someone looks at it (asking for a job, the list or a claim takes them back too).
+        stop = threading.Event()
+        every = max(1.0, min(settings.job_lease_seconds / 4, 15.0))
+
+        def watch_leases():
+            while not stop.wait(every):
+                try:
+                    with pool.connection() as conn:
+                        jobs.expire_leases(conn)
+                except Exception as e:  # noqa: BLE001 - the database is away: the next round tries again
+                    log.warning('could not take back lost claims: %s', e)
+
+        watcher = threading.Thread(target=watch_leases, name='leases', daemon=True)
+        watcher.start()
         yield
+        stop.set()
+        watcher.join(10)
         pool.close()
         store.close()
 
