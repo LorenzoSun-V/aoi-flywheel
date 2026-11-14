@@ -13,6 +13,7 @@ plan() is what both the preview and the creation run, so what is frozen is what 
 - a folder that is already in the pool is refused by name unless it is to be replaced;
 - the checks of fw dataset import (contract.classify_paths) on the resulting file list: names that do not
   work, clashes, and, for the new folders only, other files and images that share a stem;
+- the labels against the pool's class table (datasets.class_problems);
 - warnings, never refusals: new images whose content (sha256, from the manifests, no file is read) is
   already in the pool or appears twice in what is added, and those among them whose labels differ.
 """
@@ -308,6 +309,12 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     found['others'] = [x for x in found['others'] if x in fresh]
     found['same_stem_images'] = [g for g in found['same_stem_images'] if any(x in fresh for x in g)]
     p.reasons += blocking_reasons(found, allow_other_files, force)
+    # the labels against the pool's class table: those of the new folders, or all of them while the newest
+    # version is from before the table (a file not uploaded yet is checked when the version is made)
+    problem = datasets.class_problems(conn, store, dataset, entries,
+                                      datasets.checked_contents(conn, dataset['id'], latest['id'] if latest else None))
+    if problem:
+        p.reasons.append(problem)
     p.checks = {
         'bad_paths': found['bad_paths'], 'collisions': found['collisions'],
         'same_stem_images': found['same_stem_images'], 'others': found['others'],
@@ -351,7 +358,8 @@ def create(conn, store: Store, user_id: int, name: str, add: List[dict], remove:
 
     version = datasets.create_version(conn, store, user_id, p.dataset['name'], digest,
                                       p.latest['id'] if p.latest else None, expect_latest_id, source, note,
-                                      before_freeze=before_freeze, record=record, inherited=set(p.inherited))
+                                      before_freeze=before_freeze, record=record, inherited=set(p.inherited),
+                                      classes_checked=True)
     out = p.summary()
     out['version'] = version
     return out

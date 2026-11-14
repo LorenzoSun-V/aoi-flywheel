@@ -54,11 +54,13 @@ import json, random, shutil, sys
 from pathlib import Path
 w = Path(sys.argv[1])
 rng = random.Random(1)
+def shapes(x):  # one box of the pool's only class (the pool refuses any other)
+    return [{'label': 'defect', 'points': [[x, x], [x + 5, x + 5]], 'shape_type': 'rectangle'}]
 def pair(d, stem):
     d.mkdir(parents=True, exist_ok=True)
     n = rng.randint(2000, 60000)
     (d / f'{stem}.bmp').write_bytes(rng.getrandbits(8 * n).to_bytes(n, 'little'))
-    (d / f'{stem}.json').write_text(json.dumps({'shapes': [rng.randint(0, 9)], 'imagePath': f'{stem}.bmp'}))
+    (d / f'{stem}.json').write_text(json.dumps({'shapes': shapes(rng.randint(0, 9)), 'imagePath': f'{stem}.bmp'}))
 v1, v2 = w / 'v1', w / 'v2'
 for i in range(3000):
     pair(v1 / f'chip{i % 20:02d}', f'img_{i:05d}')
@@ -66,7 +68,7 @@ shutil.copytree(v1, v2)
 p = lambda i, ext: v2 / f'chip{i % 20:02d}' / f'img_{i:05d}.{ext}'
 ids = rng.sample(range(3000), 100)
 for i in ids[:30]:
-    p(i, 'json').write_text(json.dumps({'shapes': [99], 'imagePath': p(i, 'bmp').name}))
+    p(i, 'json').write_text(json.dumps({'shapes': shapes(99), 'imagePath': p(i, 'bmp').name}))
 for i in range(3000, 3030):
     pair(v2 / f'chip{i % 20:02d}', f'img_{i:05d}')
 for i in ids[30:60]:
@@ -87,7 +89,8 @@ time bash setup.sh drill-admin > "$W/setup-a.log" 2>&1 || { cat "$W/setup-a.log"
 TOKEN=$(grep '^fw_' "$W/setup-a.log")
 "$FW" login --server http://127.0.0.1:18000 --token "$TOKEN"
 "$FW" site add drill/L1 --name 'tools/deploy-drill.sh'
-"$FW" dataset create DRILL --site drill --line L1 --note 'tools/deploy-drill.sh'
+printf 'defect\n' > "$W/classes.txt"
+"$FW" dataset create DRILL --site drill --line L1 --classes "$W/classes.txt" --note 'tools/deploy-drill.sh'
 
 step 'A：导入 v1'
 time "$FW" dataset import DRILL "$W/v1" --yes --note v1
@@ -131,7 +134,7 @@ with open(f'{root}/best.onnx', 'wb') as f:
 with open(f'{root}/val.json', 'w') as f:
     json.dump({'mAP50': 0.5}, f)
 PY
-"$FW" dataset create DRILL-M --site drill --line L1
+"$FW" dataset create DRILL-M --site drill --line L1 --classes "$W/m/classes.txt"
 "$FW" dataset import DRILL-M "$W/m/pool" --yes
 "$FW" trainset create DRILL-det --from DRILL-M@1 --classes "$W/m/classes.txt" --yes
 "$FW" model create DRILL-detr --site drill --line L1

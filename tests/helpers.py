@@ -1,6 +1,9 @@
 import os
 from pathlib import Path
 
+# The class table of the pools the tests make: every class their labels name (a pool refuses any other).
+CLASSES = ['scratch', 'dent', 'a', 'b', 'x', 'others', 'ng', 'ok']
+
 
 def write(root: Path, rel: str, data: bytes) -> Path:
     path = Path(root).joinpath(*rel.split('/'))

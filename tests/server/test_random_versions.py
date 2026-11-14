@@ -2,13 +2,14 @@
 cold (empty cache) and warm, and the server's diff must match the change actually made.
 
 FW_RANDOM_VERSIONS (default 12) versions per seed, FW_RANDOM_SEEDS (default "1,2")."""
+import json
 import os
 import random
 import shutil
 
 import pytest
 
-from helpers import quiet, read_tree, write
+from helpers import CLASSES, quiet, read_tree, write
 from fw import ops
 from fw.cache import Cache
 from fw.contract import diff_entries, sha256_file
@@ -19,16 +20,27 @@ NAMES = ['img', 'pic', 'a', 'b', 'c', '中文', 'x y']
 DIRS = ['', 'd1/', 'd2/', 'd1/sub/', '批次/']
 
 
+def blob(rng, path, size):
+    """Random content for a file: an image is any bytes; a .json is a label of the pool's classes (a pool takes
+    no other), padded with random text."""
+    if not path.endswith('.json'):
+        return rng.randbytes(size)
+    shapes = [{'label': rng.choice(CLASSES), 'shape_type': 'rectangle', 'points': [[1, 1], [5, 5]]}
+              for _ in range(rng.randint(0, 3))]
+    return json.dumps({'shapes': shapes, 'pad': rng.randbytes(size).hex()}).encode()
+
+
 def mutate(rng, files, history):
     files = dict(files)
     for _ in range(rng.randint(1, 6)):
         op = rng.choice(['add', 'add', 'modify', 'copy', 'rename', 'delete', 'swap', 'dup', 'empty', 'revert'])
         paths = sorted(files)
         if op == 'add' or not paths:
-            files[f'{rng.choice(DIRS)}{rng.choice(NAMES)}{rng.randint(0, 40)}.{rng.choice(["bmp", "json"])}'] = \
-                rng.randbytes(rng.randint(0, 3000))
+            path = f'{rng.choice(DIRS)}{rng.choice(NAMES)}{rng.randint(0, 40)}.{rng.choice(["bmp", "json"])}'
+            files[path] = blob(rng, path, rng.randint(0, 3000))
         elif op == 'modify':
-            files[rng.choice(paths)] = rng.randbytes(rng.randint(1, 3000))
+            path = rng.choice(paths)
+            files[path] = blob(rng, path, rng.randint(1, 3000))
         elif op == 'copy':
             src = rng.choice(paths)
             files[f'{rng.choice(DIRS)}copy{rng.randint(0, 99)}_{src.rsplit("/", 1)[-1]}'] = files[src]
@@ -39,13 +51,14 @@ def mutate(rng, files, history):
             files.pop(rng.choice(paths))
         elif op == 'swap' and len(paths) > 1:
             a, b = rng.sample(paths, 2)
-            files[a], files[b] = files[b], files[a]
+            if a.rsplit('.', 1)[-1] == b.rsplit('.', 1)[-1]:  # an image's bytes are no label
+                files[a], files[b] = files[b], files[a]
         elif op == 'dup':
-            data = files[rng.choice(paths)]
+            src = rng.choice(paths)
             for i in range(rng.randint(2, 5)):
-                files[f'dup/{i}_{rng.randint(0, 99)}.json'] = data
+                files[f'dup/{i}_{rng.randint(0, 99)}.{src.rsplit(".", 1)[-1]}'] = files[src]
         elif op == 'empty':
-            files[f'{rng.choice(DIRS)}empty{rng.randint(0, 9)}.json'] = b''
+            files[f'{rng.choice(DIRS)}empty{rng.randint(0, 9)}.json'] = b'{"shapes": []}'
         elif op == 'revert' and history:
             return dict(rng.choice(history))
     # keep names that collide only by case or as file vs folder out of the model (the import refuses them)
@@ -57,7 +70,7 @@ def mutate(rng, files, history):
             continue
         seen.add(key)
         clean[p] = files[p]
-    return clean or {'fallback.json': b'{}'}
+    return clean or {'fallback.json': b'{"shapes": []}'}
 
 
 def entries_of(root, files):

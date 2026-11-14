@@ -90,7 +90,7 @@ class FakeApi:
         return len(data)
 
     # datasets and versions
-    def create_dataset(self, name, site='', line='', kind='pool', note=''):
+    def create_dataset(self, name, site='', line='', kind='pool', note='', classes=None):
         self.datasets[name] = []
         return self.dataset(name)
 

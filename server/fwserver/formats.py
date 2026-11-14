@@ -143,6 +143,73 @@ def parse_txt(text: str, classes: List[str]):
     return label
 
 
+# --- the class table of a data pool -----------------------------------------------------------------------
+CLASS_LISTS = frozenset({'classes.txt', 'classes.names', 'obj.names'})  # one class name per line, by number
+
+
+def class_kind(path: str) -> Optional[str]:
+    """How a file of a pool speaks of classes: 'list' (a classes.txt), 'json' or 'txt' (a label), None (not)."""
+    name = path.rsplit('/', 1)[-1].lower()
+    if name in CLASS_LISTS:
+        return 'list'
+    if name.endswith('.json') and name != 'mask_colors.json':
+        return 'json'
+    if name.endswith('.txt'):
+        return 'txt'
+    return None
+
+
+def label_classes(kind: str, data: bytes, classes: List[str]) -> Tuple[Optional[str], List[str]]:
+    """A file of a data pool against the pool's class table: (why it cannot be read, or None; the classes it
+    names that are not in the table, in file order, each once). A LiteAnno / X-AnyLabeling label names its
+    classes (shapes[].label, exactly as written); a YOLO txt numbers them (the first field of a row is a
+    position in the table, and a number past its end is the class '编号 n'); a classes.txt must be the table
+    or its beginning, since the numbers of the txt labels beside it stand for its names. Only classes are
+    checked: shapes and coordinates are checked when a snapshot is made (trainsets.py)."""
+    try:
+        text = data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return '不是 UTF-8 文本', []
+    if kind == 'list':
+        names = [n.strip() for n in text.splitlines()]
+        while names and not names[-1]:
+            names.pop()
+        for i, n in enumerate(names):
+            if i >= len(classes):
+                return f'有 {len(names)} 个类别，数据池的类别表只有 {len(classes)} 个', []
+            if n != classes[i]:
+                return f'第 {i + 1} 行是 {n or "空行"}，数据池类别表的第 {i + 1} 个是 {classes[i]}', []
+        return None, []
+    known = set(classes)
+    unknown: Dict[str, None] = {}
+    if kind == 'json':
+        try:
+            doc = json.loads(text)
+        except ValueError as e:
+            return f'不是合法的 JSON（{e}）', []
+        shapes = doc.get('shapes') if isinstance(doc, dict) else None
+        if not isinstance(shapes, list):
+            return '不是 LiteAnno / X-AnyLabeling 标注（没有 shapes 列表）', []
+        for shape in shapes:
+            name = shape.get('label') if isinstance(shape, dict) else None
+            if not isinstance(name, str) or not name:
+                return '有形状没有类别名', []
+            if name not in known:
+                unknown.setdefault(name)
+        return None, list(unknown)
+    for n, row in enumerate(text.splitlines(), start=1):
+        fields = row.split()
+        if not fields:
+            continue
+        try:
+            cid = int(fields[0])
+        except ValueError:
+            return f'第 {n} 行的类别编号不是整数', []
+        if not 0 <= cid < len(classes):
+            unknown.setdefault(f'编号 {cid}')
+    return None, list(unknown)
+
+
 def remap_json(text: str, class_map: Dict[str, str]) -> Tuple[Optional[str], Counter]:
     """A LiteAnno / X-AnyLabeling label with its class names changed by class_map (old -> new; an empty new name
     drops the shape, which makes it background): the new text, or None when no shape is in the map, and how

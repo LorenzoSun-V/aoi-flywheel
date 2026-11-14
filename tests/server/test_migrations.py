@@ -22,7 +22,8 @@ def test_migrate_once_then_nothing(empty_db):
     assert db.migrate(empty_db) == ['0001_init.sql', '0002_trainsets.sql', '0003_models.sql', '0004_optional_code.sql',
                                     '0005_jobs.sql', '0006_eval_jobs.sql', '0007_predictions.sql',
                                     '0008_version_changes.sql', '0009_events_roles.sql', '0010_batches.sql',
-                                    '0011_batch_prelabel.sql', '0012_labels.sql', '0013_sites.sql']
+                                    '0011_batch_prelabel.sql', '0012_labels.sql', '0013_sites.sql',
+                                    '0014_classes.sql']
     assert db.migrate(empty_db) == []
     with db.connect(empty_db) as c:
         assert db.schema_problems(c) == []
@@ -62,7 +63,7 @@ def test_what_existed_becomes_the_register_of_sites(empty_db, monkeypatch):
                       "now() + %s * interval '1 second')", (name, site, line, kind, u, i))
         c.execute("INSERT INTO models (name, site, line, task, created_by) VALUES ('m1', '苏州', '一线', 'det', %s)", (u,))
     monkeypatch.setattr(db, 'migration_files', lambda: files)
-    assert db.migrate(empty_db) == ['0013_sites.sql']
+    assert db.migrate(empty_db) == ['0013_sites.sql', '0014_classes.sql']
     with db.connect(empty_db) as c:
         got = [(r['site'], r['line']) for r in c.execute(
             'SELECT s.code AS site, l.code AS line FROM sites s LEFT JOIN lines l ON l.site_id = s.id '

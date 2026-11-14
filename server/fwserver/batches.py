@@ -130,6 +130,11 @@ def _find(conn, name: str, lock: bool = False) -> dict:
     return row
 
 
+def _pool(conn, b: dict) -> dict:
+    """The dataset the batch is for (id, name, kind)."""
+    return conn.execute('SELECT id, name, kind FROM datasets WHERE id = %s', (b['pool_id'],)).fetchone()
+
+
 def _latest(conn, b: dict) -> dict:
     return conn.execute('SELECT id, number FROM versions WHERE dataset_id = %s ORDER BY number DESC LIMIT 1',
                         (b['dataset_id'],)).fetchone()
@@ -176,9 +181,10 @@ def _reviewer(conn, name: str) -> dict:
     return u
 
 
-def _check_content(store: Store, manifest_sha256: str, allow_other_files: bool, force: bool) -> List[Tuple[str, str, int]]:
+def _check_content(conn, store: Store, pool: dict, manifest_sha256: str, allow_other_files: bool,
+                   force: bool) -> List[Tuple[str, str, int]]:
     """The checks of fw dataset import on the batch's folder, at upload: what would stop it from entering the
-    pool is refused now, not after the review."""
+    pool is refused now, not after the review. That includes the pool's class table."""
     data = store.read(check_digest(manifest_sha256))
     if data is None:
         raise DatasetError(400, '批次的文件清单还没有上传')
@@ -193,6 +199,9 @@ def _check_content(store: Store, manifest_sha256: str, allow_other_files: bool, 
         raise DatasetError(400, '没有上传批次：' + '；'.join(reasons))
     if not any(PurePosixPath(p).suffix.lower() in IMAGE_EXTS for p, _, _ in entries):
         raise DatasetError(400, '目录里没有图片')
+    problem = datasets.class_problems(conn, store, pool, entries)
+    if problem:
+        raise DatasetError(400, '没有上传批次：' + problem)
     return entries
 
 
@@ -227,7 +236,7 @@ def create(conn, store: Store, user: dict, name: str, pool: str, dir: str, manif
                                         f'给那个批次上传新的一版（fw batch update {o["name"]}），或换一个目录名称')
 
     no_other(conn)  # said before anything is checked or made; decided under the lock in record()
-    _check_content(store, manifest_sha256, allow_other_files, force)
+    _check_content(conn, store, target, manifest_sha256, allow_other_files, force)
     asked = _reviewer(conn, reviewer) if reviewer else None
 
     def record(c, version_id: int) -> None:
@@ -266,7 +275,7 @@ def revise(conn, store: Store, user: dict, name: str, manifest_sha256: str, labe
     note = _text(note, '说明', MAX_COMMENT)
     b = _find(conn, name)
     _may_revise(user, b)
-    _check_content(store, manifest_sha256, allow_other_files, force)
+    _check_content(conn, store, _pool(conn, b), manifest_sha256, allow_other_files, force)
     asked = _who(conn, b, reviewer) if reviewer else None
     latest = _latest(conn, b)
 
@@ -380,7 +389,7 @@ def approve(conn, store: Store, user: dict, name: str, comment: str = '', revisi
     _may_review(user, b, ('review',), '通过')
     latest = _latest(conn, b)
     _same_revision(b, latest, revision)
-    _check_content(store, manifest_sha256, allow_other_files, force)
+    _check_content(conn, store, _pool(conn, b), manifest_sha256, allow_other_files, force)
 
     def record(c, version_id: int) -> None:
         now = _find(c, name, lock=True)

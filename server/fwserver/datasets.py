@@ -12,11 +12,11 @@ A failure anywhere leaves no version behind; objects already uploaded stay and a
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, List, Optional, Set, Tuple
+from typing import Any, Callable, Collection, Dict, List, Optional, Set, Tuple
 
 from fw.contract import LABEL_HELP, ContractError, classify_changes, is_label, parse_manifest, split_ref
 
-from . import events, labels, sites
+from . import events, formats, labels, sites
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
@@ -217,33 +217,172 @@ def list_datasets(conn, site: str = '', line: str = '', q: str = '', kind: str =
 
 
 def get_dataset(conn, name: str) -> dict:
+    """With 'classes': the class table of a pool ([] for any other kind, and for a pool that has none)."""
     rows = conn.execute(_DATASET + ' WHERE lower(d.name) = lower(%s)', (name,)).fetchall()
     if not rows:
         raise DatasetError(404, f'没有数据集 {name}；先用 fw dataset create 建')
-    return _datasets(conn, rows)[0]
+    out = _datasets(conn, rows)[0]
+    out['classes'] = classes_of(conn, out['id'])
+    return out
 
 
 def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = '', kind: str = 'pool',
-                   note: str = '', internal: bool = False) -> dict:
-    """internal: also allow kind 'trainset' (only trainsets.py creates those)."""
+                   note: str = '', internal: bool = False, classes: Optional[List[str]] = None) -> dict:
+    """internal: also allow kind 'trainset' (only trainsets.py creates those). classes: the class table of a
+    new pool, written in the same transaction."""
     if not NAME.match(name or ''):
         raise DatasetError(400, '名称只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
     if kind not in KINDS and not (internal and kind == 'trainset'):
         raise DatasetError(400, f'类型只能是 {"、".join(KINDS)}')
+    if classes is not None:
+        if kind != 'pool':
+            raise DatasetError(400, '只有数据池有类别表')
+        classes = check_class_names(classes)
     if not internal:  # a data pool belongs to a line; a test set may belong to none
         site, line = place(conn, site, line, required=kind == 'pool')
     with conn.transaction():
-        if not _insert_dataset(conn, user_id, name, site, line, kind, note):
+        dataset_id = _insert_dataset(conn, user_id, name, site, line, kind, note)
+        if dataset_id is None:
             raise DatasetError(409, f'{name} 已经存在（数据集、训练集快照和标注批次共用名称，不分大小写）')
-        events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line)
+        if classes:
+            _insert_classes(conn, user_id, dataset_id, 0, classes)
+        events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line,
+                      **({'classes': classes} if classes else {}))
     return get_dataset(conn, name)
 
 
-def _insert_dataset(conn, user_id: int, name: str, site: str, line: str, kind: str, note: str) -> bool:
-    """False when the name is taken (also by someone committing it meanwhile: never a unique-key error)."""
-    return conn.execute('INSERT INTO datasets (name, site, line, kind, note, created_by) '
-                        'VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id',
-                        (name, site, line, kind, note, user_id)).fetchone() is not None
+def _insert_dataset(conn, user_id: int, name: str, site: str, line: str, kind: str, note: str) -> Optional[int]:
+    """The new dataset's id; None when the name is taken (also by someone committing it meanwhile: never a
+    unique-key error)."""
+    row = conn.execute('INSERT INTO datasets (name, site, line, kind, note, created_by) '
+                       'VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id',
+                       (name, site, line, kind, note, user_id)).fetchone()
+    return None if row is None else row['id']
+
+
+# --- the class table of a data pool ----------------------------------------------------------------------
+# Every label that goes into a pool may only name classes of its table (migration 0014). The table is set
+# when the pool is made, or later for a pool from before the tables; it only grows at its end, since a class's
+# number is its position. What a file says about classes is read by formats.label_classes.
+MAX_CLASSES = 1000
+CLASS_NAME_MAX = 128
+CLASS_EXAMPLES = 20  # classes, and files that cannot be read, named in a refusal
+
+
+def classes_of(conn, dataset_id: int) -> List[str]:
+    return [r['name'] for r in conn.execute('SELECT name FROM dataset_classes WHERE dataset_id = %s '
+                                            'ORDER BY position', (dataset_id,))]
+
+
+def check_class_names(names: Any, existing: Collection[str] = ()) -> List[str]:
+    """Names to add at the end of a class table that already holds existing."""
+    if not isinstance(names, list) or not names:
+        raise DatasetError(400, '请填写类别，每行一个')
+    if len(existing) + len(names) > MAX_CLASSES:
+        raise DatasetError(400, f'类别表最多 {MAX_CLASSES} 个类别')
+    taken = {n.lower(): n for n in existing}
+    added: Dict[str, str] = {}
+    for n in names:
+        if (not isinstance(n, str) or not n or n != n.strip() or any(c in n for c in '\t\r\n')
+                or len(n) > CLASS_NAME_MAX):
+            raise DatasetError(400, f'类别名不能为空，不能有首尾空格、制表符或换行，最多 {CLASS_NAME_MAX} 个字符：{n!r}')
+        if n.lower() in taken:
+            raise DatasetError(400, f'类别表里已有 {taken[n.lower()]}，不能再加 {n}（类别名不分大小写）')
+        if n.lower() in added:
+            raise DatasetError(400, f'{added[n.lower()]} 和 {n} 重复（类别名不分大小写）')
+        added[n.lower()] = n
+    return names
+
+
+def _insert_classes(conn, user_id: int, dataset_id: int, start: int, names: List[str]) -> None:
+    for i, n in enumerate(names):
+        conn.execute('INSERT INTO dataset_classes (dataset_id, position, name, created_by) VALUES (%s, %s, %s, %s)',
+                     (dataset_id, start + i, n, user_id))
+
+
+def add_classes(conn, store: Store, user_id: int, name: str, names: Any) -> dict:
+    """Add classes at the end of a pool's table. The first table of a pool that has versions already is
+    checked against its newest version: 'latest_check' says what in it does not fit (None: all of it fits), so
+    that it can be put right with the next upload, which is checked in full (class_problems)."""
+    with conn.transaction():
+        d = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
+                         (name,)).fetchone()
+        if d is None:
+            raise DatasetError(404, f'没有数据集 {name}')
+        if d['kind'] != 'pool':
+            raise DatasetError(400, f'{d["name"]} 不是数据池；只有数据池有类别表')
+        existing = classes_of(conn, d['id'])
+        names = check_class_names(names, existing)
+        _insert_classes(conn, user_id, d['id'], len(existing), names)
+        events.record(conn, user_id, 'dataset.classes', d['name'], added=names, count=len(existing) + len(names))
+    dataset = get_dataset(conn, d['name'])
+    out = {'dataset': dataset, 'added': names, 'latest_check': None}
+    if not existing and dataset['latest'] is not None:
+        latest = dataset['latest']
+        problem = class_problems(conn, store, dataset, version_files(conn, latest['id']))
+        out['latest_check'] = {'ref': latest['ref'], 'problem': problem}
+    return out
+
+
+def checked_contents(conn, dataset_id: int, version_id: Optional[int]) -> Set[str]:
+    """The labels and class lists (sha256) of a pool's version that was checked against its class table when
+    it was made, i.e. made after the table's first class: what the next version takes from it unchanged need
+    not be read again. Empty for a version from before the table: the next one is checked in full."""
+    if version_id is None:
+        return set()
+    rows = conn.execute(
+        "SELECT DISTINCT encode(f.sha256, 'hex') AS d FROM version_files f JOIN versions v ON v.id = f.version_id "
+        'WHERE f.version_id = %s AND v.created_at > (SELECT min(created_at) FROM dataset_classes WHERE dataset_id = %s) '
+        "AND (lower(f.path) LIKE '%%.json' OR lower(f.path) LIKE '%%.txt' OR lower(f.path) LIKE '%%.names')",
+        (version_id, dataset_id)).fetchall()
+    return {r['d'] for r in rows}
+
+
+def class_problems(conn, store: Store, pool: dict, entries: List[Tuple[str, str, int]],
+                   checked: Collection[str] = ()) -> Optional[str]:
+    """Why these files may not be a version of the pool (or a batch for it), against the pool's class table;
+    None when they may, and always for a dataset that is not a pool. checked: contents that were checked
+    before (checked_contents) and are not read again. A file not in the store is passed over: the version is
+    refused for it anyway (create_version)."""
+    if pool['kind'] != 'pool':
+        return None
+    classes = classes_of(conn, pool['id'])
+    if not classes:
+        return f'数据池 {pool["name"]} 还没有类别表；请先在网页的数据池页面填写类别表，再上传'
+    unknown: Dict[str, List[str]] = {}
+    unreadable: List[str] = []
+    seen: Dict[Tuple[str, str], Tuple[Optional[str], List[str]]] = {}
+    for path, digest, _ in entries:
+        kind = formats.class_kind(path)
+        if kind is None or digest in checked:
+            continue
+        if (kind, digest) not in seen:
+            data = store.read(digest)
+            if data is None:
+                continue
+            seen[kind, digest] = formats.label_classes(kind, data, classes)
+        reason, names = seen[kind, digest]
+        if reason:
+            unreadable.append(f'{path}（{reason}）')
+        for n in names:
+            unknown.setdefault(n, []).append(path)
+    if not unknown and not unreadable:
+        return None
+    lower = {c.lower(): c for c in classes}
+    parts = []
+    if unknown:
+        items = []
+        for n, paths in list(unknown.items())[:CLASS_EXAMPLES]:
+            hint = f'，类别表里是 {lower[n.lower()]}' if n.lower() in lower else ''
+            items.append(f'{n}（{len(paths)} 个文件，例如 {"、".join(paths[:3])}{hint}）')
+        more = f'，共 {len(unknown)} 个' if len(unknown) > CLASS_EXAMPLES else ''
+        parts.append(f'标注里有类别表以外的类别：{"；".join(items)}{more}')
+    if unreadable:
+        more = '等' if len(unreadable) > CLASS_EXAMPLES else ''
+        parts.append(f'{len(unreadable)} 个文件无法按类别表读取：{"；".join(unreadable[:CLASS_EXAMPLES])}{more}')
+    shown = '、'.join(classes[:CLASS_EXAMPLES]) + ('…' if len(classes) > CLASS_EXAMPLES else '')
+    return (f'不符合数据池 {pool["name"]} 的类别表（{len(classes)} 类：{shown}）。' + '。'.join(parts)
+            + '。请改正后重新上传；确属新类别的，请先在数据池页面将其添加到类别表末尾')
 
 
 def list_versions(conn, name: str) -> List[dict]:
@@ -354,7 +493,8 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
                    expect_latest_id: Optional[int], source: str = '', note: str = '',
                    before_freeze: Optional[Callable[[], None]] = None, trainset: bool = False,
                    record: Optional[Callable[[Any, int], None]] = None, new_dataset: Optional[dict] = None,
-                   inherited: Optional[Set[Tuple[str, str, int]]] = None, batch: bool = False) -> dict:
+                   inherited: Optional[Set[Tuple[str, str, int]]] = None, batch: bool = False,
+                   classes_checked: bool = False) -> dict:
     """trainset: the dataset must be a trainset (and only then may it be one); batch: the same for a labelling
     batch (batches.py); record(conn, version_id) writes
     the caller's own rows (a trainset's, or how the version was changed from its parent) inside the transaction,
@@ -362,7 +502,9 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
     kind, note): create the dataset in the same transaction, so a failed first version leaves no name behind;
     if the name was taken meanwhile, nothing is created (409). inherited: entries taken unchanged from the
     frozen parent version (changes.py): they were checked when that version was made, so the store is not asked
-    about each of them again (a file lost since then is found by fw-server verify, for both versions)."""
+    about each of them again (a file lost since then is found by fw-server verify, for both versions).
+    The version of a pool is refused if its labels do not fit the pool's class table (class_problems), unless
+    classes_checked: the caller checked them already (changes.plan)."""
     check_digest(manifest_sha256)
     data = store.read(manifest_sha256)
     if data is None:
@@ -378,15 +520,22 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
     if bad:
         examples = '；'.join(f'{p}（{"没有" if got is None else f"大小 {got}，应为 {s}"}）' for p, s, got in bad[:5])
         raise DatasetError(400, f'有 {len(bad)} 个文件服务器上还没有或大小不对，没有建版本；重新运行导入会补传。例如 {examples}')
+    target = None if classes_checked else conn.execute(
+        'SELECT d.id, d.name, d.kind, (SELECT v.id FROM versions v WHERE v.dataset_id = d.id ORDER BY v.number DESC '
+        'LIMIT 1) AS latest_id FROM datasets d WHERE lower(d.name) = lower(%s)', (name,)).fetchone()
+    if target is not None and target['kind'] == 'pool':
+        # a table only grows, so what fits it now still fits when the version is made below
+        problem = class_problems(conn, store, target, entries, checked_contents(conn, target['id'], target['latest_id']))
+        if problem:
+            raise DatasetError(400, '没有建版本：' + problem)
     try:
         store.flush()
     except StoreError as e:
         raise DatasetError(503, str(e)) from None
     total = sum(s for _, _, s in entries)
     with conn.transaction():
-        if new_dataset is not None and not _insert_dataset(conn, user_id, name, new_dataset['site'],
-                                                           new_dataset['line'], new_dataset['kind'],
-                                                           new_dataset['note']):
+        if new_dataset is not None and _insert_dataset(conn, user_id, name, new_dataset['site'], new_dataset['line'],
+                                                       new_dataset['kind'], new_dataset['note']) is None:
             again = '请重新运行 fw trainset create' if trainset else '换一个批次名称' if batch else '请重新运行导入'
             raise DatasetError(409, f'{name} 在这期间被别人建了；{again}')
         dataset = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',

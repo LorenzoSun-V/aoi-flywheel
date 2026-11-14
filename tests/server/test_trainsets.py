@@ -3,14 +3,17 @@ database keeps frozen."""
 import json
 import struct
 import uuid
+from unittest import mock
 
 import psycopg
+import helpers
 import pytest
 
 from helpers import register_place, quiet, read_tree, write
 from fw import cli as fw_cli
 from fw import ops
 from fw.api import ApiError
+from fwserver import datasets as server_datasets
 from fwserver import trainsets
 from fwserver.trainsets import Options, Sample
 
@@ -42,13 +45,23 @@ def status_of(call):
     return 200
 
 
-def pool(api, tmp_path, files: dict, site='SES', line='TX', name=None) -> str:
-    """A pool dataset with one version holding files ({path: bytes}); returns its name."""
+def pool(api, tmp_path, files: dict, site='SES', line='TX', name=None, classes=helpers.CLASSES) -> str:
+    """A pool dataset with one version holding files ({path: bytes}) and the class table classes; returns its
+    name."""
     name = name or f'P-{uuid.uuid4().hex[:8]}'
     register_place(site, line)
-    api.create_dataset(name, site, line, 'pool' if site else 'other', '')  # a pool always has a line
+    api.create_dataset(name, site, line, 'pool' if site else 'other', '',  # a pool always has a line
+                       classes=classes if site else None)
     add_version(api, tmp_path, name, files)
     return name
+
+
+def old_pool(api, tmp_path, files: dict, **kw) -> str:
+    """A pool as pools were before they had class tables (migration 0014): no table, and a version whose labels
+    were never checked against one. Snapshots and evaluations still meet such versions, so they must still
+    refuse labels that do not fit."""
+    with mock.patch.object(server_datasets, 'class_problems', return_value=None):
+        return pool(api, tmp_path, files, classes=None, **kw)
 
 
 def add_version(api, tmp_path, name, files: dict) -> dict:
@@ -393,7 +406,7 @@ def test_split_file(api, cache, tmp_path):
     ({'a.png': b'1', 'a.json': label('scratch'), 'a.txt': b'0 0.5 0.5 0.1 0.1\n'}, '同时有 JSON 和 txt'),
 ])
 def test_bad_labels_are_refused(api, tmp_path, files, message):
-    src = pool(api, tmp_path, files)
+    src = old_pool(api, tmp_path, files)
     name = f'T-{uuid.uuid4().hex[:8]}'
     body = {'sources': [f'{src}@1'], 'classes': CLASSES}
     preview = api.preview_trainset(name, body)
@@ -733,7 +746,7 @@ def test_class_map_on_json_keeps_the_rest_of_the_file(api, cache, tmp_path):
     files = {'d.png': png(uuid.uuid4().hex), 'd.json': raw,
              'e.png': png(uuid.uuid4().hex), 'e.json': label('DL2', 'DL'),
              'f.png': png(uuid.uuid4().hex), 'f.json': label('DL')}
-    src = pool(api, tmp_path, files)
+    src = pool(api, tmp_path, files, classes=['others', 'DL1', 'DL2', 'DL'])
     name = f'T-{uuid.uuid4().hex[:8]}'
     v = make(api, name, [f'{src}@1'], ['DL'], val=0, class_map={'others': '', 'DL1': 'DL', 'DL2': 'DL'})
     assert v['trainset']['counts']['train']['boxes'] == {'DL': 4}
@@ -752,7 +765,7 @@ def test_class_map_on_json_keeps_the_rest_of_the_file(api, cache, tmp_path):
 def test_class_map_snapshot_continues_without_relabeling(api, tmp_path):
     files = {'b1/images/a.png': png(uuid.uuid4().hex), 'b1/labels/a.txt': (yolo_line(4) + yolo_line(0)).encode(),
              'b1/images/j.png': png(uuid.uuid4().hex), 'b1/images/j.json': label('others', 'Crack')}
-    src = pool(api, tmp_path, files)
+    src = pool(api, tmp_path, files, classes=SES5)
     name = f'T-{uuid.uuid4().hex[:8]}'
     kw = dict(label_classes=SES5, class_map={'others': '', 'Crack': 'Scratch'})
     make(api, name, [f'{src}@1'], SES4, val=0, **kw)
@@ -770,7 +783,7 @@ def test_a_new_class_map_on_a_continued_snapshot_counts_as_relabeled(api, tmp_pa
     # review of #10: the labels the snapshot freezes are compared, not the pool's files before the map
     files = {'x.png': png(uuid.uuid4().hex), 'x.txt': yolo_line(0).encode(),
              'y.png': png(uuid.uuid4().hex), 'y.json': label('A')}
-    src = pool(api, tmp_path, files)
+    src = pool(api, tmp_path, files, classes=['A', 'B'])
     name = f'T-{uuid.uuid4().hex[:8]}'
     make(api, name, [f'{src}@1'], ['A', 'B'], val=0)
     add_version(api, tmp_path, src, dict(files, **{'new.png': png(uuid.uuid4().hex)}))
@@ -784,7 +797,7 @@ def test_a_txt_with_the_bytes_of_a_json_is_read_as_txt(api, tmp_path):
     # review 2 of #10: the parsed labels were cached by content alone, so b.txt took a.json's boxes
     files = {'a.png': png(uuid.uuid4().hex), 'a.json': label('scratch'),
              'b.png': png(uuid.uuid4().hex), 'b.txt': label('scratch')}
-    src = pool(api, tmp_path, files)
+    src = old_pool(api, tmp_path, files)  # a pool with a class table refuses that txt
     preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES,
                                                                 'label_source': 'txt'})
     assert any('b.txt' in p and '不是整数' in p for p in preview['problems']), preview['problems']
@@ -827,7 +840,7 @@ def test_a_class_map_on_a_json_with_a_lone_surrogate(api, cache, tmp_path):
     doc = json.loads(label('A'))
     doc['shapes'][0]['description'] = '\udc80'
     raw = json.dumps(doc).encode()  # ensure_ascii: the file holds the escape \udc80
-    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': raw})
+    src = pool(api, tmp_path, {'a.png': png(uuid.uuid4().hex), 'a.json': raw}, classes=['A', 'B'])
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'], ['B'], val=0, class_map={'A': 'B'})
     tree = fetch(api, cache, v['ref'], tmp_path / 'g', fmt='json')
     shape = json.loads(tree['train/a.json'])['shapes'][0]

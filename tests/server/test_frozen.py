@@ -18,7 +18,7 @@ def quiet(_):
 @pytest.fixture
 def frozen(api, dataset, tmp_path):
     write(tmp_path / 'v1', 'a.bmp', b'1')
-    write(tmp_path / 'v1', 'a.json', b'{}')
+    write(tmp_path / 'v1', 'a.json', b'{"shapes": []}')
     return ops.import_folder(api, dataset, tmp_path / 'v1', echo=quiet)['id']
 
 

@@ -9,6 +9,7 @@ import struct
 import zlib
 from datetime import datetime, timedelta, timezone
 
+import helpers
 import httpx
 import pytest
 
@@ -185,7 +186,7 @@ def write_tree(root: Path, files: dict) -> Path:
 def test_the_folder_check_is_the_one_of_fw_dataset_import(service, tokens, tmp_path):
     from fw.checks import scan_folder
     files = {'A/a.png': b'1', 'A/a.bmp': b'2', 'A/a.json': label('scratch'), 'A/b.png': b'3', 'B/b.png': b'4',
-             'B/x.json': b'{}', 'notes.docx': b'5', 'A/Thumbs.db': b'6', 'classes.txt': b'scratch\n',
+             'B/x.json': b'{"shapes": []}', 'notes.docx': b'5', 'A/Thumbs.db': b'6', 'classes.txt': b'scratch\n',
              'C/images/c.png': b'7', 'C/labels/c.txt': b'0 0.5 0.5 0.1 0.1\n', 'D/x.png': b'8', 'd/x.png': b'9'}
     root = write_tree(tmp_path / 'top', files)
     local = scan_folder(root)
@@ -215,7 +216,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     from helpers import quiet
     name = f'web-{os.urandom(4).hex()}'
     dataset = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(dataset, 'SES', 'TX', 'pool', '')
+    api.create_dataset(dataset, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     ops.import_folder(api, dataset, write_tree(tmp_path / 'd', {'a/x.png': real_png(64, 32, 7)}), echo=quiet)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
@@ -484,7 +485,7 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
     from helpers import quiet
     seed = int.from_bytes(os.urandom(2), 'big')
     name = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    api.create_dataset(name, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     ops.import_folder(api, name, write_tree(tmp_path / 'one', {'a.png': real_png(64, 32, seed)}), echo=quiet)
     ops.import_folder(api, name, write_tree(tmp_path / 'two', {'a.png': real_png(64, 32, seed + 1)}), echo=quiet)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
@@ -502,6 +503,31 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_class_table_of_a_pool_is_set_and_grown_in_the_browser(service, tokens, api, tmp_path):
+    from test_trainsets import old_pool
+    seed = int.from_bytes(os.urandom(2), 'big')
+    name = old_pool(api, tmp_path, {'A/a.png': real_png(64, 32, seed), 'A/a.json': label('Scratch'),
+                                    'B/b.png': real_png(64, 32, seed + 1), 'B/b.json': label('dent')})
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'classes.cjs'), service.url + '/', tokens['algo'], tokens['field'], name,
+                        str(shots)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    for page in ('add', 'upload'):  # refused before a folder is picked, not after it is uploaded
+        assert '尚未填写类别表，无法上传' in seen[page], seen[page]
+    assert '尚未填写类别表' in seen['none'] and seen['uploadButtons'] == [] and seen['formOpen'] is True
+    assert seen['button'] == '保存类别表' and '类别表里已有' not in seen['duplicate'] and '重复' in seen['duplicate']
+    assert seen['saved'] == ['scratch', 'dent'] and seen['noneAfter'] is False and seen['formOpenAfter'] is False
+    assert f'{name}@1 中有不符合类别表的标注' in seen['check'] and 'Scratch' in seen['check'] and 'A/a.json' in seen['check']
+    assert seen['buttonAfter'] == '添加到类别表末尾'
+    assert seen['added'] == ['scratch', 'dent', 'crack'] and seen['checkAfter'] is False
+    assert seen['fieldRows'] == ['scratch', 'dent', 'crack'] and seen['fieldForm'] is False
+    assert api.dataset(name)['classes'] == ['scratch', 'dent', 'crack']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, api, model, snapshot, database, tmp_path):  # noqa: F811
     """A test set of no line, registering and renaming a line, retiring a label, candidate and deprecated, every
     change of a large comparison; refused cases say why; a field account gets none of the buttons."""
@@ -510,12 +536,12 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
     from test_models import files_in, register
     seed = int.from_bytes(os.urandom(2), 'big')
     labelled = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(labelled, 'SES', 'TX', 'pool', '')
+    api.create_dataset(labelled, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     ops.import_folder(api, labelled, write_tree(tmp_path / 'one', {'a.png': real_png(8, 8, seed)}), echo=quiet)
     api.add_label(labelled, 1, 'v0.1.0', '冷启动')
     mv = register(api, model, snapshot, files_in(tmp_path, 'web-tags'))
     big = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(big, 'SES', 'TX', 'pool', '')
+    api.create_dataset(big, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     ops.import_folder(api, big, write_tree(tmp_path / 'b1', {'old.png': real_png(3, 3, seed)}), echo=quiet)
     many = {f'd/{i:04d}.png': real_png(4, 4 + i // 256, seed + i) for i in range(510)}  # all different: no renames
     ops.import_folder(api, big, write_tree(tmp_path / 'b2', many), echo=quiet)
@@ -563,7 +589,7 @@ def test_a_pool_is_filled_from_folders_the_way_they_were_collected(service, toke
     day4 = write_tree(tmp_path / 'd' / '20261104', {'d.png': img(4), 'night/e.png': img(5)})
     loose = write_tree(tmp_path / 'l' / 'pool', {'x.png': img(6), '20261105/f.png': img(7)})
     pool = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(pool, 'SES', 'TX', 'pool', '')
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(['node', str(WEB_TESTS / 'folders.cjs'), service.url + '/', tokens['algo'], pool, str(shots),
@@ -742,7 +768,7 @@ def test_the_details_of_a_page_sit_behind_its_info_marks(service, tokens, api, t
     from helpers import quiet
     seed = int.from_bytes(os.urandom(2), 'big')
     name = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    api.create_dataset(name, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     ops.import_folder(api, name, write_tree(tmp_path / 'base', {'20261101/a.png': real_png(64, 32, seed),
                                                                 '20261101/a.json': label('scratch')}), echo=quiet)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
@@ -780,7 +806,7 @@ def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_p
     day = write_tree(tmp_path / '20261103', {'c.png': real_png(64, 32, seed + 2), 'c.json': label('dent'),
                                              'a_again.png': same, 'a_again.json': label('scratch', 'dent')})
     name = f'W-{os.urandom(4).hex()}'
-    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    api.create_dataset(name, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     v1 = ops.import_folder(api, name, base, echo=quiet)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
@@ -825,6 +851,7 @@ def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
                         str(one), str(two)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert '请填写数据池的类别表' in seen['noClasses']
     assert '图片和标注以外的文件' in seen['refused'] and '系统文件 1 个不入库' in seen['report']
     assert f'这是 {name} 的第一个版本' in seen['plan'] and '6 个文件' in seen['plan']
     assert seen['first'] == f'/v/{name}/1'
@@ -835,10 +862,10 @@ def test_a_folder_uploaded_from_the_browser(service, tokens, api, tmp_path):
     v1, v2 = api.version(name, 1), api.version(name, 2)
     assert v1['note'] == '第一批' and v1['source'] == '网页上传 one' and v2['parent']['ref'] == v1['ref']
     d = api.dataset(name)
-    assert (d['site'], d['line'], d['kind']) == ('SES', 'TX', 'pool')
+    assert (d['site'], d['line'], d['kind'], d['classes']) == ('SES', 'TX', 'pool', ['scratch', 'dent'])
     # the same version fw dataset import makes of the same folder: same manifest, every file readable
     other = f'{name}-cli'
-    api.create_dataset(other, 'SES', 'TX', 'pool', '')
+    api.create_dataset(other, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     for folder, v in ((one, v1), (two, v2)):
         mine = ops.import_folder(api, other, folder, allow_other_files=True, echo=quiet)
         assert mine['manifest_sha256'] == v['manifest_sha256']
@@ -853,7 +880,7 @@ def test_an_older_folder_check_answer_is_not_used(service, tokens, api, tmp_path
     b = write_tree(tmp_path / 'b', {'y/b.png': real_png(32, 32, seed + 1), 'readme.docx': b'notes',
                                     'y/Thumbs.db': b'junk'})
     name = f'R-{os.urandom(4).hex()}'
-    api.create_dataset(name, 'SES', 'TX', 'pool', '')
+    api.create_dataset(name, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     r = subprocess.run(['node', str(WEB_TESTS / 'race.cjs'), service.url + '/', tokens['algo'], name, str(a), str(b)],
                        capture_output=True, text=True, timeout=120, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -874,7 +901,7 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
                                                        'b.json': label('dent')})
     pool = f'W-{os.urandom(4).hex()}'
     name = f'B-{os.urandom(4).hex()}'
-    api.create_dataset(pool, 'SES', 'TX', 'pool', '')
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
     ops.import_folder(api, pool, base, echo=quiet)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
