@@ -1,13 +1,19 @@
 """Thumbnails of image objects (GET /api/v1/objects/<sha256>/thumb): made by the server, kept in a cache
 beside the store's objects, refused with a reason for what is not an image or too large."""
 import io
+import os
 import struct
+import threading
+import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+import pytest
 from PIL import Image
 
 from fw.api import Api
+from fwserver import thumbs
 
 
 def picture(fmt: str, w: int, h: int, mode: str = 'RGB', color=(40, 120, 200)) -> bytes:
@@ -75,6 +81,87 @@ def test_a_thumbnail_needs_an_account_that_may_download(service, api, tokens):
     for token in (None, 'not-a-token'):
         r = thumb(service, token, bmp)
         assert r.status_code == 401 and 'thumbs' not in r.text
+
+
+def turned_jpeg(exif_more: bytes = b'') -> bytes:
+    """A 400 x 200 JPEG, new each time, whose EXIF orientation (6) says it is shown turned upright; exif_more:
+    further entries."""
+    entries = [struct.pack('>HHI', 0x0112, 3, 1) + b'\x00\x06\x00\x00'] + ([exif_more] if exif_more else [])
+    ifd = struct.pack('>H', len(entries)) + b''.join(entries) + b'\x00' * 4
+    out = io.BytesIO()
+    Image.new('RGB', (400, 200), tuple(os.urandom(3))).save(out, 'JPEG', exif=b'Exif\x00\x00MM\x00*\x00\x00\x00\x08' + ifd)
+    return out.getvalue()
+
+
+def test_an_exif_pillow_cannot_write_back_still_turns_the_thumbnail(service, api, tokens):
+    nan = struct.pack('>HHI', 0x011a, 11, 1) + b'\x7f\xc0\x00\x00'  # a FLOAT that is not a number
+    image = opened(thumb(service, tokens['field'], api.put_bytes(turned_jpeg(nan))))
+    assert image.size == (128, 256)
+
+
+def test_an_exif_that_cannot_be_read_is_refused_with_its_reason(service, api, tokens, monkeypatch):
+    digest = api.put_bytes(turned_jpeg())
+
+    def broken(self):
+        raise struct.error('unpack requires a buffer of 12 bytes')
+    monkeypatch.setattr(Image.Image, 'getexif', broken)
+    r = thumb(service, tokens['field'], digest)
+    assert r.status_code == 415 and r.json()['detail'] == f'无法为文件 {digest[:12]} 生成缩略图：不是可识别的图片，或图片已损坏。'
+
+
+@pytest.mark.parametrize('fmt', ['GIF', 'PPM', 'TGA', 'ICO'])
+def test_only_the_image_formats_of_a_dataset_are_decoded(service, api, tokens, fmt):
+    digest = api.put_bytes(picture(fmt, 64, 64))                 # an image, of a format no dataset holds
+    r = thumb(service, tokens['field'], digest)
+    assert r.status_code == 415 and '不是可识别的图片' in r.json()['detail']
+    assert opened(thumb(service, tokens['field'], api.put_bytes(picture('WEBP', 64, 32)))).size == (64, 32)
+
+
+def test_a_16_bit_frame_is_shrunk_before_it_is_converted(tmp_path, monkeypatch):
+    path = tmp_path / 'grey16.png'
+    Image.new('I;16', (3000, 2000), 0x4000).save(path)
+    seen = []
+    for name in ('convert', 'point'):
+        real = getattr(Image.Image, name)
+
+        def watched(self, *a, _real=real, **kw):
+            seen.append(self.size)
+            return _real(self, *a, **kw)
+        monkeypatch.setattr(Image.Image, name, watched)
+    shown = Image.open(io.BytesIO(thumbs.make(path, 256, 'grey16')))
+    assert shown.size == (256, 171) and abs(shown.getpixel((5, 5)) - 64) <= 2
+    assert seen and max(w * h for w, h in seen) <= 256 * 171  # never the 6-megapixel frame
+
+
+def test_thumbnails_are_made_a_few_at_a_time(service, api, tokens, monkeypatch):
+    digests = [api.put_bytes(picture('BMP', 64, 64, color=(i, 0, 0))) for i in range(3 * thumbs.AT_ONCE)]
+    real, lock, busy, most = thumbs.make, threading.Lock(), [0], [0]
+
+    def slow(*a):
+        with lock:
+            busy[0] += 1
+            most[0] = max(most[0], busy[0])
+        time.sleep(0.3)
+        with lock:
+            busy[0] -= 1
+        return real(*a)
+    monkeypatch.setattr(thumbs, 'make', slow)
+    with ThreadPoolExecutor(len(digests)) as pool:
+        done = list(pool.map(lambda d: thumb(service, tokens['field'], d), digests))
+    assert [r.status_code for r in done] == [200] * len(digests)
+    assert most[0] == thumbs.AT_ONCE
+
+
+def test_a_thumbnail_that_waits_too_long_for_its_turn_is_refused(service, api, tokens, monkeypatch):
+    digests = [api.put_bytes(picture('BMP', 32, 32, color=(0, i, 0))) for i in range(thumbs.AT_ONCE + 1)]
+    real = thumbs.make
+    monkeypatch.setattr(thumbs, 'WAIT', 0.2)
+    monkeypatch.setattr(thumbs, 'make', lambda *a: (time.sleep(1.0), real(*a))[1])
+    with ThreadPoolExecutor(len(digests)) as pool:
+        done = list(pool.map(lambda d: thumb(service, tokens['field'], d), digests))
+    refused = [r for r in done if r.status_code != 200]
+    assert len(refused) == 1 and refused[0].status_code == 503
+    assert refused[0].json()['detail'] == '服务器正在生成其他缩略图，请稍后刷新页面。'
 
 
 def test_what_is_no_image_or_too_large_is_refused_with_its_reason(service, api, tokens):
