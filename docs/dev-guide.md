@@ -51,7 +51,7 @@
 样板：`POST /api/v1/sites`。
 
 1. 逻辑写在所属的服务端模块里，函数第一个参数是数据库连接 `conn`，出错抛 `DatasetError(状态码, 消息)`（已有一个统一的处理把它变成 `{"detail": …}`）。常用的状态码：400 写法不对，403 没权限，404 没有，409 和已有的冲突。
-2. **数据库连接是 autocommit 的**（`db.make_pool`）：不开事务的话每条语句各自提交。模块里凡是改东西的函数，把全部改动和操作记录一起放进 `with conn.transaction():`，中途出错才会一起撤回。照 `datasets.add_place` 写。操作记录是 `events.record(conn, actor_id, '<对象>.<动作>', '<对什么>', 细节=…)`，新的动作先加进 `events.ACTIONS`，带上中文名字。
+2. **数据库连接是 autocommit 的**（`db.make_pool`）：不开事务的话每条语句各自提交。模块里凡是改东西的函数，把全部改动和操作记录一起放进 `with conn.transaction():`，中途出错才会一起撤回。照 `datasets.add_place` 写。操作记录是 `events.record(conn, actor_id, '<对象>.<动作>', '<对什么>', 细节=…)`，新的动作先加进 `events.ACTIONS`，带上中文名字（正式用语，例如「设定版本号」），再在网页 `app.js` 的 `eventText` 里加一个 `case` 把细节写成中文句子、在 `eventHref` 里写对象链接到哪一页；新的对象类别加进 `EVENT_GROUPS`（`test_every_recorded_operation_is_put_in_words_on_the_record_page` 会查）。
 3. `app.py` 加路由。它只做三件事：用 `Depends(need('<能力>'))` 定谁能调，`with conn() as c:` 从连接池借一个连接（**它不开事务**），调模块里的函数。请求体用 pydantic 的 `…Body` 类。
 4. 能力在 `auth.CAPS`：已有的能表达就用已有的；确实是新的一类操作才加一行，并且先问（见第 0 节）。加了要同时改 `tests/server/test_accounts.py` 的 `test_the_table_of_capabilities`，它逐个角色列出全部能力。没写 `need(...)` 的路由会被 `test_every_endpoint_asks_for_a_capability` 拦下。
 5. `client/fw/contract.py` 的 `API_LEVEL` 加一。`fw` 的新命令离不开这个接口时，把 `MIN_SERVER_LEVEL` 提到同一个数，这样连到旧服务器时用户看到的是「请升级服务器」而不是 404。

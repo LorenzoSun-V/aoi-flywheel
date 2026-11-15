@@ -38,6 +38,18 @@ def test_the_pages_never_open_the_browsers_own_boxes():
     assert not re.findall(r'\b(?:window\.)?(?:confirm|prompt|alert)\s*\(', code)
 
 
+
+def test_every_recorded_operation_is_put_in_words_on_the_record_page():
+    """The record page says each kind of event in a sentence (eventText) and names each group in its filter: an
+    action added to events.ACTIONS without them would show its raw fields."""
+    import re
+    from fwserver import events
+    code = (Path(__file__).resolve().parents[2] / 'server' / 'fwserver' / 'web' / 'app.js').read_text(encoding='utf-8')
+    said = code[code.index('export function eventText'):code.index('export function eventHref')]
+    assert sorted(set(events.ACTIONS) - set(re.findall(r"case '([a-z_]+\.[a-z_]+)'", said))) == []
+    groups = code[code.index('export const EVENT_GROUPS'):code.index('export function eventText')]
+    assert sorted({a.split('.')[0] for a in events.ACTIONS} - set(re.findall(r'\b([a-z_]+):', groups))) == []
+
 def test_the_pages_are_served_with_a_strict_policy(service):
     r = httpx.get(service.url + '/')
     assert r.status_code == 200 and r.headers['content-type'].startswith('text/html')
@@ -301,8 +313,10 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert '账号名只能用' in seen['refused']
     admin = tokens['admin_name']
     assert [(e[1], e[2], e[3]) for e in reversed(seen['events'])] == [
-        (admin, '新建账号', name), (admin, '改账号角色', name), (admin, '发凭据', name)]
-    assert 'from=algo' in seen['events'][1][4] and 'to=field' in seen['events'][1][4]
+        (admin, '新建账号', name), (admin, '修改账号角色', name), (admin, '发放凭据', name)]
+    assert [e[4] for e in reversed(seen['events'])][:2] == ['角色为算法工程师', '角色由算法工程师改为现场实施']
+    assert seen['events'][0][4].startswith('凭据 ') and seen['events'][0][4].endswith('（现场笔记本）')
+    assert seen['eventLinks'] == ['#/users'] * 3                              # an administrator opens the accounts
     assert seen['token'] not in json.dumps(seen['events'])
     # the account it made works, as a field account: it reads, and is offered nothing it may not do
     assert seen['fieldNav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '预测集'] and seen['fieldWho'] == [name, '现场实施']
