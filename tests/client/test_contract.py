@@ -154,7 +154,7 @@ def test_trainset_layouts():
     assert paths('all') == {p: d for p, d, _ in stored}
     with pytest.raises(ContractError):
         trainset_layout(stored, 'voc')
-    with pytest.raises(ContractError, match='不认识的路径'):
+    with pytest.raises(ContractError, match='无法识别的路径'):
         trainset_layout([('other/x.png', 'x', 1)], 'yolo-tree')
 
 
@@ -222,7 +222,7 @@ def test_the_flat_layout_keeps_train_negatives_apart():
         'test/labels/7.txt': ('l7', 'labels/test/SES/TX/field/7.txt')}  # a stored label stays, whatever it holds
     assert trainset_layout(stored, 'yolo') == [r[:3] for r in rows]
     assert trainset_layout(stored, 'yolo', short=True) == [r[:3] for r in rows]  # the same for every snapshot
-    with pytest.raises(ContractError, match='不认识的路径'):
+    with pytest.raises(ContractError, match='无法识别的路径'):
         trainset_flat([('images/other/x.png', 'x', 1)])
 
 
@@ -235,9 +235,9 @@ def test_names_that_collide_when_flat_are_listed():
               ('images/train/SES/TX/p/3.png', 'i8', 1), ('images/train/SES/TX/q/3.bmp', 'i9', 1)]  # no labels there
     rows, problems = trainset_flat(stored)
     assert problems == [
-        'images/test/SES/TX/2.png、images/test/SES/TX/x/2.bmp 平铺后同名不同扩展名，会共用一份标注',
-        'images/train/SES/TX/m/aB.png、images/train/SES/TX/n/Ab.png 平铺后是同一个文件',
-        'images/val/SES/TX/a/1.bmp、images/val/SES/TX/b/1.bmp 平铺后是同一个文件']
+        'images/test/SES/TX/2.png、images/test/SES/TX/x/2.bmp 平铺后同名不同扩展名，将共用一份标注',
+        'images/train/SES/TX/m/aB.png、images/train/SES/TX/n/Ab.png 平铺后为同一个文件',
+        'images/val/SES/TX/a/1.bmp、images/val/SES/TX/b/1.bmp 平铺后为同一个文件']
     with pytest.raises(ContractError, match='yolo-tree') as e:
         trainset_layout(stored, 'yolo')
     assert 'images/val/SES/TX/a/1.bmp、images/val/SES/TX/b/1.bmp' in str(e.value)

@@ -34,19 +34,19 @@ Entry = Tuple[str, str, int]
 MAX_DIRS = 100       # folders added or removed in one version
 EXAMPLES = 50        # how many of each finding a plan lists
 MAX_LABEL_READS = 20000  # labels read to compare duplicate images; beyond this the rest are not compared
-OPS = {'add': '新增', 'replace': '替换', 'remove': '去掉'}
+OPS = {'add': '新增', 'replace': '替换', 'remove': '移除'}
 
 
 def clean_dir(value: Any) -> str:
     """A folder of the pool as a relative path with / between its levels."""
     if not isinstance(value, str):
-        raise DatasetError(400, '目录写成文本')
+        raise DatasetError(400, '目录应为文本')
     d = value.replace('\\', '/').strip().strip('/')
     if not d:
-        raise DatasetError(400, '目录不能是空的')
+        raise DatasetError(400, '目录不能为空')
     problem = path_problem(d)
     if problem:
-        raise DatasetError(400, f'目录 {d} 用不了：{problem}')
+        raise DatasetError(400, f'目录 {d} 无效：{problem}')
     return d
 
 
@@ -225,11 +225,11 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     dataset = datasets.get_dataset(conn, name)
     if dataset['kind'] in datasets.MADE:
         what, how = datasets.MADE[dataset['kind']]
-        raise DatasetError(400, f'{dataset["name"]} 是{what}，只能用 {how} 建新版本')
+        raise DatasetError(400, f'{dataset["name"]} 是{what}，只能用 {how} 建立新版本')
     if not add and not remove:
-        raise DatasetError(400, '要写新增或去掉哪个目录')
+        raise DatasetError(400, '请写明要新增或移除的目录')
     if len(add) + len(remove) > MAX_DIRS:
-        raise DatasetError(400, f'一次最多新增、去掉 {MAX_DIRS} 个目录')
+        raise DatasetError(400, f'一次最多新增、移除 {MAX_DIRS} 个目录')
     latest = dataset['latest']
     parent: List[Entry] = datasets.version_files(conn, latest['id']) if latest else []
 
@@ -240,7 +240,7 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     folded = sorted(fold(d) for d in dirs)
     for a, b in zip(folded, folded[1:]):
         if a == b or b.startswith(a + '/'):
-            raise DatasetError(400, f'目录 {a} 和 {b} 重复或一个在另一个里面，一次只能各动一处')
+            raise DatasetError(400, f'目录 {a} 和 {b} 重复或互相包含，一次只能各改动一处')
 
     ops: List[Op] = []
     conflicts: List[dict] = []
@@ -248,8 +248,8 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     for d in removes:
         files = [p for p, _, _ in parent if _under(p, d)]
         if not files:
-            raise DatasetError(400, f'{latest["ref"] if latest else dataset["name"]} 里没有目录 {d}/'
-                                    f'（写成版本里的相对路径，注意大小写）')
+            raise DatasetError(400, f'{latest["ref"] if latest else dataset["name"]} 中没有目录 {d}/'
+                                    f'（请写版本中的相对路径，注意大小写）')
         gone.update(files)
         ops.append(Op('remove', d, removed_count=len(files)))
     new: List[Entry] = []
@@ -266,13 +266,13 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     for d, digest, replace in adds:
         data = store.read(digest)
         if data is None:
-            raise DatasetError(400, f'目录 {d} 的文件清单还没有上传')
+            raise DatasetError(400, f'目录 {d} 的文件清单尚未上传')
         try:
             content = parse_manifest(data)
         except ContractError as e:
-            raise DatasetError(400, f'目录 {d} 的文件清单不合格：{e}') from None
+            raise DatasetError(400, f'目录 {d} 的文件清单格式不正确：{e}') from None
         if not content:
-            raise DatasetError(400, f'目录 {d} 里没有文件')
+            raise DatasetError(400, f'目录 {d} 中没有文件')
         exact = [p for p, _, _ in parent if _under(p, d)]
         parts = d.split('/')
         other_case = []
@@ -293,14 +293,14 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     entries = sorted(kept + new)
     p = Plan(dataset, latest, ops, entries, kept, new, conflicts)
     if not entries:
-        raise DatasetError(400, f'去掉这些目录以后 {dataset["name"]} 就没有文件了；版本不能是空的')
+        raise DatasetError(400, f'移除这些目录后 {dataset["name"]} 将没有文件；版本不能为空')
     for c in conflicts:
         if c['other_case']:
-            p.reasons.append(f'池里已有只差大小写的目录 {c["other_case"]}/（{c["ref"]}），在 Windows 上会和 {c["dir"]}/ '
-                             f'混在一起；用同样的写法，或换一个名称')
+            p.reasons.append(f'数据池中已有仅大小写不同的目录 {c["other_case"]}/（{c["ref"]}），在 Windows 上会与 {c["dir"]}/ '
+                             f'混为一个目录；请使用相同的写法，或更换名称')
         else:
-            p.reasons.append(f'池里已有 {c["dir"]}/（{c["ref"]}，{c["files"]:,} 个文件）；要整个换成这份就加 --replace'
-                             f'（网页上勾选「替换已有目录」），要并存就换一个名称（--to）')
+            p.reasons.append(f'数据池中已有 {c["dir"]}/（{c["ref"]}，{c["files"]:,} 个文件）；如需整体替换为本次上传的内容，请加 --replace'
+                             f'（网页上勾选「替换已有目录」）；如需并存，请更换名称（--to）')
     # the checks of fw dataset import, on the whole result; what an import may allow with a flag counts only
     # where a new folder is involved (the rest of the pool was accepted when it came in)
     found = classify_paths(path for path, _, _ in entries)
@@ -328,7 +328,7 @@ def plan(conn, store: Store, name: str, add: List[dict], remove: List[str], allo
     p.changes = {k: [f'{a} → {b}' for a, b in v] if k == 'renamed' else v
                  for k, v in diff_entries(parent, entries).items()}
     if latest is not None and not p.reasons and manifest_hash(manifest_bytes(entries)) == latest['manifest_sha256']:
-        p.reasons.append(f'结果和 {latest["ref"]} 完全一样，不用建新版本')
+        p.reasons.append(f'结果与 {latest["ref"]} 完全相同，无需建立新版本')
     return p
 
 
@@ -341,10 +341,10 @@ def create(conn, store: Store, user_id: int, name: str, add: List[dict], remove:
     frozen (batches.py: the batch that went in)."""
     p = plan(conn, store, name, add, remove, allow_other_files, force)
     if (p.latest['id'] if p.latest else None) != expect_latest_id:
-        now = p.latest['ref'] if p.latest else '没有版本'
-        raise DatasetError(409, f'{p.dataset["name"]} 在这期间有了变化（最新是 {now}）；请重新运行，以最新版本为基础')
+        now = p.latest['ref'] if p.latest else '无版本'
+        raise DatasetError(409, f'{p.dataset["name"]} 在此期间发生了变化（最新为 {now}）；请以最新版本为基础重新运行')
     if p.reasons:
-        raise DatasetError(409 if p.conflicts else 400, '没有建版本：' + '；'.join(p.reasons))
+        raise DatasetError(409 if p.conflicts else 400, '未建立版本：' + '；'.join(p.reasons))
     digest, _ = store.put_bytes(manifest_bytes(p.entries))
 
     def record(c, version_id: int) -> None:

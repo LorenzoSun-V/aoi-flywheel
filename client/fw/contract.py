@@ -60,12 +60,12 @@ def path_problem(path: str) -> str | None:
         return f'路径超过 {MAX_PATH_BYTES} 字节'
     for seg in path.split('/'):
         if seg in ('', '.', '..'):
-            return '路径里有空的、. 或 .. 这一级'
+            return '路径中有为空、. 或 .. 的层级'
         bad = sorted(set(seg) & _BAD_CHARS)
         if bad:
             return f'含有 Windows 不允许的字符 {bad!r}'
         if seg.endswith((' ', '.')):
-            return '某一级以空格或点结尾（Windows 会去掉）'
+            return '某一层级以空格或点结尾（Windows 会将其去掉）'
         if seg.split('.')[0].upper() in _WINDOWS_RESERVED:
             return f'{seg} 是 Windows 保留名'
     return None
@@ -108,7 +108,7 @@ def collisions(paths: Iterable[str]) -> List[str]:
     for p in paths:
         key = fold(p)
         if key in files and files[key] != p:
-            problems.append(f'只差大小写：{files[key]} 和 {p}')
+            problems.append(f'仅大小写不同：{files[key]} 和 {p}')
         files.setdefault(key, p)
         parts = key.split('/')
         for i in range(1, len(parts)):
@@ -156,7 +156,7 @@ def parse_manifest(data: bytes) -> List[Entry]:
         entries.append((path, digest, int(size)))
     problems = collisions(p for p, _, _ in entries)
     if problems:
-        raise ContractError('清单里的路径无法同时放在磁盘上：' + '；'.join(problems[:5]))
+        raise ContractError('清单中的路径无法同时存放在磁盘上：' + '；'.join(problems[:5]))
     return entries
 
 
@@ -216,7 +216,7 @@ OBJECTS_TYPE = 'application/x-fw-objects'
 # (SES-TX@v0.1.0) or nothing (SES-TX: the newest). This is the one place that reads that; the server looks the
 # version up (datasets.get_version, models.get_model_version).
 LABEL = re.compile(r'v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\Z')
-LABEL_HELP = '版本号写成 v主.次.修订，例如 v0.1.0（小写 v，三段数字，不带前导 0）'
+LABEL_HELP = '版本号应写为 v主.次.修订，例如 v0.1.0（小写 v，三段数字，不带前导 0）'
 BUMPS = ('patch', 'minor', 'major')
 
 
@@ -236,13 +236,13 @@ def split_ref(ref, what: str = '版本', labels: bool = True) -> Tuple[str, str]
     """'SES-TX' -> ('SES-TX', 'latest'); 'SES-TX@3' -> ('SES-TX', '3'); 'SES-TX@v0.1.0' -> ('SES-TX',
     'v0.1.0'). labels false: for things that are only counted (the revisions of a batch)."""
     if not isinstance(ref, str) or not ref.strip():
-        raise ContractError(f'要写{what}')
+        raise ContractError(f'请写明{what}')
     name, sep, which = ref.strip().partition('@')
     which = which if sep else 'latest'
     ok = which == 'latest' or (which.isascii() and which.isdigit() and int(which) > 0) or (labels and is_label(which))
     if not name or not ok:
-        raise ContractError(f'{what}写法不对：{ref}。写成 名称@序号（SES-TX@3）'
-                            + ('、名称@版本号（SES-TX@v0.1.0）' if labels else '') + '，只写名称就是最新版')
+        raise ContractError(f'{what}格式不正确：{ref}。应写为 名称@序号（SES-TX@3）'
+                            + ('、名称@版本号（SES-TX@v0.1.0）' if labels else '') + '，只写名称表示最新版本')
     return name, which
 
 
@@ -298,7 +298,7 @@ class ObjectTooLarge(ContractError):
     """A frame announced an object bigger than the reader accepts."""
 
     def __init__(self, size: int, limit: int):
-        super().__init__(f'传输内容里的文件超过 {limit >> 20} MB，要单独传')
+        super().__init__(f'传输内容中的文件超过 {limit >> 20} MB，须单独传输')
         self.size = size
         self.limit = limit
 
@@ -335,11 +335,11 @@ class FrameParser:
                 end = buf.find(b'\n', self.pos, self.pos + _FRAME_MAX)
                 if end < 0:
                     if len(buf) - self.pos >= _FRAME_MAX:
-                        raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不对')
+                        raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不正确')
                     break
                 m = _FRAME.fullmatch(bytes(buf[self.pos:end + 1]))
                 if m is None:
-                    raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不对')
+                    raise ContractError(f'传输内容第 {self.count + 1} 个文件的头格式不正确')
                 self.need = int(m.group(2))
                 if self.need > self.max_object:
                     raise ObjectTooLarge(self.need, self.max_object)
@@ -410,7 +410,7 @@ def short_paths(subs: Iterable[str]) -> Dict[str, str]:
     for sub in subs:
         parts = sub.split('/')
         if len(parts) < 3 or not all(parts):
-            raise ContractError(f'训练集快照里有不认识的路径 {sub}')
+            raise ContractError(f'训练集快照中有无法识别的路径 {sub}')
         split.append(parts)
     out = {}
     for sub, parts in zip(subs, split):
@@ -454,7 +454,7 @@ def trainset_flat(entries: Iterable[Entry]) -> Tuple[List[Tuple[str, str, int, O
             elif top == 'labels':
                 labels[(split, sub)] = entry
         elif not (top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS):
-            raise ContractError(f'训练集快照里有不认识的路径 {path}')
+            raise ContractError(f'训练集快照中有无法识别的路径 {path}')
     rows = list(keep)
     for split, sub, (path, digest, size) in images:
         name = sub.rsplit('/', 1)[-1]
@@ -479,8 +479,8 @@ def trainset_flat(entries: Iterable[Entry]) -> Tuple[List[Tuple[str, str, int, O
         if '/images/' in new:
             suffix = PurePosixPath(new).suffix
             by_label.setdefault(fold(new[: len(new) - len(suffix)] if suffix else new), []).append(stored)
-    problems = [f'{"、".join(sorted(group))} 平铺后是同一个文件' for group in by_path.values() if len(group) > 1]
-    problems += [f'{"、".join(sorted(group))} 平铺后同名不同扩展名，会共用一份标注' for group in by_label.values()
+    problems = [f'{"、".join(sorted(group))} 平铺后为同一个文件' for group in by_path.values() if len(group) > 1]
+    problems += [f'{"、".join(sorted(group))} 平铺后同名不同扩展名，将共用一份标注' for group in by_label.values()
                  if len({fold(g.rsplit("/", 1)[-1]) for g in group}) > 1]
     return rows, sorted(problems)
 
@@ -506,7 +506,7 @@ def trainset_layout(entries: Iterable[Entry], fmt: str, short: bool = False) -> 
         rows, problems = trainset_flat(entries)
         if problems:
             more = f'\n  …共 {len(problems)} 处' if len(problems) > 10 else ''
-            raise ContractError('这个快照不能按默认的平铺目录（--format yolo）摆，有文件会重名；'
+            raise ContractError('该快照不能按默认的平铺目录（--format yolo）存放，有文件会重名；'
                                 '用 --format yolo-tree 保留原来的目录：\n  ' + '\n  '.join(problems[:10]) + more)
         return [row[:3] for row in rows]
     tree = fmt == 'yolo-tree'
@@ -536,7 +536,7 @@ def trainset_layout(entries: Iterable[Entry], fmt: str, short: bool = False) -> 
         elif top == 'coco' and rest.endswith('.json') and rest[:-5] in TRAINSET_SPLITS:
             new = f'{COCO_DIRS[rest[:-5]]}/{COCO_FILE}' if fmt == 'coco' else None
         else:
-            raise ContractError(f'训练集快照里有不认识的路径 {path}')
+            raise ContractError(f'训练集快照中有无法识别的路径 {path}')
         if new is not None:
             out.append((new, digest, size))
     return out
@@ -552,9 +552,9 @@ def eval_dirs(dirs: Iterable[str]) -> List[str]:
     for d in dirs:
         d = (d or '').replace('\\', '/').strip().strip('/')
         if not d:
-            raise ContractError('目录不能是空的；要评整个版本就不写 --dirs')
+            raise ContractError('目录不能为空；如需评估整个版本，请不写 --dirs')
         if any(p in ('', '.', '..') for p in d.split('/')):
-            raise ContractError(f'目录写成版本里的相对路径，例如 SES/TX/test_1015：{d}')
+            raise ContractError(f'目录应写为版本中的相对路径，例如 SES/TX/test_1015：{d}')
         if d not in out:
             out.append(d)
     if len(out) > MAX_EVAL_DIRS:
@@ -577,7 +577,7 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
     entries = list(entries)
     if snapshot:
         if split not in TRAINSET_SPLITS:
-            raise ContractError(f'训练集快照要写划分（{"、".join(TRAINSET_SPLITS)}）')
+            raise ContractError(f'训练集快照须写明划分（{"、".join(TRAINSET_SPLITS)}）')
         laid = trainset_layout(entries, 'yolo-tree')
         images = [e for e in laid if e[0].startswith(f'images/{split}/')
                   and PurePosixPath(e[0]).suffix.lower() in IMAGE_EXTS]
@@ -599,7 +599,7 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
     images = [e for e in entries if inside(e[0]) and PurePosixPath(e[0]).suffix.lower() in IMAGE_EXTS]
     problems: List[str] = []
     found = {d for d in chosen if any(p.startswith(d + '/') for p, _, _ in images)}
-    problems += [f'{d} 下没有图片（目录写成版本里的相对路径，注意大小写）' for d in chosen if d not in found]
+    problems += [f'{d} 下没有图片（目录应写为版本中的相对路径，注意大小写）' for d in chosen if d not in found]
     files, txt_only, stems, twice = [], [], {}, []
     for path, digest, size in images:
         stem = path[: len(path) - len(PurePosixPath(path).suffix)]
@@ -615,13 +615,13 @@ def eval_selection(entries: Iterable[Entry], snapshot: bool, split: str = '', di
             if stem + '.txt' in by_label or (yolo is not None and yolo + '.txt' in by_label):
                 txt_only.append(path)
     if twice:
-        problems.append(f'{len(twice)} 张图的 JSON 标注有几份（只差扩展名大小写），不知道用哪份：{"；".join(twice[:3])}')
+        problems.append(f'{len(twice)} 张图片有多份 JSON 标注（仅扩展名大小写不同），无法确定使用哪一份：{"；".join(twice[:3])}')
     if txt_only:
-        problems.append(f'{len(txt_only)} 张图只有 YOLO txt 标注，类别编号是数据池自己的，不一定和模型的类别表一致：'
-                        f'{"、".join(txt_only[:3])}；先用 fw trainset create --label-classes 建快照，再评快照的划分')
+        problems.append(f'{len(txt_only)} 张图片只有 YOLO txt 标注，其类别编号属于数据池，不一定与模型的类别表一致：'
+                        f'{"、".join(txt_only[:3])}；请先用 fw trainset create --label-classes 建立快照，再评估快照的划分')
     shared = [ps for ps in stems.values() if len(ps) > 1]
     if shared:
-        problems.append(f'有 {len(shared)} 组图片同名不同扩展名，会共用一份标注：'
+        problems.append(f'有 {len(shared)} 组图片同名不同扩展名，将共用一份标注：'
                         + '；'.join('、'.join(ps) for ps in shared[:3]))
     return sorted(set(files)), images, problems
 
@@ -636,14 +636,14 @@ def predict_selection(entries: Iterable[Entry], dirs: Iterable[str] = ()) -> Tup
         return not chosen or any(path.startswith(d + '/') for d in chosen)
 
     images = sorted(e for e in entries if inside(e[0]) and PurePosixPath(e[0]).suffix.lower() in IMAGE_EXTS)
-    problems = [f'{d} 下没有图片（目录写成版本里的相对路径，注意大小写）' for d in chosen
+    problems = [f'{d} 下没有图片（目录应写为版本中的相对路径，注意大小写）' for d in chosen
                 if not any(p.startswith(d + '/') for p, _, _ in images)]
     stems: Dict[str, List[str]] = {}
     for path, _, _ in images:
         stems.setdefault(path[: len(path) - len(PurePosixPath(path).suffix)].lower(), []).append(path)
     shared = [ps for ps in stems.values() if len(ps) > 1]
     if shared:
-        problems.append(f'有 {len(shared)} 组图片同名不同扩展名（或只差大小写），预标注会写进同一个 JSON：'
+        problems.append(f'有 {len(shared)} 组图片同名不同扩展名（或仅大小写不同），预标注将写入同一个 JSON：'
                         + '；'.join('、'.join(ps) for ps in shared[:3]))
     return images, problems
 
@@ -702,11 +702,11 @@ def blocking_reasons(found: dict, allow_other_files: bool, force: bool) -> List[
     fw dataset import's --allow-other-files and --force (the same check boxes on the web)."""
     reasons = []
     if found['bad_paths']:
-        reasons.append('有文件名在 Windows 或 Linux 上用不了，先改名')
+        reasons.append('有文件名在 Windows 或 Linux 上无法使用，请先改名')
     if found['collisions']:
-        reasons.append('有只差大小写、或同名的文件和目录，在 Windows 上会互相覆盖，先改名')
+        reasons.append('有仅大小写不同、或同名的文件和目录，在 Windows 上会互相覆盖，请先改名')
     if found['same_stem_images'] and not force:
-        reasons.append('有同名不同扩展名的图片（比如 a.bmp 和 a.png），标注对不上；先清理，或确认无妨后加 --force')
+        reasons.append('有同名不同扩展名的图片（例如 a.bmp 和 a.png），无法对应标注；请先清理，或确认无影响后加 --force')
     if found['others'] and not allow_other_files:
-        reasons.append('有图片和标注以外的文件；先清理，或确认要一起入库后加 --allow-other-files')
+        reasons.append('有图片和标注以外的文件；请先清理，或确认需要一并入库后加 --allow-other-files')
     return reasons

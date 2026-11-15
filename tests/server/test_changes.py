@@ -80,7 +80,7 @@ def test_existing_folder_is_refused_unless_replaced(api, pool, tmp_path):
     name, v1 = pool
     day = tmp_path / 'new' / '20261102'
     write(day, 'b2.bmp', b'B2')
-    with pytest.raises(ops.FwError, match=r'池里已有 20261102/（.*@1，2 个文件）.*--replace'):
+    with pytest.raises(ops.FwError, match=r'数据池中已有 20261102/（.*@1，2 个文件）.*--replace'):
         ops.add_folders(api, name, [day], echo=quiet)
     assert api.dataset(name)['latest']['id'] == v1['id']
     # the API refuses too, whatever the client checked
@@ -100,18 +100,18 @@ def test_existing_folder_is_refused_unless_replaced(api, pool, tmp_path):
     other = tmp_path / 'case' / 'ABC'
     write(other, 'x.bmp', b'X')
     ops.add_folders(api, name, [other], echo=quiet)
-    with pytest.raises(ops.FwError, match='只差大小写'):
+    with pytest.raises(ops.FwError, match='仅大小写不同'):
         ops.add_folders(api, name, [other], to='abc', replace=True, echo=quiet)
     # also when it is a folder above the new one that differs in case
-    with pytest.raises(ops.FwError, match='只差大小写的目录 ABC/'):
+    with pytest.raises(ops.FwError, match='仅大小写不同的目录 ABC/'):
         ops.add_folders(api, name, [other], to='abc/sub', echo=quiet)
     m = manifest_bytes([('x.bmp', '0' * 64, 1)])
     api.put_bytes(m)
     two = api.preview_change(name, {'add': [{'dir': 'Night/a', 'manifest_sha256': manifest_hash(m)},
                                             {'dir': 'night/b', 'manifest_sha256': manifest_hash(m)}]})
-    assert any('只差大小写的目录 Night/' in r for r in two['reasons'])
+    assert any('仅大小写不同的目录 Night/' in r for r in two['reasons'])
     # replacing with the same content makes no version
-    with pytest.raises(ops.FwError, match='完全一样'):
+    with pytest.raises(ops.FwError, match='完全相同'):
         ops.add_folders(api, name, [other], replace=True, echo=quiet)
 
 
@@ -126,7 +126,7 @@ def test_remove(api, pool):
     assert set(paths(api, api.version(name, 1))) == set(paths(api, v1))  # the old version is as it was
     with pytest.raises(ApiError, match='没有目录 20261101/'):
         ops.remove_dirs(api, name, ['20261101'], echo=quiet)
-    with pytest.raises(ApiError, match='就没有文件了'):
+    with pytest.raises(ApiError, match='将没有文件'):
         ops.remove_dirs(api, name, ['20261102'], echo=quiet)
 
 
@@ -190,11 +190,11 @@ def test_checks_on_the_result(api, pool, tmp_path):
         with pytest.raises(ApiError) as e:
             api.preview_change(name, {'add': [{'dir': bad, 'manifest_sha256': manifest_hash(data)}]})
         assert e.value.status == 400, bad
-    with pytest.raises(ApiError, match='重复或一个在另一个里面'):
+    with pytest.raises(ApiError, match='重复或互相包含'):
         api.preview_change(name, {'remove': ['20261102', '20261102/sub']})
-    with pytest.raises(ApiError, match='还没有上传'):
+    with pytest.raises(ApiError, match='尚未上传'):
         api.preview_change(name, {'add': [{'dir': 'z', 'manifest_sha256': 'f' * 64}]})
-    with pytest.raises(ApiError, match='新增或去掉哪个目录'):
+    with pytest.raises(ApiError, match='要新增或移除的目录'):
         api.preview_change(name, {})
 
 
@@ -209,7 +209,7 @@ def test_stale_preview_is_refused(api, pool, tmp_path):
     ops.remove_dirs(api, name, ['20261101'], echo=quiet)
     with pytest.raises(ApiError) as e:
         api.create_change(name, dict(body, expect_latest_id=v1['id']))
-    assert e.value.status == 409 and '有了变化' in str(e.value)
+    assert e.value.status == 409 and '发生了变化' in str(e.value)
     # the files of an added folder must be in the store
     data = manifest_bytes([('y.bmp', 'a' * 64, 1)])
     api.put_bytes(data)

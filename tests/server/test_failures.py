@@ -383,7 +383,7 @@ def test_verify_fails_when_it_cannot_lift_the_block_after_a_power_loss(api, data
         m.setattr(os, 'unlink', unlink)
         assert verify_rehash(monkeypatch, database, store) == 1
     out = capsys.readouterr()
-    assert '已解除' not in out.out and '没能解除写入阻断' in out.err
+    assert '已解除' not in out.out and '未能解除写入阻断' in out.err
     with pytest.raises(ApiError) as e:
         ops.import_folder(api, dataset, src, echo=quiet)
     assert e.value.status == 503 and no_versions(api, dataset)

@@ -105,8 +105,8 @@ class ApiLevel:
         stated = dict(scope['headers']).get(API_HEADER.lower().encode())
         level = peer_level(stated.decode('latin-1') if stated is not None else None)
         if scope['path'].startswith('/api/') and level < MIN_CLIENT_LEVEL:
-            answer = JSONResponse({'detail': f'这台机器的 fw 太旧（接口第 {level} 版，平台要求至少第 {MIN_CLIENT_LEVEL} 版）：'
-                                             '在仓库目录 git pull 后重新运行 python -m pip install ./client'},
+            answer = JSONResponse({'detail': f'该机器的 fw 版本过旧（接口第 {level} 版，平台要求至少第 {MIN_CLIENT_LEVEL} 版）：'
+                                             '请在仓库目录执行 git pull 后重新运行 python -m pip install ./client'},
                                   status_code=426, headers={API_HEADER: str(API_LEVEL)})
             await answer(scope, receive, send)
             return
@@ -405,11 +405,11 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def current_user(request: Request) -> dict:
         scheme, _, token = request.headers.get('authorization', '').partition(' ')
         if scheme.lower() != 'bearer' or not token.strip():
-            raise HTTPException(401, '需要凭据：先运行 fw login', headers={'WWW-Authenticate': 'Bearer'})
+            raise HTTPException(401, '需要凭据：请先运行 fw login', headers={'WWW-Authenticate': 'Bearer'})
         with conn() as c:
             user = auth.authenticate(c, token.strip())
             if user is None:
-                raise HTTPException(401, '凭据无效、已吊销，或者账号已停用', headers={'WWW-Authenticate': 'Bearer'})
+                raise HTTPException(401, '凭据无效、已吊销，或账号已停用', headers={'WWW-Authenticate': 'Bearer'})
             now = time.monotonic()
             with touched_lock:
                 due = now - touched.get(user['token_id'], -1e9) > 60
@@ -515,7 +515,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         mine = None if auth.allowed(user['role'], 'users.manage') else user['user_id']
         with conn() as c:
             if not auth.revoke_token(c, token_id, actor_id=user['user_id'], owner_id=mine):
-                raise HTTPException(404, f'凭据 {token_id} 不存在、已吊销，或者不是你的')
+                raise HTTPException(404, f'凭据 {token_id} 不存在、已吊销，或不属于您的账号')
         return {}
 
     @app.get('/api/v1/me/tokens')
@@ -544,7 +544,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         found = classify_paths(rels)
         reasons = blocking_reasons(found, body.allow_other_files, body.force)
         if not rels:
-            reasons.append('目录里没有文件')
+            reasons.append('目录中没有文件')
         out = {'files': len(rels), 'junk': junk, 'reasons': reasons}
         for key, value in found.items():
             out[key] = {'count': len(value), 'examples': value[:FOLDER_EXAMPLES]}
@@ -635,9 +635,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         sizes = [store.size(d) for d in digests]
         missing = [d for d, s in zip(digests, sizes) if s is None]
         if missing:
-            raise HTTPException(404, f'服务器上没有 {len(missing)} 个文件，例如 {missing[0][:12]}')
+            raise HTTPException(404, f'服务器上缺少 {len(missing)} 个文件，例如 {missing[0][:12]}')
         if any(s > BATCH_OBJECT_MAX for s in sizes):
-            raise HTTPException(400, f'超过 {BATCH_OBJECT_MAX >> 20} MB 的文件要单独下载')
+            raise HTTPException(400, f'超过 {BATCH_OBJECT_MAX >> 20} MB 的文件须单独下载')
         total = sum(sizes)
         if total > FETCH_BYTES_MAX:
             raise HTTPException(413, f'一次批量下载不能超过 {FETCH_BYTES_MAX >> 20} MB')
@@ -678,7 +678,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         check_digest(digest)
         path = store.path(digest)
         if not path.is_file():
-            raise HTTPException(404, f'服务器上没有文件 {digest[:12]}')
+            raise HTTPException(404, f'服务器上缺少文件 {digest[:12]}')
         return FileResponse(path, media_type='application/octet-stream',
                             headers={'Cache-Control': 'private, max-age=31536000, immutable'})
 
@@ -1128,7 +1128,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def web_file(name: str):
         kind = WEB_FILES.get(name)
         if kind is None:
-            raise HTTPException(404, '没有这个文件')
+            raise HTTPException(404, '该文件不存在')
         return FileResponse(WEB / name, media_type=kind, headers=WEB_HEADERS)
 
     @app.get('/api/v1/diff')

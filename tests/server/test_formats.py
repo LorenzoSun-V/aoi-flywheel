@@ -101,7 +101,7 @@ def test_txt_labels():
     assert formats.pixel_boxes(label, CLASSES, (200, 100))[0] == (0, 80.0, 30.0, 40.0, 40.0)
     for bad, message in (('2 0.5 0.5 0.1 0.1', '超出类别表'), ('a 0.5 0.5 0.1 0.1', '不是整数'),
                          ('0 0.5 0.5 0.1 0.1 0.3 0.3', '5 个数'), ('0 0.5 0.5 0.1 nan', '0 到 1'),
-                         ('0 0.5 0.5 0.1 x', '不是数')):
+                         ('0 0.5 0.5 0.1 x', '非数值')):
         assert message in formats.parse_txt(bad, CLASSES)
 
 

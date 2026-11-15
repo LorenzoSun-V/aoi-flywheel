@@ -84,14 +84,14 @@ def parse_json(text: str):
             continue
         points = shape.get('points')
         if not isinstance(points, list) or len(points) < 2:
-            return f'有 {kind} 形状的点数不对'
+            return f'有 {kind} 形状的点数不正确'
         xs, ys = [], []
         for p in points:
             if not isinstance(p, (list, tuple)) or len(p) < 2:
                 return f'有 {kind} 形状的点不是 [x, y]'
             x, y = _number(p[0]), _number(p[1])
             if x is None or y is None:
-                return f'有 {kind} 形状的坐标不是数'
+                return f'有 {kind} 形状的坐标不是数值'
             xs.append(x)
             ys.append(y)
         if kind != 'rectangle':
@@ -130,11 +130,11 @@ def parse_txt(text: str, classes: List[str]):
         if not 0 <= cid < len(classes):
             return f'第 {n} 行的类别编号 {cid} 超出类别表（0 到 {len(classes) - 1}）'
         if len(fields) != 5:
-            return f'第 {n} 行应为「类别 中心x 中心y 宽 高」5 个数，有 {len(fields)} 个（分割、旋转框、关键点的标注不能当检测框）'
+            return f'第 {n} 行应为「类别 中心x 中心y 宽 高」5 个数，实际有 {len(fields)} 个（分割、旋转框、关键点的标注不能作为检测框）'
         try:
             values = [float(v) for v in fields[1:]]
         except ValueError:
-            return f'第 {n} 行有不是数的坐标'
+            return f'第 {n} 行有非数值的坐标'
         if not all(math.isfinite(v) and 0 <= v <= 1 for v in values):
             return f'第 {n} 行的坐标不在 0 到 1 之间'
         label.names.append(classes[cid])

@@ -143,7 +143,7 @@ def _latest(conn, b: dict) -> dict:
 def _same_revision(b: dict, latest: dict, revision: Optional[int]) -> None:
     """revision: the one the caller looked at; a newer one since then means they have not seen what they act on."""
     if revision is not None and revision != latest['number']:
-        raise DatasetError(409, f'{b["name"]} 现在最新是第 {latest["number"]} 版，不是第 {revision} 版；先看最新的一版')
+        raise DatasetError(409, f'{b["name"]} 的最新版次为第 {latest["number"]} 版，不是第 {revision} 版；请先查看最新的一版')
 
 
 def _step(conn, batch_id: int, actor_id: int, step: str, version_id: Optional[int], comment: str = '',
@@ -158,7 +158,7 @@ def _step(conn, batch_id: int, actor_id: int, step: str, version_id: Optional[in
 def _text(value: Any, what: str, limit: int, required: bool = False) -> str:
     text = (value or '').strip() if isinstance(value, str) else ''
     if required and not text:
-        raise DatasetError(400, f'要写{what}')
+        raise DatasetError(400, f'请填写{what}')
     if len(text) > limit:
         raise DatasetError(400, f'{what}最多 {limit} 个字')
     return text
@@ -175,9 +175,9 @@ def _reviewer(conn, name: str) -> dict:
     except auth.AuthError as e:
         raise DatasetError(400, str(e)) from None
     if u['disabled_at'] is not None:
-        raise DatasetError(400, f'账号 {u["name"]} 已停用，不能当复核人')
+        raise DatasetError(400, f'账号 {u["name"]} 已停用，不能担任复核人')
     if not auth.allowed(u['role'], 'batches.review'):
-        raise DatasetError(400, f'{u["name"]} 是{auth.ROLES[u["role"]]}账号，不能当复核人；复核人选算法工程师账号')
+        raise DatasetError(400, f'{u["name"]} 是{auth.ROLES[u["role"]]}账号，不能担任复核人；请选择算法工程师账号作为复核人')
     return u
 
 
@@ -187,18 +187,18 @@ def _check_content(conn, store: Store, pool: dict, manifest_sha256: str, allow_o
     pool is refused now, not after the review. That includes the pool's class table."""
     data = store.read(check_digest(manifest_sha256))
     if data is None:
-        raise DatasetError(400, '批次的文件清单还没有上传')
+        raise DatasetError(400, '批次的文件清单尚未上传')
     try:
         entries = parse_manifest(data)
     except ContractError as e:
-        raise DatasetError(400, f'批次的文件清单不合格：{e}') from None
+        raise DatasetError(400, f'批次的文件清单格式不正确：{e}') from None
     if not entries:
-        raise DatasetError(400, '目录里没有文件')
+        raise DatasetError(400, '目录中没有文件')
     reasons = blocking_reasons(classify_paths(p for p, _, _ in entries), allow_other_files, force)
     if reasons:
         raise DatasetError(400, '没有上传批次：' + '；'.join(reasons))
     if not any(PurePosixPath(p).suffix.lower() in IMAGE_EXTS for p, _, _ in entries):
-        raise DatasetError(400, '目录里没有图片')
+        raise DatasetError(400, '目录中没有图片')
     problem = datasets.class_problems(conn, store, pool, entries)
     if problem:
         raise DatasetError(400, '没有上传批次：' + problem)
@@ -233,8 +233,8 @@ def create(conn, store: Store, user: dict, name: str, pool: str, dir: str, manif
         for o in c.execute('SELECT d.name, b.dir FROM batches b JOIN datasets d ON d.id = b.dataset_id '
                            'WHERE b.pool_id = %s AND b.status = ANY(%s)', (target['id'], list(UNFINISHED))).fetchall():
             if fold(o['dir']) == fold(d):
-                raise DatasetError(409, f'批次 {o["name"]} 也要进 {target["name"]} 的 {o["dir"]}/，还没有结束；'
-                                        f'给那个批次上传新的一版（fw batch update {o["name"]}），或换一个目录名称')
+                raise DatasetError(409, f'批次 {o["name"]} 也将进入 {target["name"]} 的 {o["dir"]}/，且尚未结束；'
+                                        f'请为该批次上传新的一版（fw batch update {o["name"]}），或更换目录名称')
 
     no_other(conn)  # said before anything is checked or made; decided under the lock in record()
     _check_content(conn, store, target, manifest_sha256, allow_other_files, force)
@@ -262,8 +262,8 @@ def create(conn, store: Store, user: dict, name: str, pool: str, dir: str, manif
     in_pool = target['latest'] is not None and conn.execute(
         'SELECT 1 FROM version_files WHERE version_id = %s AND starts_with(path, %s) LIMIT 1',
         (target['latest']['id'], d + '/')).fetchone() is not None
-    out['notices'] = [f'{target["name"]} 里已经有 {d}/（{target["latest"]["ref"]}）：入库时要选择替换，'
-                      f'或者现在换一个目录名称重新上传'] if in_pool else []
+    out['notices'] = [f'{target["name"]} 中已有 {d}/（{target["latest"]["ref"]}）：入库时须选择替换，'
+                      f'或更换目录名称后重新上传'] if in_pool else []
     return out
 
 
@@ -299,11 +299,11 @@ def revise(conn, store: Store, user: dict, name: str, manifest_sha256: str, labe
 
 def _may_revise(user: dict, b: dict) -> None:
     if not _owns(user, b):
-        raise DatasetError(403, f'{b["name"]} 不是你的批次；只有上传它的账号能上传新的一版')
+        raise DatasetError(403, f'{b["name"]} 不是您上传的批次；只有上传该批次的账号可以上传新的一版')
     if b['status'] not in ('open', 'rejected'):
-        why = {'review': '正在复核，等复核人通过或退回', 'approved': '已经复核通过，要改就请复核人退回'}.get(
+        why = {'review': '正在复核，请等待复核人通过或退回', 'approved': '已复核通过，如需修改请联系复核人退回'}.get(
             b['status'], STATUS[b['status']])
-        raise DatasetError(409, f'{b["name"]} {why}，现在不能上传新的一版')
+        raise DatasetError(409, f'{b["name"]} {why}，暂不能上传新的一版')
 
 
 def _who(conn, b: dict, reviewer: Optional[str]) -> dict:
@@ -311,7 +311,7 @@ def _who(conn, b: dict, reviewer: Optional[str]) -> dict:
     if reviewer and reviewer != '-':
         return _reviewer(conn, reviewer)
     if b['reviewer_id'] is None:
-        raise DatasetError(400, '要写复核人（--reviewer 账号名）')
+        raise DatasetError(400, '请指定复核人（--reviewer 账号名）')
     last = conn.execute('SELECT name FROM users WHERE id = %s', (b['reviewer_id'],)).fetchone()['name']
     return _reviewer(conn, last)
 
@@ -321,9 +321,9 @@ def submit(conn, user: dict, name: str, reviewer: Optional[str] = None, revision
     with conn.transaction():
         b = _find(conn, name, lock=True)
         if not _owns(user, b):
-            raise DatasetError(403, f'{b["name"]} 不是你的批次；只有上传它的账号能提交复核')
+            raise DatasetError(403, f'{b["name"]} 不是您上传的批次；只有上传该批次的账号可以提交复核')
         if b['status'] != 'open':
-            why = '已退回：先上传改好的一版（fw batch update）' if b['status'] == 'rejected' else STATUS[b['status']]
+            why = '已退回：请先上传修改后的一版（fw batch update）' if b['status'] == 'rejected' else STATUS[b['status']]
             raise DatasetError(409, f'{b["name"]} {why}，不能提交复核')
         latest = _latest(conn, b)
         _same_revision(b, latest, revision)
@@ -333,7 +333,7 @@ def submit(conn, user: dict, name: str, reviewer: Optional[str] = None, revision
 
 def _may_review(user: dict, b: dict, states: Tuple[str, ...], what: str) -> None:
     if not _reviews(user, b):
-        raise DatasetError(403, f'{b["name"]} 的复核人不是你；只有被指定的复核人能{what}')
+        raise DatasetError(403, f'{b["name"]} 的复核人不是您；只有指定的复核人可以{what}')
     if b['status'] not in states:
         raise DatasetError(409, f'{b["name"]} 现在是「{STATUS[b["status"]]}」，不能{what}')
 
@@ -343,7 +343,7 @@ def reject(conn, user: dict, name: str, comment: str, images: Optional[List[str]
     comment = _text(comment, '退回意见', MAX_COMMENT, required=True)
     images = sorted(set(images or []))
     if len(images) > MAX_IMAGES or not all(isinstance(i, str) for i in images):
-        raise DatasetError(400, f'问题图片最多列 {MAX_IMAGES} 张，其余写在意见里')
+        raise DatasetError(400, f'问题图片最多列 {MAX_IMAGES} 张，其余请写在意见中')
     with conn.transaction():
         b = _find(conn, name, lock=True)
         _may_review(user, b, ('review', 'approved'), '退回')
@@ -354,8 +354,8 @@ def reject(conn, user: dict, name: str, comment: str, images: Optional[List[str]
                                                      'AND path = ANY(%s)', (latest['id'], images))}
             unknown = [i for i in images if i not in found]
             if unknown:
-                raise DatasetError(400, f'第 {latest["number"]} 版里没有这些文件：{"、".join(unknown[:5])}'
-                                        f'{" 等" if len(unknown) > 5 else ""}（写成批次目录里的相对路径）')
+                raise DatasetError(400, f'第 {latest["number"]} 版中没有以下文件：{"、".join(unknown[:5])}'
+                                        f'{" 等" if len(unknown) > 5 else ""}（请写批次目录中的相对路径）')
         conn.execute("UPDATE batches SET status = 'rejected', updated_at = now() WHERE id = %s", (b['id'],))
         _step(conn, b['id'], user['user_id'], 'reject', latest['id'], comment=comment, images=images)
         events.record(conn, user['user_id'], 'batch.reject', f'{b["name"]}@{latest["number"]}',
@@ -413,7 +413,7 @@ def close(conn, user: dict, name: str, comment: str = '') -> dict:
     with conn.transaction():
         b = _find(conn, name, lock=True)
         if not (_owns(user, b) or _reviews(user, b)):
-            raise DatasetError(403, f'{b["name"]} 不是你的批次，你也不是它的复核人，不能关闭')
+            raise DatasetError(403, f'{b["name"]} 不是您上传的批次，您也不是该批次的复核人，不能关闭')
         if b['status'] not in UNFINISHED:
             raise DatasetError(409, f'{b["name"]} {STATUS[b["status"]]}，不能关闭')
         latest = _latest(conn, b)
@@ -428,10 +428,10 @@ def prelabel_target(conn, user: dict, name: str, revision: Optional[int] = None,
     """The batch and its newest revision, if this account may have it pre-labelled now (predictions.py)."""
     b = _find(conn, name, lock=lock)
     if not _owns(user, b):
-        raise DatasetError(403, f'{b["name"]} 不是你的批次；只有上传它的账号能给它跑预标注')
+        raise DatasetError(403, f'{b["name"]} 不是您上传的批次；只有上传该批次的账号可以运行预标注')
     if b['status'] not in ('open', 'rejected'):
-        raise DatasetError(409, f'{b["name"]} 现在是「{STATUS[b["status"]]}」，不能跑预标注；'
-                                f'预标注是给还在标的批次用的（待提交复核或已退回）')
+        raise DatasetError(409, f'{b["name"]} 现在是「{STATUS[b["status"]]}」，不能运行预标注；'
+                                f'预标注仅用于标注中的批次（待提交复核或已退回）')
     latest = _latest(conn, b)
     _same_revision(b, latest, revision)
     return dict(b, latest_id=latest['id'], revision=latest['number'], ref=f'{b["name"]}@{latest["number"]}')
@@ -466,7 +466,7 @@ def pool_of(conn, name: str) -> dict:
 def _approved(conn, name: str) -> Tuple[dict, dict]:
     b = get(conn, name)
     if b['status'] != 'approved':
-        raise DatasetError(409, f'{b["name"]} 现在是「{b["status_text"]}」；复核通过以后才能入库')
+        raise DatasetError(409, f'{b["name"]} 现在是「{b["status_text"]}」；复核通过后才能入库')
     return b, {'dir': b['dir'], 'manifest_sha256': b['manifest_sha256']}
 
 
@@ -489,8 +489,8 @@ def import_(conn, store: Store, user: dict, name: str, expect_latest_id: Optiona
         now = _find(c, name, lock=True)
         latest = _latest(c, now)
         if now['status'] != 'approved' or latest['id'] != b['latest_id']:
-            raise DatasetError(409, f'{b["name"]} 在这期间有了变化（{STATUS[now["status"]]}，第 {latest["number"]} 版）；'
-                                    f'请重新看一遍再入库')
+            raise DatasetError(409, f'{b["name"]} 在此期间发生了变化（{STATUS[now["status"]]}，第 {latest["number"]} 版）；'
+                                    f'请重新查看后再入库')
         c.execute("UPDATE batches SET status = 'imported', imported_version_id = %s, updated_at = now() "
                   'WHERE id = %s', (version_id, now['id']))
         _step(c, now['id'], user['user_id'], 'import', latest['id'], comment=note, pool_version_id=version_id)
@@ -671,7 +671,7 @@ def compare(conn, store: Store, name: str, old: Optional[int] = None, new: Optio
     new = latest['number'] if new is None else new
     old = new - 1 if old is None else old
     if old < 1 or new < 1 or old == new:
-        raise DatasetError(400, '要比较两个不同的版次；第 1 版之前没有可比的')
+        raise DatasetError(400, '请选择两个不同的版次进行比较；第 1 版之前没有可比较的版次')
     a = datasets.get_version(conn, b['name'], str(old))
     z = datasets.get_version(conn, b['name'], str(new))
     before = datasets.version_files(conn, a['id'])

@@ -55,7 +55,7 @@ def _text(value: Any, what: str, limit: int = 2000, line: bool = False) -> str:
     if len(value) > limit:
         raise DatasetError(400, f'{what}不能超过 {limit} 个字符')
     if '\x00' in value or (line and any(c in value for c in '\t\r\n')):
-        raise DatasetError(400, f'{what}里有不能用的字符')
+        raise DatasetError(400, f'{what}中含有不允许使用的字符')
     return value
 
 
@@ -69,9 +69,9 @@ def _commit(value: str, what: str) -> str:
 def _repo(value: str, what: str, required: bool) -> str:
     value = _text(value, what, 500, line=True)
     if required and not value:
-        raise DatasetError(400, f'要写{what}')
+        raise DatasetError(400, f'请填写{what}')
     if CREDENTIALS.match(value):
-        raise DatasetError(400, f'{what}里带着账号或令牌（https://…@），去掉 @ 之前的部分再登记')
+        raise DatasetError(400, f'{what}中含有账号或令牌（https://…@），请删除 @ 之前的部分后再登记')
     return value
 
 
@@ -81,16 +81,16 @@ def _name(value: str, what: str) -> str:
     (A-B/C and A/B-C would both be A-B-C-r1), '/', '@' or anything else."""
     value = _text(value, what, 64, line=True)
     if not value:
-        raise DatasetError(400, f'要写{what}')
+        raise DatasetError(400, f'请填写{what}')
     if not SITE_LINE.match(value):
-        raise DatasetError(400, f'{what}只能用汉字、英文字母、数字、_ 和 .（发布编号是 <现场>-<产线>-r<序号>）：{value}')
+        raise DatasetError(400, f'{what}只能用汉字、英文字母、数字、_ 和 .（发布编号为 <现场>-<产线>-r<序号>）：{value}')
     return value
 
 
 def _pinned(name: str, number: str) -> str:
     """Registering on a model version needs its number: a retry must not land on a version made meanwhile."""
     if not (str(number).isdigit() or is_label(number)):  # a label names one version for good, like a number
-        raise DatasetError(400, f'登记评估或发布要写具体的模型版本，例如 {name}@3，不能用 latest')
+        raise DatasetError(400, f'登记评估或发布时须写明具体的模型版本，例如 {name}@3，不能使用 latest')
     return number
 
 
@@ -106,44 +106,44 @@ def _entries(files: Sequence, required: str, top: Sequence[str], weights: bool =
     seen = set()
     for item in files:
         if not isinstance(item, (list, tuple)) or len(item) != 3:
-            raise DatasetError(400, '每个文件写成 [路径, sha256, 大小]')
+            raise DatasetError(400, '每个文件应写为 [路径, sha256, 大小]')
         path, digest, size = item
         if not isinstance(path, str) or not isinstance(digest, str) or isinstance(size, bool) \
                 or not isinstance(size, int) or size < 0:
-            raise DatasetError(400, '每个文件写成 [路径, sha256, 大小]')
+            raise DatasetError(400, '每个文件应写为 [路径, sha256, 大小]')
         try:
             check_path(path)
         except ContractError as e:
-            raise DatasetError(400, f'文件路径不能用：{e}') from None
+            raise DatasetError(400, f'文件路径无效：{e}') from None
         if weights and path.startswith(WEIGHTS):
             if '/' in path[len(WEIGHTS):] or any(p.startswith(WEIGHTS) for p in seen):
                 raise DatasetError(400, f'{path}：weights/ 下只能有一个权重文件，不能有子目录')
             if size == 0:  # frozen, an empty file would also block the retry with the real one (same ONNX)
-                raise DatasetError(400, f'{path}：权重文件是空的，没有登记')
+                raise DatasetError(400, f'{path}：权重文件为空，未登记')
         elif path not in top and not (path.startswith(EXTRA) and len(path) > len(EXTRA)):
             raise DatasetError(400, f'{path}：只能是 {"、".join(top)}' + ('、weights/<权重文件>' if weights else '')
                                     + ' 或 files/ 下的文件')
         if path in seen:
-            raise DatasetError(400, f'{path} 写了两次')
+            raise DatasetError(400, f'{path} 重复出现')
         seen.add(path)
         out.append((path, check_digest(digest), size))
     problems = collisions(seen)
     if problems:
-        raise DatasetError(400, '这些文件不能放在同一个目录里：' + '；'.join(problems[:5]))
+        raise DatasetError(400, '以下文件不能放在同一目录中：' + '；'.join(problems[:5]))
     if required not in seen:
-        raise DatasetError(400, f'缺 {required}')
+        raise DatasetError(400, f'缺少 {required}')
     return out
 
 
 def _check_stored(store: Store, entries: List[Entry]) -> None:
     bad = [(p, s, store.size(d)) for p, d, s in entries if store.size(d) != s]
     if bad:
-        examples = '；'.join(f'{p}（{"没有" if got is None else f"大小 {got}，应为 {s}"}）' for p, s, got in bad[:5])
-        raise DatasetError(400, f'有 {len(bad)} 个文件服务器上还没有或大小不对，没有登记；重新运行会补传。例如 {examples}')
+        examples = '；'.join(f'{p}（{"缺失" if got is None else f"大小 {got}，应为 {s}"}）' for p, s, got in bad[:5])
+        raise DatasetError(400, f'有 {len(bad)} 个文件在服务器上缺失或大小不符，未登记；重新运行会补传。例如 {examples}')
 
 
 def _reject_constant(name: str):
-    raise ValueError(f'不能用 {name}')
+    raise ValueError(f'不允许使用 {name}')
 
 
 def _no_nul(value: Any) -> bool:
@@ -169,15 +169,15 @@ def _metrics(store: Store, entries: List[Entry]) -> dict:
         raise DatasetError(400, f'metrics.json 不能超过 {MAX_METRICS >> 20} MB')
     data = store.read(digest)
     if data is None:
-        raise DatasetError(400, 'metrics.json 还没有上传')
+        raise DatasetError(400, 'metrics.json 尚未上传')
     try:
         doc = json.loads(data.decode('utf-8-sig'), parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError) as e:
         raise DatasetError(400, f'指标文件不是合法的 UTF-8 JSON（{e}）') from None
     if not isinstance(doc, dict):
-        raise DatasetError(400, '指标文件应该是一个 JSON 对象（{…}）')
+        raise DatasetError(400, '指标文件应为一个 JSON 对象（{…}）')
     if not _no_nul(doc):
-        raise DatasetError(400, '指标文件里有 \\u0000 字符，或者有超出范围的数（例如 1e309）')
+        raise DatasetError(400, '指标文件中含有 \\u0000 字符，或含有超出范围的数值（例如 1e309）')
     return doc
 
 
@@ -186,16 +186,16 @@ def _check_onnx(store: Store, digest: str) -> None:
         with open(store.path(digest), 'rb') as f:
             head = f.read(1)
     except OSError as e:
-        raise DatasetError(503, f'读不了 model.onnx（{e.strerror or e}）') from None
+        raise DatasetError(503, f'无法读取 model.onnx（{e.strerror or e}）') from None
     if head != b'\x08':  # an ONNX ModelProto starts with its ir_version (field 1, varint)
-        raise DatasetError(400, 'model.onnx 不像 ONNX 文件（ONNX 文件以 ir_version 开头）；'
-                                '检查是不是传成了 .pt 等权重文件，权重可以作为附件登记')
+        raise DatasetError(400, 'model.onnx 不是有效的 ONNX 文件（ONNX 文件以 ir_version 开头）；'
+                                '请检查是否误传了 .pt 等权重文件，权重文件可作为附件登记')
     try:  # fw checks this before sending; the web sends without fw, so the server checks it too
         check_self_contained(store.path(digest))
     except OnnxError as e:
         raise DatasetError(400, f'model.onnx：{e}') from None
     except OSError as e:
-        raise DatasetError(503, f'读不了 model.onnx（{e.strerror or e}）') from None
+        raise DatasetError(503, f'无法读取 model.onnx（{e.strerror or e}）') from None
 
 
 def _prepare(store: Store, entries: List[Entry]) -> str:
@@ -257,7 +257,7 @@ def list_models(conn, site: str = '', line: str = '', q: str = '', trainset: str
 def get_model(conn, name: str) -> dict:
     row = conn.execute(_MODEL + ' WHERE lower(m.name) = lower(%s)', (name,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有模型 {name}；先用 fw model create 建')
+        raise DatasetError(404, f'模型 {name} 不存在；请先用 fw model create 建立')
     return _model(row)
 
 
@@ -271,7 +271,7 @@ def create_model(conn, user_id: int, name: str, site: str, line: str, task: str 
     with conn.transaction():  # ON CONFLICT: someone creating the same name meanwhile also gets 409, not 500
         if conn.execute('INSERT INTO models (name, site, line, task, note, created_by) VALUES (%s, %s, %s, %s, %s, %s) '
                         'ON CONFLICT DO NOTHING RETURNING id', (name, site, line, task, note, user_id)).fetchone() is None:
-            raise DatasetError(409, f'模型 {name} 已经存在（名称不分大小写）')
+            raise DatasetError(409, f'模型 {name} 已存在（名称不区分大小写）')
         events.record(conn, user_id, 'model.create', name, site=site, line=line, task=task)
     return get_model(conn, name)
 
@@ -332,7 +332,7 @@ def get_model_version(conn, name: str, number: str) -> dict:
     number = str(number)
     if number == 'latest':
         if model['latest'] is None:
-            raise DatasetError(404, f'{model["name"]} 还没有版本；用 fw model register 登记')
+            raise DatasetError(404, f'{model["name"]} 尚无版本；请用 fw model register 登记')
         number = model['latest'].rpartition('@')[2]
     if is_label(number):
         found = labels.find(conn, 'model', model['id'], number)
@@ -346,7 +346,7 @@ def get_model_version(conn, name: str, number: str) -> dict:
         raise DatasetError(400, '版本应为序号（正整数）、版本号（v0.1.0）或 latest')
     rows = conn.execute(_MV + ' WHERE mv.model_id = %s AND mv.number = %s', (model['id'], int(number))).fetchall()
     if not rows:
-        raise DatasetError(404, f'没有模型版本 {model["name"]}@{number}')
+        raise DatasetError(404, f'模型版本 {model["name"]}@{number} 不存在')
     return _model_versions(conn, rows)[0]
 
 
@@ -370,9 +370,9 @@ def add_label(conn, user_id: int, name: str, number: str, label: str, note: str 
             if was['retired_at'] is None and was['version_id'] == mv['id']:
                 return mv  # asked twice
             where = get_model_version_by_id(conn, was['version_id'])['ref']
-            raise DatasetError(409, f'{model["name"]} 的版本号 {label} 已经'
-                                    + (f'撤销（原来指 {where}），撤销的版本号不能再用' if was['retired_at'] is not None
-                                       else f'用在 {where} 上，版本号定了就不能挪到别的版本') + '；换一个')
+            raise DatasetError(409, f'{model["name"]} 的版本号 {label} 已'
+                                    + (f'撤销（原指向 {where}），撤销的版本号不能再次使用' if was['retired_at'] is not None
+                                       else f'用于 {where}，版本号设定后不能改到其他版本') + '；请使用其他版本号')
         events.record(conn, user_id, 'model_version.label', mv['ref'], label=label, note=note)
     return get_model_version_by_id(conn, mv['id'])
 
@@ -381,14 +381,14 @@ def retire_label(conn, user_id: int, name: str, label: str, note: str) -> dict:
     """Take a label off its model version (it was put on the wrong one). The string stays taken."""
     label, note = datasets.check_label(label), _text(note, '原因')
     if not note:
-        raise DatasetError(400, '撤销版本号要写原因')
+        raise DatasetError(400, '撤销版本号须写明原因')
     model = get_model(conn, name)
     was = labels.find(conn, 'model', model['id'], label)
     if was is None:
         raise DatasetError(404, f'{model["name"]} 没有版本号 {label}')
     with conn.transaction():
         if not labels.retire(conn, 'model', model['id'], label, note, user_id):
-            raise DatasetError(409, f'{model["name"]} 的版本号 {label} 已经撤销过了')
+            raise DatasetError(409, f'{model["name"]} 的版本号 {label} 已撤销')
         mv = get_model_version_by_id(conn, was['version_id'])
         events.record(conn, user_id, 'model_version.unlabel', mv['ref'], label=label, note=note)
     return mv
@@ -397,7 +397,7 @@ def retire_label(conn, user_id: int, name: str, label: str, note: str) -> dict:
 def get_model_version_by_id(conn, mv_id: int) -> dict:
     rows = conn.execute(_MV + ' WHERE mv.id = %s', (mv_id,)).fetchall()
     if not rows:
-        raise DatasetError(404, f'没有 id 为 {mv_id} 的模型版本')
+        raise DatasetError(404, f'id 为 {mv_id} 的模型版本不存在')
     return _model_versions(conn, rows)[0]
 
 
@@ -418,7 +418,7 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
     entries = _entries(files, ONNX, (ONNX, METRICS), weights=True)
     trainset = datasets.get_version_by_id(conn, trainset_id)
     if trainset['kind'] != 'trainset':
-        raise DatasetError(400, f'{trainset["ref"]} 不是训练集快照；模型版本要引用训练用的快照（fw trainset create 建的）')
+        raise DatasetError(400, f'{trainset["ref"]} 不是训练集快照；模型版本须引用训练所用的快照（由 fw trainset create 建立）')
     ts = conn.execute('SELECT task FROM trainset_versions WHERE version_id = %s', (trainset_id,)).fetchone()
     if ts['task'] != model['task']:
         raise DatasetError(400, f'{trainset["ref"]} 是{TASKS.get(ts["task"], ts["task"])}的快照，'
@@ -429,7 +429,7 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
     commit = _commit(code_commit, '训练代码的提交号') if _text(code_commit, '训练代码的提交号') else None
     repo = _repo(code_repo, '训练代码仓库', required=False)
     if commit is None and (repo or code_dirty):
-        raise DatasetError(400, '写了训练代码仓库或「有没提交的改动」，就要写训练代码的提交号')
+        raise DatasetError(400, '填写了训练代码仓库或「有未提交的改动」时，须同时填写训练代码的提交号')
     note = _text(note, '备注')
     _check_stored(store, entries)
     onnx = next(d for p, d, _ in entries if p == ONNX)
@@ -445,8 +445,8 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
             if (old['manifest_sha256'], old['trainset']['id'], old['code_commit'], old['code_repo'],
                     old['code_dirty']) == (manifest, trainset_id, commit or '', repo, bool(code_dirty)):
                 return dict(old, existing=True)
-            raise DatasetError(409, f'这个 ONNX 已经登记为 {old["ref"]}，但训练集快照、代码或附带的文件不一样；'
-                                    '同一个 ONNX 只登记一次')
+            raise DatasetError(409, f'该 ONNX 已登记为 {old["ref"]}，但训练集快照、代码或附带的文件不同；'
+                                    '同一个 ONNX 只能登记一次')
         number = conn.execute('SELECT coalesce(max(number), 0) + 1 AS n FROM model_versions WHERE model_id = %s',
                               (model['id'],)).fetchone()['n']
         fid = _insert_fileset(conn, entries, manifest)
@@ -463,7 +463,7 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
 
 def set_tag(conn, user_id: int, name: str, number: str, tag: str, added: bool, note: str = '') -> dict:
     if tag not in TAGS:
-        raise DatasetError(400, f'标签只能是 {"、".join(f"{k}（{v}）" for k, v in TAGS.items())}')
+        raise DatasetError(400, f'标记只能是 {"、".join(f"{k}（{v}）" for k, v in TAGS.items())}')
     note = _text(note, '备注')
     mv = get_model_version(conn, name, number)
     with conn.transaction():
@@ -529,7 +529,7 @@ def list_evals(conn, model: Optional[str] = None, model_version_id: Optional[int
 def get_eval(conn, eval_id: int) -> dict:
     row = conn.execute(_EVAL + ' WHERE e.id = %s', (eval_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有评估报告 #{eval_id}')
+        raise DatasetError(404, f'评估报告 #{eval_id} 不存在')
     out = _eval(row)
     out['files'] = fileset_files(conn, out['fileset_id'])
     return out
@@ -547,21 +547,21 @@ def register_eval(conn, store: Store, user_id: int, name: str, number: str, test
     testset = datasets.get_version_by_id(conn, testset_id)
     split = split or ''
     if testset['kind'] == 'batch':
-        raise DatasetError(400, f'{testset["ref"]} 是还没入库的标注批次，不能当测试集')
+        raise DatasetError(400, f'{testset["ref"]} 是尚未入库的标注批次，不能作为测试集')
     if testset['kind'] == 'trainset':
         if split not in SPLITS:
-            raise DatasetError(400, f'{testset["ref"]} 是训练集快照，要写明评的是哪个划分，例如 {testset["ref"]}:test')
+            raise DatasetError(400, f'{testset["ref"]} 是训练集快照，须写明评估的划分，例如 {testset["ref"]}:test')
         counts = trainsets.info(conn, testset_id)['trainset']['counts']
         if not counts.get(split, {}).get('samples'):
-            raise DatasetError(400, f'{testset["ref"]} 里没有 {split} 划分的样本')
+            raise DatasetError(400, f'{testset["ref"]} 中没有 {split} 划分的样本')
     elif split:
-        raise DatasetError(400, f'{testset["ref"]} 不是训练集快照，不用写划分')
+        raise DatasetError(400, f'{testset["ref"]} 不是训练集快照，无需写划分')
     try:
         dirs = eval_dirs(dirs)
     except ContractError as e:
         raise DatasetError(400, str(e)) from None
     if split and dirs:
-        raise DatasetError(400, '训练集快照的划分整个评，不选目录')
+        raise DatasetError(400, '训练集快照按整个划分评估，不能选择目录')
     entries = _entries(files, METRICS, (METRICS,))
     tool = _text(tool, '评估工具名', 100, line=True)
     tool_version = _text(tool_version, '评估工具版本', 100, line=True)
@@ -569,7 +569,7 @@ def register_eval(conn, store: Store, user_id: int, name: str, number: str, test
     _check_stored(store, entries)
     metrics = _metrics(store, entries)
     if images is not None and metrics.get('images') != images:
-        raise DatasetError(400, f'指标里评了 {metrics.get("images")} 张图，应为 {images} 张：有图没评到，没有登记')
+        raise DatasetError(400, f'指标中评估了 {metrics.get("images")} 张图片，应为 {images} 张：有图片未评估，未登记')
     manifest = _prepare(store, entries)
     with conn.transaction():
         conn.execute('SELECT id FROM model_versions WHERE id = %s FOR UPDATE', (mv['id'],))
@@ -634,21 +634,21 @@ def current_release(conn, site: str, line: str) -> dict:
     row = conn.execute(_RELEASE + ' WHERE lower(r.site) = lower(%s) AND lower(r.line) = lower(%s) '
                                   'ORDER BY r.deployed_at DESC, r.id DESC LIMIT 1', (site, line)).fetchone()
     if row is None:
-        raise DatasetError(404, f'{site}/{line} 还没有登记过发布')
+        raise DatasetError(404, f'{site}/{line} 尚未登记发布')
     return _release(row)
 
 
 def get_release(conn, ref: str) -> dict:
     m = RELEASE_REF.match(ref or '')
     if not m:
-        raise DatasetError(400, f'发布编号写成 <现场>-<产线>-r<序号>，例如 SES-TX-r3：{ref}')
+        raise DatasetError(400, f'发布编号应写为 <现场>-<产线>-r<序号>，例如 SES-TX-r3：{ref}')
     rows = conn.execute(_RELEASE + " WHERE lower(r.site || '-' || r.line) = lower(%s) AND r.number = %s",
                         (m.group(1), int(m.group(2)))).fetchall()
     if not rows:
-        raise DatasetError(404, f'没有发布 {ref}')
+        raise DatasetError(404, f'发布 {ref} 不存在')
     if len(rows) > 1:
         pairs = '、'.join(f'{r["site"]}/{r["line"]}' for r in rows)
-        raise DatasetError(400, f'{ref} 对得上好几条产线（{pairs}），用 fw release list --site --line 找到要的那条')
+        raise DatasetError(400, f'{ref} 对应多条产线（{pairs}），请用 fw release list --site --line 找到所需的那一条')
     return _release(rows[0])
 
 
@@ -656,11 +656,11 @@ def _deployed_at(value: str) -> datetime.datetime:
     try:
         t = datetime.datetime.fromisoformat(_text(value, '部署时间', 64, line=True))
     except ValueError:
-        raise DatasetError(400, f'部署时间写成 ISO 8601 并带时区，例如 2026-11-20T10:30+08:00：{value}') from None
+        raise DatasetError(400, f'部署时间应写为带时区的 ISO 8601 格式，例如 2026-11-20T10:30+08:00：{value}') from None
     if t.tzinfo is None:
-        raise DatasetError(400, f'部署时间要带时区，例如 2026-11-20T10:30+08:00：{value}')
+        raise DatasetError(400, f'部署时间须带时区，例如 2026-11-20T10:30+08:00：{value}')
     if t > datetime.datetime.now(datetime.timezone.utc) + FUTURE:
-        raise DatasetError(400, f'部署时间 {value} 比服务器现在的时间还晚；检查这台机器的时钟和时区')
+        raise DatasetError(400, f'部署时间 {value} 晚于服务器当前时间；请检查该机器的时钟和时区')
     return t
 
 
@@ -679,7 +679,7 @@ def register_release(conn, user_id: int, name: str, number: str, site: str, line
     if precision not in ('',) + PRECISIONS:
         raise DatasetError(400, f'精度只能是 {"、".join(PRECISIONS)}')
     if (engine_sha256 is None) != (engine_size is None):
-        raise DatasetError(400, '引擎的哈希和大小要一起写')
+        raise DatasetError(400, '引擎的哈希和大小须同时填写')
     if engine_sha256 is not None:
         check_digest(engine_sha256)
         if isinstance(engine_size, bool) or not isinstance(engine_size, int) or engine_size <= 0:
@@ -695,8 +695,8 @@ def register_release(conn, user_id: int, name: str, number: str, site: str, line
             out = dict(_release(same), existing=True)
             if (out['deploy_repo'], out['gpu'], out['trt_version'], out['precision'], out['engine_sha256'],
                     out['engine_size']) != (repo, gpu, trt, precision, engine_sha256, engine_size):
-                raise DatasetError(409, f'{out["ref"]} 已经登记了同一次部署（同一条产线、模型版本、部署提交号和部署时间），'
-                                        '但仓库地址、GPU、TensorRT、精度或引擎不一样；发布登记后不能改')
+                raise DatasetError(409, f'{out["ref"]} 已登记同一次部署（同一条产线、模型版本、部署提交号和部署时间），'
+                                        '但仓库地址、GPU、TensorRT、精度或引擎不同；发布登记后不能修改')
         else:
             n = conn.execute('SELECT coalesce(max(number), 0) + 1 AS n FROM releases '
                              'WHERE lower(site) = lower(%s) AND lower(line) = lower(%s)', (site, line)).fetchone()['n']
@@ -759,12 +759,12 @@ def _check_chain(conn, store: Store, mv: dict, evals: List[dict], trainset: dict
         try:
             got = store.size(digest)
         except OSError as e:
-            problems.append(f'{where}（{digest[:12]}）读不出来：{e.strerror or e}')
+            problems.append(f'{where}（{digest[:12]}）无法读取：{e.strerror or e}')
             continue
         if got is None:
-            problems.append(f'{where}（{digest[:12]}）文件库里没有')
+            problems.append(f'{where}（{digest[:12]}）在文件库中缺失')
         elif size is not None and got != size:
-            problems.append(f'{where}（{digest[:12]}）大小是 {got}，应为 {size}')
+            problems.append(f'{where}（{digest[:12]}）大小为 {got}，应为 {size}')
     return {'objects': len(wanted), 'problem_count': len(problems), 'problems': problems[:50]}
 
 
@@ -781,7 +781,7 @@ def verify_inputs(conn) -> Tuple[List[str], Dict[str, Tuple[Optional[int], str]]
         "         (SELECT '评估报告 #' || e.id FROM eval_reports e WHERE e.fileset_id = s.id), "
         "         (SELECT '预测集 #' || p.id FROM prediction_sets p WHERE p.fileset_id = s.id)) AS ref "
         'FROM filesets s ORDER BY s.id').fetchall()
-    problems = [f'{s["ref"]}：文件清单和登记的清单哈希对不上' for s in sets if s['m'] != s['rebuilt']]
+    problems = [f'{s["ref"]}：文件清单与登记的清单哈希不一致' for s in sets if s['m'] != s['rebuilt']]
     ref = {s['id']: s['ref'] for s in sets}
     wanted: Dict[str, Tuple[Optional[int], str]] = {s['m']: (None, s['ref']) for s in sets}
     for r in conn.execute("SELECT encode(sha256, 'hex') AS d, size, min(fileset_id) AS fid FROM fileset_files "

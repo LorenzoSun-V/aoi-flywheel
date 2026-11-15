@@ -14,7 +14,7 @@ import re
 from typing import List, Optional, Tuple
 
 CODE = re.compile(r'[A-Za-z0-9_.㐀-䶿一-鿿]{1,64}\Z')  # = models.SITE_LINE, and the database's CHECK
-CODE_HELP = '只能用汉字、英文字母、数字、_ 和 .，最多 64 个字（发布编号是 <现场>-<产线>-r<序号>，所以不能有 -）'
+CODE_HELP = '只能使用汉字、英文字母、数字、_ 和 .，最多 64 个字（发布编号为 <现场>-<产线>-r<序号>，因此不能含 -）'
 
 
 def find(conn, site: str, line: Optional[str] = None) -> Optional[Tuple[str, Optional[str]]]:

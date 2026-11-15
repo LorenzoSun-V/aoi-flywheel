@@ -118,10 +118,10 @@ def place(conn, site: Any, line: Any, required: bool = True) -> Tuple[str, str]:
     if not site and not line and not required:
         return '', ''
     if not site or not line:
-        raise DatasetError(400, '要写现场和产线（fw site list 看登记了哪些）')
+        raise DatasetError(400, '请写明现场和产线（已登记的现场和产线可用 fw site list 查看）')
     found = sites.find(conn, site, line)
     if found is None:
-        raise DatasetError(400, f'{site}/{line} 还没有登记；fw site list 看登记了哪些，新的现场或产线先用 '
+        raise DatasetError(400, f'{site}/{line} 尚未登记；已登记的现场和产线可用 fw site list 查看，新的现场或产线请先用 '
                                 f'fw site add {site}/{line} 登记（管理员或算法工程师）')
     return found[0], found[1]
 
@@ -136,11 +136,11 @@ def _place_name(name: Any) -> str:
 def _place_ref(ref: Any) -> Tuple[str, Optional[str]]:
     """'SES' -> the site; 'SES/TX' -> its line."""
     if not isinstance(ref, str) or not ref.strip():
-        raise DatasetError(400, '要写现场，或 现场/产线')
+        raise DatasetError(400, '请写明现场，或 现场/产线')
     site, sep, line = ref.strip().partition('/')
     for code, what in ((site, '现场'), (line if sep else None, '产线')):
         if code is not None and not sites.CODE.match(code):
-            raise DatasetError(400, f'{what} {code!r} 写法不对：{sites.CODE_HELP}')
+            raise DatasetError(400, f'{what} {code!r} 格式不正确：{sites.CODE_HELP}')
     return site, (line if sep else None)
 
 
@@ -159,10 +159,10 @@ def add_place(conn, user_id: Optional[int], ref: str, name: str = '') -> dict:
         if new_site:
             events.record(conn, user_id, 'site.add', code, name=name if line is None else '')
         elif line is None:
-            raise DatasetError(409, f'现场 {code} 已经登记过了')
+            raise DatasetError(409, f'现场 {code} 已登记')
         if line is not None:
             if not sites.add_line(conn, code, line, name, user_id):
-                raise DatasetError(409, f'{"/".join(sites.find(conn, code, line))} 已经登记过了')
+                raise DatasetError(409, f'{"/".join(sites.find(conn, code, line))} 已登记')
             events.record(conn, user_id, 'line.add', f'{code}/{line}', name=name)
     return sites.tree(conn)
 
@@ -173,7 +173,7 @@ def rename_place(conn, user_id: Optional[int], ref: str, name: str) -> dict:
     name = _place_name(name)
     found = sites.find(conn, site, line)
     if found is None:
-        raise DatasetError(404, f'{ref} 没有登记')
+        raise DatasetError(404, f'{ref} 未登记')
     with conn.transaction():
         sites.rename(conn, site, line, name)
         events.record(conn, user_id, 'site.rename', '/'.join(x for x in found if x), name=name)
@@ -273,7 +273,7 @@ def get_dataset(conn, name: str) -> dict:
     """With 'classes': the class table of a pool ([] for any other kind, and for a pool that has none)."""
     rows = conn.execute(_DATASET + ' WHERE lower(d.name) = lower(%s)', (name,)).fetchall()
     if not rows:
-        raise DatasetError(404, f'没有数据集 {name}；先用 fw dataset create 建')
+        raise DatasetError(404, f'数据集 {name} 不存在；请先用 fw dataset create 建立')
     out = _datasets(conn, rows)[0]
     out['classes'] = classes_of(conn, out['id'])
     return out
@@ -296,7 +296,7 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
     with conn.transaction():
         dataset_id = _insert_dataset(conn, user_id, name, site, line, kind, note)
         if dataset_id is None:
-            raise DatasetError(409, f'{name} 已经存在（数据集、训练集快照和标注批次共用名称，不分大小写）')
+            raise DatasetError(409, f'{name} 已存在（数据集、训练集快照和标注批次共用名称，不区分大小写）')
         if classes:
             _insert_classes(conn, user_id, dataset_id, 0, classes)
         events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line,
@@ -342,9 +342,9 @@ def check_class_names(names: Any, existing: Collection[str] = ()) -> List[str]:
                 or len(n) > CLASS_NAME_MAX):
             raise DatasetError(400, f'类别名不能为空，不能有首尾空格、制表符或换行，最多 {CLASS_NAME_MAX} 个字符：{n!r}')
         if n.lower() in taken:
-            raise DatasetError(400, f'类别表里已有 {taken[n.lower()]}，不能再加 {n}（类别名不分大小写）')
+            raise DatasetError(400, f'类别表中已有 {taken[n.lower()]}，不能再添加 {n}（类别名不区分大小写）')
         if n.lower() in added:
-            raise DatasetError(400, f'{added[n.lower()]} 和 {n} 重复（类别名不分大小写）')
+            raise DatasetError(400, f'{added[n.lower()]} 和 {n} 重复（类别名不区分大小写）')
         added[n.lower()] = n
     return names
 
@@ -363,7 +363,7 @@ def add_classes(conn, store: Store, user_id: int, name: str, names: Any) -> dict
         d = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
                          (name,)).fetchone()
         if d is None:
-            raise DatasetError(404, f'没有数据集 {name}')
+            raise DatasetError(404, f'数据集 {name} 不存在')
         if d['kind'] != 'pool':
             raise DatasetError(400, f'{d["name"]} 不是数据池；只有数据池有类别表')
         existing = classes_of(conn, d['id'])
@@ -423,7 +423,7 @@ def class_check(conn, store: Store, pool: dict, entries: List[Tuple[str, str, in
         return None, 0, 0
     classes = classes_of(conn, pool['id'])
     if not classes:
-        return f'数据池 {pool["name"]} 还没有类别表；请先在网页的数据池页面填写类别表，再上传', 0, 0
+        return f'数据池 {pool["name"]} 尚无类别表；请先在网页的数据池页面填写类别表，再上传', 0, 0
     todo = []
     for path, digest, _ in entries:
         kind = formats.class_kind(path)
@@ -462,7 +462,7 @@ def _class_refusal(pool: dict, classes: List[str], unknown: Dict[str, List[str]]
             hint = f'，类别表里是 {lower[n.lower()]}' if n.lower() in lower else ''
             items.append(f'{n}（{len(paths)} 个文件，例如 {"、".join(paths[:3])}{hint}）')
         more = f'，共 {len(unknown)} 个' if len(unknown) > CLASS_EXAMPLES else ''
-        parts.append(f'标注里有类别表以外的类别：{"；".join(items)}{more}')
+        parts.append(f'标注中有类别表以外的类别：{"；".join(items)}{more}')
     if unreadable:
         more = '等' if len(unreadable) > CLASS_EXAMPLES else ''
         parts.append(f'{len(unreadable)} 个文件无法按类别表读取：{"；".join(unreadable[:CLASS_EXAMPLES])}{more}')
@@ -483,7 +483,7 @@ def get_version(conn, name: str, number: str) -> dict:
     number = str(number)
     if number == 'latest':
         if dataset['latest'] is None:
-            raise DatasetError(404, f'{dataset["name"]} 还没有版本')
+            raise DatasetError(404, f'{dataset["name"]} 尚无版本')
         return dataset['latest']
     if is_label(number):
         found = labels.find(conn, 'dataset', dataset['id'], number)
@@ -498,7 +498,7 @@ def get_version(conn, name: str, number: str) -> dict:
     row = conn.execute(_VERSION + ' WHERE v.dataset_id = %s AND v.number = %s',
                        (dataset['id'], int(number))).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有版本 {dataset["name"]}@{number}')
+        raise DatasetError(404, f'版本 {dataset["name"]}@{number} 不存在')
     return _labelled(conn, [_version(row)])[0]
 
 
@@ -529,7 +529,7 @@ def add_label(conn, user_id: int, name: str, number: str, label: str, note: str 
     label, note = check_label(label), _note(note)
     version = get_version(conn, name, number)
     if version['kind'] == 'batch':
-        raise DatasetError(400, f'{version["dataset"]} 是标注批次，它的各版只有序号，不起版本号')
+        raise DatasetError(400, f'{version["dataset"]} 是标注批次，其各版只有序号，不设定版本号')
     dataset = get_dataset(conn, name)
     with conn.transaction():
         if not labels.add(conn, 'dataset', dataset['id'], version['id'], label, note, user_id):
@@ -537,9 +537,9 @@ def add_label(conn, user_id: int, name: str, number: str, label: str, note: str 
             if was['retired_at'] is None and was['version_id'] == version['id']:
                 return version  # asked twice
             where = get_version_by_id(conn, was['version_id'])['ref']
-            raise DatasetError(409, f'{dataset["name"]} 的版本号 {label} 已经'
-                                    + (f'撤销（原来指 {where}），撤销的版本号不能再用' if was['retired_at'] is not None
-                                       else f'用在 {where} 上，版本号定了就不能挪到别的版本') + '；换一个')
+            raise DatasetError(409, f'{dataset["name"]} 的版本号 {label} 已'
+                                    + (f'撤销（原指向 {where}），撤销的版本号不能再次使用' if was['retired_at'] is not None
+                                       else f'用于 {where}，版本号设定后不能改到其他版本') + '；请使用其他版本号')
         events.record(conn, user_id, 'version.label', version['ref'], label=label, note=note)
     return get_version_by_id(conn, version['id'])
 
@@ -548,14 +548,14 @@ def retire_label(conn, user_id: int, name: str, label: str, note: str) -> dict:
     """Take a label off its version (it was put on the wrong one). The string stays taken."""
     label, note = check_label(label), _note(note)
     if not note:
-        raise DatasetError(400, '撤销版本号要写原因')
+        raise DatasetError(400, '撤销版本号须写明原因')
     dataset = get_dataset(conn, name)
     was = labels.find(conn, 'dataset', dataset['id'], label)
     if was is None:
         raise DatasetError(404, f'{dataset["name"]} 没有版本号 {label}')
     with conn.transaction():
         if not labels.retire(conn, 'dataset', dataset['id'], label, note, user_id):
-            raise DatasetError(409, f'{dataset["name"]} 的版本号 {label} 已经撤销过了')
+            raise DatasetError(409, f'{dataset["name"]} 的版本号 {label} 已撤销')
         version = get_version_by_id(conn, was['version_id'])
         events.record(conn, user_id, 'version.unlabel', version['ref'], label=label, note=note)
     return version
@@ -571,7 +571,7 @@ def version_files(conn, version_id: int) -> List[Tuple[str, str, int]]:
 def get_version_by_id(conn, version_id: int) -> dict:
     row = conn.execute(_VERSION + ' WHERE v.id = %s', (version_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有 id 为 {version_id} 的版本')
+        raise DatasetError(404, f'id 为 {version_id} 的版本不存在')
     return _labelled(conn, [_version(row)])[0]
 
 
@@ -594,18 +594,18 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
     check_digest(manifest_sha256)
     data = store.read(manifest_sha256)
     if data is None:
-        raise DatasetError(400, '清单文件还没有上传')
+        raise DatasetError(400, '清单文件尚未上传')
     try:
         entries = parse_manifest(data)
     except ContractError as e:
-        raise DatasetError(400, f'清单不合格：{e}') from None
+        raise DatasetError(400, f'清单格式不正确：{e}') from None
     if not entries:
-        raise DatasetError(400, '清单里没有文件')
+        raise DatasetError(400, '清单中没有文件')
     bad = [(p, s, store.size(d)) for p, d, s in entries
            if (inherited is None or (p, d, s) not in inherited) and store.size(d) != s]
     if bad:
-        examples = '；'.join(f'{p}（{"没有" if got is None else f"大小 {got}，应为 {s}"}）' for p, s, got in bad[:5])
-        raise DatasetError(400, f'有 {len(bad)} 个文件服务器上还没有或大小不对，没有建版本；重新运行导入会补传。例如 {examples}')
+        examples = '；'.join(f'{p}（{"缺失" if got is None else f"大小 {got}，应为 {s}"}）' for p, s, got in bad[:5])
+        raise DatasetError(400, f'有 {len(bad)} 个文件在服务器上缺失或大小不符，未建立版本；重新运行导入会补传。例如 {examples}')
     target = None if classes_checked else conn.execute(
         'SELECT d.id, d.name, d.kind, (SELECT v.id FROM versions v WHERE v.dataset_id = d.id ORDER BY v.number DESC '
         'LIMIT 1) AS latest_id FROM datasets d WHERE lower(d.name) = lower(%s)', (name,)).fetchone()
@@ -613,7 +613,7 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
         # a table only grows, so what fits it now still fits when the version is made below
         problem = class_problems(conn, store, target, entries, checked_contents(conn, target['id'], target['latest_id']))
         if problem:
-            raise DatasetError(400, '没有建版本：' + problem)
+            raise DatasetError(400, '未建立版本：' + problem)
     try:
         store.flush()
     except StoreError as e:
@@ -622,32 +622,32 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
     with conn.transaction():
         if new_dataset is not None and _insert_dataset(conn, user_id, name, new_dataset['site'], new_dataset['line'],
                                                        new_dataset['kind'], new_dataset['note']) is None:
-            again = '请重新运行 fw trainset create' if trainset else '换一个批次名称' if batch else '请重新运行导入'
-            raise DatasetError(409, f'{name} 在这期间被别人建了；{again}')
+            again = '请重新运行 fw trainset create' if trainset else '请更换批次名称' if batch else '请重新运行导入'
+            raise DatasetError(409, f'{name} 在此期间已被其他账号建立；{again}')
         dataset = conn.execute('SELECT id, name, kind FROM datasets WHERE lower(name) = lower(%s) FOR UPDATE',
                                (name,)).fetchone()
         if dataset is None:
-            raise DatasetError(404, f'没有数据集 {name}')
+            raise DatasetError(404, f'数据集 {name} 不存在')
         made = 'trainset' if trainset else 'batch' if batch else None
         if dataset['kind'] != made and (dataset['kind'] in MADE or made is not None):
             if dataset['kind'] in MADE:
                 what, how = MADE[dataset['kind']]
-                raise DatasetError(400, f'{dataset["name"]} 是{what}，只能用 {how} 建新版本')
+                raise DatasetError(400, f'{dataset["name"]} 是{what}，只能用 {how} 建立新版本')
             raise DatasetError(400, f'{dataset["name"]} 不是{MADE[made][0]}')
         latest = conn.execute('SELECT id, number FROM versions WHERE dataset_id = %s ORDER BY number DESC LIMIT 1',
                               (dataset['id'],)).fetchone()
         if (latest['id'] if latest else None) != expect_latest_id:
-            now = f'@{latest["number"]}' if latest else '没有版本'
+            now = f'@{latest["number"]}' if latest else '无版本'
             again = ('请重新运行 fw trainset create' if trainset else '请重新运行 fw batch update' if batch
                      else '请重新运行导入，以最新版本为父版本')
-            raise DatasetError(409, f'{dataset["name"]} 在这期间有了变化（最新是 {now}）；{again}')
+            raise DatasetError(409, f'{dataset["name"]} 在此期间发生了变化（最新为 {now}）；{again}')
         if parent_id is not None:
             parent = conn.execute("SELECT encode(manifest_sha256, 'hex') AS m FROM versions WHERE id = %s",
                                   (parent_id,)).fetchone()
             if parent is None:
                 raise DatasetError(400, f'父版本 {parent_id} 不存在')
             if parent['m'] == manifest_sha256:
-                raise DatasetError(409, '内容和父版本完全一样，没有建新版本')
+                raise DatasetError(409, '内容与父版本完全相同，未建立新版本')
         number = (latest['number'] if latest else 0) + 1
         version_id = conn.execute(
             'INSERT INTO versions (dataset_id, number, parent_id, manifest_sha256, file_count, total_bytes, source, '
@@ -724,7 +724,7 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
         "FROM versions v JOIN datasets d ON d.id = v.dataset_id ORDER BY v.id").fetchall()
     for v in versions:
         if v['m'] != v['rebuilt']:
-            problems.append(f'{v["ref"]}：清单项和登记的清单哈希对不上')
+            problems.append(f'{v["ref"]}：清单项与登记的清单哈希不一致')
     # objects other records hold (the file sets of model versions and evaluation reports, models.verify_inputs)
     more_problems, more_wanted, sets = more(conn)
     problems += more_problems
@@ -747,7 +747,7 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
             if ok and rehash:
                 ok = hash_path(store.path(digest), from_disk=True)[0] == digest
         except OSError as e:
-            problems.append(f'文件 {digest[:12]}（{ref} 等用到）读不出来（{e.strerror or e}），先检查磁盘')
+            problems.append(f'文件 {digest[:12]}（{ref} 等使用）无法读取（{e.strerror or e}），请先检查磁盘')
             continue
         if ok:
             continue
@@ -757,8 +757,8 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
         state = '缺失' if got is None else '已损坏'
         if got is not None:
             store.move_to_quarantine(digest)
-            state += '，已移到 quarantine/，重新导入含它的目录即可补回'
-        problems.append(f'文件 {digest[:12]}（{ref} 等用到）{state}')
+            state += '，已移到 quarantine/，重新导入包含它的目录即可补回'
+        problems.append(f'文件 {digest[:12]}（{ref} 等使用）{state}')
     loose = loose_damaged = 0
     if rehash:
         try:
@@ -771,7 +771,7 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
                 except FileNotFoundError:
                     continue  # replaced or moved meanwhile
                 except OSError as e:
-                    problems.append(f'文件 {digest[:12]}（还没有版本用到）读不出来（{e.strerror or e}），先检查磁盘')
+                    problems.append(f'文件 {digest[:12]}（尚无版本使用）无法读取（{e.strerror or e}），请先检查磁盘')
                     continue
                 if not ok:
                     store.move_to_quarantine(digest)
@@ -784,6 +784,6 @@ def verify(conn, store: Store, rehash: bool = False, repair_from=None, echo=prin
          f'{"（重算了哈希）" if rehash else ""}；'
          f'从备份修复 {repaired} 个；问题 {len(problems)} 个')
     if rehash:
-        echo(f'另外核对了还没有版本用到的文件 {loose} 个（中断的导入留下的）；'
+        echo(f'另外核对了尚无版本使用的文件 {loose} 个（中断的导入遗留）；'
              f'其中损坏的 {loose_damaged} 个已移到 quarantine/，再导入时会重新上传')
     return problems

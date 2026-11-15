@@ -36,7 +36,7 @@ def migration_files() -> List[Tuple[int, str, str]]:
         if m:
             out.append((int(m.group(1)), path.name, path.read_text(encoding='utf-8')))
     if [n for n, _, _ in out] != list(range(1, len(out) + 1)):
-        raise SchemaError('迁移文件的编号要从 0001 开始连续')
+        raise SchemaError('迁移文件的编号须从 0001 开始连续')
     return out
 
 
@@ -58,12 +58,12 @@ def schema_problems(conn) -> List[str]:
     problems = []
     for n, name, sql in known:
         if n not in applied:
-            problems.append(f'数据库还没有应用 {name}：先运行 fw-server migrate')
+            problems.append(f'数据库尚未应用 {name}：请先运行 fw-server migrate')
         elif applied[n][1] != _digest(sql):
-            problems.append(f'{name} 在应用到数据库以后被改过')
+            problems.append(f'{name} 在应用到数据库后被修改过')
     newer = sorted(set(applied) - {n for n, _, _ in known})
     if newer:
-        problems.append(f'数据库比这个版本的程序新（已经应用到 {applied[newer[-1]][0]}），请换用新版程序')
+        problems.append(f'数据库比当前版本的程序新（已应用到 {applied[newer[-1]][0]}），请换用新版程序')
     return problems
 
 
@@ -81,7 +81,7 @@ def migrate(dsn: str) -> List[str]:
                 row = conn.execute('SELECT sha256 FROM schema_migrations WHERE version = %s', (n,)).fetchone()
                 if row is not None:
                     if row['sha256'] != _digest(sql):
-                        raise SchemaError(f'{name} 在应用到数据库以后被改过')
+                        raise SchemaError(f'{name} 在应用到数据库后被修改过')
                     continue
                 conn.execute(sql)
                 conn.execute('INSERT INTO schema_migrations (version, name, sha256) VALUES (%s, %s, %s)',

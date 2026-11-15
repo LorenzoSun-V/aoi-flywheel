@@ -152,7 +152,7 @@ UTF-8 JSON，键的含义：
 | `name` | 快照名称 |
 | `task` | `det`（检测） |
 | `formats` | 这个快照有的标注格式：`yolo`、`coco`、`json` |
-| `missing_formats` | 没生成的格式和原因，例如 `{"coco": "3 张图读不出尺寸……"}` |
+| `missing_formats` | 没生成的格式和原因，例如 `{"coco": "3 张图片无法读取尺寸……"}` |
 | `sources` | 来源数据池版本，每项 `ref`（例如 `SES-TX@4`）、`manifest_sha256`（那个版本的清单哈希）、`site`、`line` |
 | `based_on` | 接着哪个快照的划分，例如 `SES-TX-det@1`；第一版、重新划分、用划分清单时是 `null` |
 | `classes` | 类别名列表，和 classes.txt 一样 |

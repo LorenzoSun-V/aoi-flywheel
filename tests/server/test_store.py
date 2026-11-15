@@ -89,7 +89,7 @@ def test_listing_objects_fails_on_a_folder_it_cannot_read(tmp_path, monkeypatch,
             return real_scandir(p)
 
         monkeypatch.setattr(os, 'scandir', scandir)
-        with pytest.raises(StoreError, match='核对没有完成'):
+        with pytest.raises(StoreError, match='核对未完成'):
             list(s.iter_objects())
     finally:
         s.close()
@@ -288,7 +288,7 @@ def test_verify_fails_when_the_old_record_cannot_be_removed(tmp_path, monkeypatc
     try:
         with monkeypatch.context() as m:
             m.setattr(os, 'unlink', unlink)
-            with pytest.raises(StoreError, match='没能解除写入阻断'):
+            with pytest.raises(StoreError, match='未能解除写入阻断'):
                 s.mark_verified()
         assert UNSYNCED in s.problem()
         s.mark_verified()

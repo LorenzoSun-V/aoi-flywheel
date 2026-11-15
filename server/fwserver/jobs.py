@@ -32,7 +32,7 @@ MAX_LOG_PIECE = 256 * 1024
 MAX_LOG_BYTES = 8 * 1024 * 1024  # per attempt; later pieces are dropped and the log says so
 MAX_RESULT = 1 << 20
 MAX_ERROR = 20000
-LOG_CUT = '\n[日志超过 8 MB，后面的内容没有保存]\n'
+LOG_CUT = '\n[日志超过 8 MB，之后的内容未保存]\n'
 
 
 def _stamp(t) -> Optional[str]:
@@ -49,7 +49,7 @@ def _text(value: Any, what: str, limit: int) -> str:
     if len(value) > limit:
         raise DatasetError(400, f'{what}不能超过 {limit} 个字符')
     if '\x00' in value:
-        raise DatasetError(400, f'{what}里有不能用的字符')
+        raise DatasetError(400, f'{what}中含有不允许使用的字符')
     return value
 
 
@@ -79,7 +79,7 @@ def list_runners(conn) -> List[dict]:
 def runner_versions(conn, name: str) -> List[dict]:
     rows = conn.execute(_RV + 'WHERE lower(r.name) = lower(%s) ORDER BY rv.number', (name,)).fetchall()
     if not rows:
-        raise DatasetError(404, f'没有推理环境 {name}；在 GPU 机上用 fw runner register 登记')
+        raise DatasetError(404, f'推理环境 {name} 不存在；请在 GPU 机上用 fw runner register 登记')
     return [_runner_version(r) for r in rows]
 
 
@@ -90,13 +90,13 @@ def get_runner_version(conn, name: str, number: str = 'latest') -> dict:
     for v in versions:
         if str(v['number']) == str(number):
             return v
-    raise DatasetError(404, f'没有 {name}@{number}（最新是 @{versions[-1]["number"]}）')
+    raise DatasetError(404, f'{name}@{number} 不存在（最新为 @{versions[-1]["number"]}）')
 
 
 def get_runner_version_by_id(conn, rv_id: int) -> dict:
     row = conn.execute(_RV + 'WHERE rv.id = %s', (rv_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有推理环境版本 {rv_id}')
+        raise DatasetError(404, f'推理环境版本 {rv_id} 不存在')
     return _runner_version(row)
 
 
@@ -110,13 +110,13 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     if not NAME.match(name or ''):
         raise DatasetError(400, '推理环境名只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
     if not CONDA_ENV.match(conda_env or ''):
-        raise DatasetError(400, f'conda 环境名不对：{conda_env!r}')
+        raise DatasetError(400, f'conda 环境名无效：{conda_env!r}')
     env_sha256 = check_digest(env_sha256)
     if store.size(env_sha256) is None:
-        raise DatasetError(400, '环境的包清单（conda list --explicit 和 pip freeze）还没上传')
+        raise DatasetError(400, '环境的包清单（conda list --explicit 和 pip freeze）尚未上传')
     src_dir = _text(src_dir or '', '源码目录', 1000).strip()
     if any(c in src_dir for c in '\r\n\t'):
-        raise DatasetError(400, '源码目录里有不能用的字符')
+        raise DatasetError(400, '源码目录中含有不允许使用的字符')
     if src_commit is not None:
         src_commit = src_commit.strip().lower()
         if not COMMIT.match(src_commit):
@@ -127,7 +127,7 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     if src_state_sha256 is not None:
         src_state_sha256 = check_digest(src_state_sha256)
     if src_dirty != (src_state_sha256 is not None):
-        raise DatasetError(400, '源码有未提交的改动时要带上改动的哈希，没有改动时不带')
+        raise DatasetError(400, '源码有未提交的改动时须附带改动的哈希，没有改动时不附带')
     try:
         store.flush()  # the listing is durable before any record points at it
     except StoreError as e:
@@ -138,9 +138,9 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
         raise DatasetError(400, f'框架只能是 {"、".join(FRAMEWORKS)}（用 TensorRT 引擎推理的部署代码）')
     onnx2engine = _text(onnx2engine or '', 'onnx2engine 路径', 1000).strip()
     if any(c in onnx2engine for c in '\r\n\t'):
-        raise DatasetError(400, 'onnx2engine 路径里有不能用的字符')
+        raise DatasetError(400, 'onnx2engine 路径中含有不允许使用的字符')
     if bool(framework) != bool(onnx2engine) or bool(onnx2engine) != (onnx2engine_sha256 is not None):
-        raise DatasetError(400, '写了框架就要同时登记 onnx2engine（路径和它的哈希），没写框架就都不登记')
+        raise DatasetError(400, '填写框架时须同时登记 onnx2engine（路径及其哈希）；未填写框架时两者均不登记')
     tool = bytes.fromhex(check_digest(onnx2engine_sha256)) if onnx2engine_sha256 is not None else None
     with conn.transaction():
         conn.execute('INSERT INTO runners (name) VALUES (%s) ON CONFLICT DO NOTHING', (name,))
@@ -204,7 +204,7 @@ def expire_leases(conn) -> int:
             if r['cancel_requested']:
                 status, error = 'cancelled', None
             elif r['attempts'] >= r['max_attempts']:
-                status, error = 'failed', f'领取了 {r["attempts"]} 次，每次 worker 都在租约到期前失联（掉线、死机或被停掉）'
+                status, error = 'failed', f'已领取 {r["attempts"]} 次，每次 worker 均在租约到期前失联（断网、死机或被停止）'
             else:
                 status, error = 'queued', None
             conn.execute("UPDATE jobs SET status = %s, error = %s, worker_id = NULL, lease_sha256 = NULL, "
@@ -218,7 +218,7 @@ def get_job(conn, job_id: int) -> dict:
     expire_leases(conn)
     row = conn.execute(_JOB + 'WHERE j.id = %s', (job_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有任务 {job_id}')
+        raise DatasetError(404, f'任务 {job_id} 不存在')
     tries = conn.execute('SELECT a.attempt, u.name AS worker, a.started_at, a.ended_at, a.outcome FROM job_attempts a '
                          'JOIN users u ON u.id = a.worker_id WHERE a.job_id = %s ORDER BY a.attempt',
                          (job_id,)).fetchall()
@@ -265,7 +265,7 @@ def runner_params(rv: dict) -> dict:
 
 def find_runner(conn, runner: Optional[str], what: str) -> dict:
     if not runner:
-        raise DatasetError(400, f'要写{what}用哪个推理环境（fw runner list 看有哪些）')
+        raise DatasetError(400, f'请指定{what}所用的推理环境（可用 fw runner list 查看）')
     name, _, number = runner.partition('@')
     return get_runner_version(conn, name, number or 'latest')
 
@@ -288,7 +288,7 @@ def submit(conn, user: dict, kind: str, runner: Optional[str] = None, params: Op
     if kind != 'check':
         raise DatasetError(400, f'任务类型只能是 {"、".join(KINDS)}')
     if params:
-        raise DatasetError(400, '检查推理环境不带参数')
+        raise DatasetError(400, '检查推理环境不接受参数')
     rv = find_runner(conn, runner, '检查')
     return enqueue(conn, user, kind, rv, runner_params(rv))
 
@@ -298,7 +298,7 @@ def cancel(conn, job_id: int, user_id: Optional[int] = None) -> dict:
     with conn.transaction():
         row = conn.execute('SELECT status FROM jobs WHERE id = %s FOR UPDATE', (job_id,)).fetchone()
         if row is None:
-            raise DatasetError(404, f'没有任务 {job_id}')
+            raise DatasetError(404, f'任务 {job_id} 不存在')
         if row['status'] == 'queued':
             conn.execute("UPDATE jobs SET status = 'cancelled', cancel_requested = true, finished_at = now() "
                          "WHERE id = %s", (job_id,))
@@ -311,7 +311,7 @@ def cancel(conn, job_id: int, user_id: Optional[int] = None) -> dict:
         elif row['status'] == 'cancelled':
             pass  # cancelled already (a retried request, or the worker stopped it): nothing to do
         else:
-            raise DatasetError(409, f'任务 {job_id} 已经{STATUSES[row["status"]]}，不能取消')
+            raise DatasetError(409, f'任务 {job_id} 已{STATUSES[row["status"]]}，不能取消')
     return get_job(conn, job_id)
 
 
@@ -344,12 +344,12 @@ def _held(conn, job_id: int, token: str) -> dict:
     row = conn.execute('SELECT id, kind, params, runner_version_id, submitted_by, status, attempts, lease_sha256, '
                        'lease_expires, cancel_requested FROM jobs WHERE id = %s FOR UPDATE', (job_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有任务 {job_id}')
+        raise DatasetError(404, f'任务 {job_id} 不存在')
     expired = row['lease_expires'] is None or conn.execute(
         'SELECT %s::timestamptz <= clock_timestamp() AS e', (row['lease_expires'],)).fetchone()['e']
     if row['status'] != 'running' or bytes(row['lease_sha256']) != _hash(token or '') or expired:
-        raise DatasetError(409, f'任务 {job_id} 的这次领取已经失效（租约过期、任务已结束或已交给别的 worker），'
-                                f'不再接受它的结果')
+        raise DatasetError(409, f'任务 {job_id} 的本次领取已失效（租约过期、任务已结束或已交给其他 worker），'
+                                f'不再接受其结果')
     return row
 
 
@@ -365,7 +365,7 @@ def add_log(conn, job_id: int, token: str, seq: int, text: str) -> dict:
     """One piece of output; sending the same seq again (a retry) changes nothing."""
     text = _text(text, '日志', MAX_LOG_PIECE)
     if not isinstance(seq, int) or isinstance(seq, bool) or not 0 <= seq < 1 << 30:
-        raise DatasetError(400, '日志序号不对')
+        raise DatasetError(400, '日志序号不正确')
     with conn.transaction():
         row = _held(conn, job_id, token)
         used = conn.execute('SELECT coalesce(sum(length(text)), 0) AS n, count(*) AS c FROM job_logs '
@@ -395,13 +395,13 @@ def _check_result(kind: str, result: Any) -> dict:
         raise DatasetError(400, '任务结果太大')
     if kind == 'eval':
         if not isinstance(result.get('eval_id'), int) or isinstance(result['eval_id'], bool):
-            raise DatasetError(400, '评估结果里要有评估报告的编号')
+            raise DatasetError(400, '评估结果中须包含评估报告的编号')
     if kind == 'check':
         if not isinstance(result.get('env_sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', result['env_sha256']):
-            raise DatasetError(400, '检查结果里要有环境包清单的哈希')
+            raise DatasetError(400, '检查结果中须包含环境包清单的哈希')
         for key in ('same_env', 'same_src'):
             if not isinstance(result.get(key), bool):
-                raise DatasetError(400, f'检查结果里的 {key} 应为 true 或 false')
+                raise DatasetError(400, f'检查结果中的 {key} 应为 true 或 false')
     return result
 
 
@@ -436,9 +436,9 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
         if outcome == 'done':
             result = _check_result(kind, result)
         elif result is not None:
-            raise DatasetError(400, '只有完成的任务带结果')
+            raise DatasetError(400, '只有已完成的任务附带结果')
         if outcome == 'failed' and not error.strip():
-            raise DatasetError(400, '失败的任务要写原因')
+            raise DatasetError(400, '失败的任务须写明原因')
         if row['cancel_requested'] and outcome != 'cancelled':
             # the cancel was accepted before the result came: it stands (a failure keeps its reason)
             outcome, result = 'cancelled', None

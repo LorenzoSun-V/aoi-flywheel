@@ -33,13 +33,13 @@ def test_edited_or_newer_schema_is_refused(empty_db):
     db.migrate(empty_db)
     with db.connect(empty_db) as c:
         c.execute("UPDATE schema_migrations SET sha256 = 'x' WHERE version = 1")
-        assert any('被改过' in p for p in db.schema_problems(c))
+        assert any('被修改过' in p for p in db.schema_problems(c))
         with pytest.raises(db.SchemaError):
             db.migrate(empty_db)
         c.execute("UPDATE schema_migrations SET sha256 = %s WHERE version = 1",
                   (db._digest(db.migration_files()[0][2]),))
         c.execute("INSERT INTO schema_migrations (version, name, sha256) VALUES (99, '0099_future.sql', 'y')")
-        assert any('比这个版本的程序新' in p for p in db.schema_problems(c))
+        assert any('比当前版本的程序新' in p for p in db.schema_problems(c))
 
 
 def test_unmigrated_database_is_reported(empty_db):

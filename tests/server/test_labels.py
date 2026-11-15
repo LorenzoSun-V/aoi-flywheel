@@ -54,7 +54,7 @@ def test_a_label_names_a_version_for_good(api, make_api, dataset, tmp_path, cach
     assert api.version(dataset, 2)['labels'] == ['v0.1.0', 'v1.0.0']
     assert api.add_label(dataset, 2, 'v1.0.0')['labels'] == ['v0.1.0', 'v1.0.0']
     assert api.add_label(dataset, 'v0.1.0', 'v1.0.0')['id'] == v2['id']
-    with pytest.raises(ops.ApiError, match=f'已经用在 {dataset}@2 上') as e:
+    with pytest.raises(ops.ApiError, match=f'已用于 {dataset}@2') as e:
         api.add_label(dataset, 3, 'v1.0.0')
     assert e.value.status == 409
     assert [v['labels'] for v in api.versions(dataset)] == [['v0.0.1'], ['v0.1.0', 'v1.0.0'], []]
@@ -76,7 +76,7 @@ def test_a_label_names_a_version_for_good(api, make_api, dataset, tmp_path, cach
         api.version(dataset, 'v1.0.0')
     assert e.value.status == 404
     assert api.version(dataset, 2)['labels'] == ['v0.1.0']
-    with pytest.raises(ops.ApiError, match='撤销的版本号不能再用'):
+    with pytest.raises(ops.ApiError, match='撤销的版本号不能再次使用'):
         api.add_label(dataset, 3, 'v1.0.0')
     rows = api.labels(dataset)
     assert [(r['label'], r['ref'], r['retired']) for r in rows['labels']] == [
@@ -123,7 +123,7 @@ def test_labels_of_snapshots_and_models(api, make_api, model, snapshot, tmp_path
     # labels of the dataset namespace and of the model namespace do not meet
     assert status_of(lambda: api.version(ts, 'v1.0.0')) == 404
     other = trained(api, model, snapshot, tmp_path)
-    with pytest.raises(ops.ApiError, match=f'已经用在 {model}@1 上'):
+    with pytest.raises(ops.ApiError, match=f'已用于 {model}@1'):
         api.add_model_label(model, other['number'], 'v1.0.0')
     field, admin = make_api('field'), make_api('admin')
     assert status_of(lambda: field.add_model_label(model, 2, 'v1.1.0')) == 403
@@ -160,7 +160,7 @@ def test_a_batch_revision_takes_no_label(api, dataset, tmp_path):
     write(tmp_path / 'b', 'x.bmp', f'batch label {uuid.uuid4().hex}'.encode())
     name = f'B-{uuid.uuid4().hex[:8]}'
     ops.upload_batch(api, tmp_path / 'b', dataset, '张三', name=name, echo=quiet)
-    with pytest.raises(ops.ApiError, match='不起版本号') as e:
+    with pytest.raises(ops.ApiError, match='不设定版本号') as e:
         api.add_label(name, 1, 'v0.1.0')
     assert e.value.status == 400
 

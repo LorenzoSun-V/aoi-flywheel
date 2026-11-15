@@ -177,7 +177,7 @@ def test_fw_command_line(service, tokens, tmp_path, monkeypatch, capsys):
     assert fw_cli.main(['cache', 'clear']) == 0
     assert fw_cli.main(['get', 'no-such-dataset', '--to', str(tmp_path / 'x')]) == 1
     out = capsys.readouterr()
-    assert '新增 1' in out.out and '没有数据集' in out.err
+    assert '新增 1' in out.out and '不存在' in out.err
 
 
 def test_fw_server_command_line(database, service, monkeypatch, capsys):
