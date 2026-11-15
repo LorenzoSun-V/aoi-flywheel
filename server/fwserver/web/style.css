@@ -230,6 +230,9 @@ details.warn summary { color: var(--warn); }
 .tabs a:not(.button):hover { background: rgba(0, 0, 0, .04); color: var(--text); text-decoration: none; }
 .tabs a.on:not(.button) { background: rgba(0, 0, 0, .07); color: var(--text); font-weight: 600; }
 .tabs a.button { margin-left: auto; }
+.count { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 980px; background: rgba(0, 0, 0, .06);
+  color: var(--muted); font-size: 12px; font-weight: 600; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; vertical-align: 1px; }
+.tabs a.on .count { background: rgba(0, 0, 0, .1); color: var(--text); }
 
 /* browsing by site and line: the tree in the side bar */
 .browse { display: block; }

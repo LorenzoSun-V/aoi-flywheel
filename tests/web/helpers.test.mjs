@@ -8,7 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
-  newerCandidates, currentReleases, releaseDone, localTime, zonedTime,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -343,4 +343,26 @@ test('a release: the current one of each line, the newer candidates, the deploym
   assert.equal(zonedTime('2026-11-20T10:30', 0), '2026-11-20T10:30+00:00');
   assert.equal(zonedTime('2026-11-20T10:30', -570), '2026-11-20T10:30-09:30');
   assert.equal(zonedTime('2026-11-20T10:30', 345), '2026-11-20T10:30+05:45');
+});
+
+test('what waits for an account: its groups in order, newest first, each batch by its state, only its own recent failures', () => {
+  const b = (name, status, at, more = {}) => ({ name, status, updated_at: at, revision: 2, owner: 'li', reviewer: 'zhang', pool: 'SES-TX', dir: '20261113', ...more });
+  const j = (id, status, by, at, more = {}) => ({ id, status, submitted_by: by, created_at: at, finished_at: at, kind_text: '评估', ...more });
+  const now = new Date('2026-11-15T12:00:00Z');
+  const rows = todoItems({
+    toReview: [b('A', 'review', '2026-11-14T10:00:00Z'), b('B', 'review', '2026-11-15T10:00:00Z'), b('X', 'approved', '2026-11-15T10:00:00Z')],
+    approved: [b('C', 'approved', '2026-11-13T10:00:00Z')],
+    mine: [b('D', 'open', '2026-11-15T09:00:00Z'), b('E', 'rejected', '2026-11-12T09:00:00Z'), b('A', 'review', '2026-11-14T10:00:00Z'),
+      b('F', 'imported', '2026-11-15T11:00:00Z')],
+    failed: [j(7, 'failed', 'zhang', '2026-11-14T08:00:00Z', { error: '读不了 conda 环境\n详细信息' }), j(8, 'failed', 'wang', '2026-11-15T08:00:00Z'),
+      j(9, 'failed', 'zhang', '2026-11-01T08:00:00Z'), j(10, 'done', 'zhang', '2026-11-15T08:00:00Z')],
+  }, 'zhang', now);
+  assert.deepEqual(rows.map((r) => [r.kind, r.batch ? r.batch.name : r.job.id]),
+    [['review', 'B'], ['review', 'A'], ['import', 'C'], ['rejected', 'E'], ['unsent', 'D'], ['failed', 7]]);
+  assert.deepEqual(rows.map(todoText), [
+    '第 2 版，上传账号 li，入库到 SES-TX / 20261113/', '第 2 版，上传账号 li，入库到 SES-TX / 20261113/',
+    '第 2 版已由 zhang 复核通过，入库到 SES-TX / 20261113/', '第 2 版已被 zhang 退回，请修改后上传新版次', '第 2 版尚未提交复核',
+    '评估：读不了 conda 环境']);
+  assert.deepEqual(todoItems({}, 'zhang', now), []);
+  assert.equal(todoText({ kind: 'failed', job: j(11, 'failed', 'zhang', '2026-11-15T08:00:00Z', { error: null }) }), '评估');
 });

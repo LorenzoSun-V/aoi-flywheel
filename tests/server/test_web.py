@@ -15,7 +15,7 @@ import pytest
 
 from test_trainsets import label, pool
 from test_evals import gpu  # noqa: F401  (fixture)
-from test_jobs import make_worker  # noqa: F401
+from test_jobs import fake_conda, make_worker  # noqa: F401
 from test_models import model, snapshot  # noqa: F401
 
 
@@ -456,6 +456,70 @@ def test_models_of_a_line_are_compared_on_its_benchmark_test_set(service, tokens
     assert not {first, second, other, stray, snap['dataset']} & {n for g in groups.values() for n in g}
     assert seen['poolFirst'] == ['', '请选择数据池'] and seen['poolOfLine'] == a and seen['poolOfTwo'] == ''
     assert f'{second}@1' in seen['field']['bar'] and seen['field']['change'] == 0
+
+
+@pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
+def test_the_home_page_lists_what_waits_for_the_account(service, tokens, api, make_api, make_worker, fake_conda, database, tmp_path):  # noqa: F811
+    """The home page's 「待我处理」: for an algorithm engineer the batches it is asked to review, the approved ones
+    to import and the job it submitted that failed (not another account's); for a field account its rejected
+    batches and the ones not yet sent to review, and nothing it may not act on; for a new account, nothing. The
+    batch list's tabs carry how many each holds."""
+    from fw import ops
+    from fwserver import auth, db
+    from helpers import quiet, write
+    from test_jobs import runner
+    site = f'S{os.urandom(4).hex()}'
+    pool_name = pool(api, tmp_path / 'p', {'20261101/a.bmp': b'pool A'}, site=site, line='TX')
+    field, algo_name = make_api('field'), tokens['algo_name']
+    made = {}
+    for i, state in enumerate(('review', 'approved', 'rejected', 'open')):
+        folder = tmp_path / f'2026120{i + 1}'
+        write(folder, 'x.bmp', f'{site} {state}'.encode())
+        b = ops.upload_batch(field, folder, pool_name, '张三', name=f'{site}-{state}', echo=quiet)
+        if state != 'open':
+            field.batch_step(b['name'], 'submit', {'reviewer': algo_name})
+        if state == 'approved':
+            api.batch_step(b['name'], 'approve', {})
+        if state == 'rejected':
+            api.batch_step(b['name'], 'reject', {'comment': '划痕漏标'})
+        made[state] = b['name']
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    c = w.claim()
+    assert c['id'] == job['id']
+    w.finish(job['id'], c['token'], 'failed', error='读不了 conda 环境\n更多信息')
+    with db.connect(database) as k:
+        fresh = f'new-{os.urandom(3).hex()}'
+        auth.add_user(k, fresh, 'field')
+        fresh_token = auth.create_token(k, fresh, 'test')[0]
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run(['node', str(WEB_TESTS / 'todo.cjs'), service.url + '/', tokens['algo'], tokens['field'], fresh_token, site,
+                          str(shots)], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    ours = set(made.values()) | {f'任务 {job["id"]}'}
+    mine = lambda rows: [row for row in rows if row[2] in ours]  # noqa: E731  (other tests' rows are there too)
+    where = f'入库到 {pool_name} / 2026120'
+    algo = mine(seen['algo']['rows'])
+    assert [(k, o) for k, _, o, _ in algo] == [('review', made['review']), ('import', made['approved']), ('failed', f'任务 {job["id"]}')]
+    assert algo[0][1] == '待我复核' and algo[0][3] == f'第 1 版，上传账号 {tokens["field_name"]}，{where}1/'
+    assert algo[1][1] == '待入库' and algo[1][3] == f'第 1 版已由 {algo_name} 复核通过，{where}2/'
+    assert algo[2][1] == '任务失败' and algo[2][3] == '检查推理环境：读不了 conda 环境'
+    assert seen['algo']['head'].startswith('待我处理') and seen['algo']['lines']
+    assert seen['algoLink'] == f'#/b/{seen["algo"]["rows"][0][2]}'  # the row leads to its batch
+    # the tabs of the batch list count what each holds, here on the site of this test
+    assert seen['algoTabs']['todo'] == {'tabs': [['todo', '1'], ['mine', '0'], ['all', None]], 'on': 'todo', 'rows': 1}
+    assert seen['algoTabs']['mine']['rows'] == 0 and seen['algoTabs']['all']['rows'] == 4
+    field_rows = mine(seen['field']['rows'])
+    assert [(k, s, o) for k, s, o, _ in field_rows] == [('rejected', '已退回', made['rejected']), ('unsent', '待提交复核', made['open'])]
+    assert field_rows[0][3] == f'第 1 版已被 {algo_name} 退回，请修改后上传新版次' and field_rows[1][3] == '第 1 版尚未提交复核'
+    assert not [row for row in seen['field']['rows'] if row[0] in ('review', 'import', 'failed')]  # what a field account may not do
+    assert seen['fieldTabs'] == {'tabs': [['mine', '4'], ['all', None]], 'on': 'mine', 'rows': 4}
+    assert seen['fresh']['rows'] == [] and seen['fresh']['none'] == '暂无待处理的事项。' and seen['fresh']['head'] == '待我处理'
+    assert seen['fits'][0] <= seen['fits'][1] + 1
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

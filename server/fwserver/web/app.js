@@ -3228,10 +3228,14 @@ async function batchesPage(query) {
   scope = at;
   renderNav();
   const view = query.get('view') || (can('batches.review') ? 'todo' : 'mine');
-  const [{ batches }, tree] = await Promise.all([
-    api.batches(scopeQuery(at, view === 'todo' ? { todo: true } : view === 'mine' ? { mine: true } : {})), api.sites()]);
-  const tabs = [can('batches.review') ? ['todo', '待我复核'] : null, ['mine', '我上传的'], ['all', '全部']].filter(Boolean)
-    .map(([k, t]) => el('a', { href: hrefOf(['batches'], { view: k, site: at.site, line: at.line, q: at.q }), class: k === view ? 'on' : '' }, t));
+  const views = [can('batches.review') ? ['todo', '待我复核', { todo: true }] : null, ['mine', '我上传的', { mine: true }], ['all', '全部', {}]].filter(Boolean);
+  // the list shown, and those of the other tabs that are counted (all but 「全部」)
+  const wanted = views.filter(([k]) => k === view || k !== 'all');
+  const [lists, tree] = await Promise.all([Promise.all(wanted.map(([, , q]) => api.batches(scopeQuery(at, q)).then((r) => r.batches))), api.sites()]);
+  const listOf = Object.fromEntries(wanted.map(([k], i) => [k, lists[i]]));
+  const batches = listOf[view] || [];
+  const tabs = views.map(([k, t]) => el('a', { href: hrefOf(['batches'], { view: k, site: at.site, line: at.line, q: at.q }), class: k === view ? 'on' : '', 'data-view': k },
+    t, k !== 'all' ? el('span', { class: 'count' }, String(listOf[k].length)) : null));
   const rows = batches.map((b) => el('tr', {},
     el('td', {}, bref(b.name)), el('td', {}, `第 ${b.revision} 版`),
     el('td', {}, statusText(BATCH_DOT[b.status], b.status_text)),
@@ -3868,6 +3872,65 @@ export function batchesUnderWay(batches) {
   return batches.filter((b) => b.status !== 'imported' && b.status !== 'closed');
 }
 
+// What waits for an account (name), for the home page, in this order: batches it is asked to review, approved
+// batches to import, its own batches rejected or not yet sent to review, and the jobs it submitted that failed
+// in the last days; newest first within each. Rows: {kind, batch | job, at}.
+export const TODO_KINDS = ['review', 'import', 'rejected', 'unsent', 'failed'];
+export function todoItems({ toReview = [], approved = [], mine = [], failed = [] }, name, now = new Date(), days = 7) {
+  const since = now.getTime() - days * 86400000;
+  const rows = [
+    ...toReview.filter((b) => b.status === 'review').map((b) => ({ kind: 'review', batch: b, at: b.updated_at })),
+    ...approved.filter((b) => b.status === 'approved').map((b) => ({ kind: 'import', batch: b, at: b.updated_at })),
+    ...mine.filter((b) => b.status === 'rejected').map((b) => ({ kind: 'rejected', batch: b, at: b.updated_at })),
+    ...mine.filter((b) => b.status === 'open').map((b) => ({ kind: 'unsent', batch: b, at: b.updated_at })),
+    ...failed.filter((j) => j.status === 'failed' && j.submitted_by === name
+      && new Date(j.finished_at || j.created_at).getTime() >= since)
+      .map((j) => ({ kind: 'failed', job: j, at: j.finished_at || j.created_at }))];
+  return rows.sort((a, b) => TODO_KINDS.indexOf(a.kind) - TODO_KINDS.indexOf(b.kind) || (b.at || '').localeCompare(a.at || ''));
+}
+
+// The words of a row of todoItems.
+export function todoText(r) {
+  const b = r.batch;
+  if (r.kind === 'review') return `第 ${b.revision} 版，上传账号 ${b.owner}，入库到 ${b.pool} / ${b.dir}/`;
+  if (r.kind === 'import') return `第 ${b.revision} 版已由 ${b.reviewer} 复核通过，入库到 ${b.pool} / ${b.dir}/`;
+  if (r.kind === 'rejected') return `第 ${b.revision} 版已被 ${b.reviewer} 退回，请修改后上传新版次`;
+  if (r.kind === 'unsent') return `第 ${b.revision} 版尚未提交复核`;
+  const error = String(r.job.error || '').split('\n')[0];
+  return `${r.job.kind_text}${error ? `：${error}` : ''}`;
+}
+
+const TODO_STATE = { review: ['orange', '待我复核'], import: ['green', '待入库'], rejected: ['red', '已退回'],
+  unsent: ['blue', '待提交复核'], failed: ['red', '任务失败'] };
+
+// The lists the home page's 「待我处理」 is made of, as far as this account may read them; null when it may
+// read none of them.
+async function todoLists() {
+  const may = { review: can('batches.review'), import: can('batches.read') && can('datasets.write'),
+    mine: can('batches.write'), jobs: can('jobs.read') };
+  if (!Object.values(may).some(Boolean)) return null;
+  const none = { batches: [] };
+  const [toReview, approved, rejected, unsent, failed] = await Promise.all([
+    may.review ? api.batches({ todo: true }) : none,
+    may.import ? api.batches({ status: 'approved' }) : none,
+    may.mine ? api.batches({ mine: true, status: 'rejected' }) : none,
+    may.mine ? api.batches({ mine: true, status: 'open' }) : none,
+    may.jobs ? api.jobs('failed', 200) : []]);
+  return todoItems({ toReview: toReview.batches, approved: approved.batches, mine: [...rejected.batches, ...unsent.batches], failed }, me.name);
+}
+
+function todoSection(rows) {
+  const body = rows.length ? el('table', { id: 'todo' },
+    el('tr', {}, ['事项', '对象', '说明', '时间'].map((h) => el('th', {}, h))),
+    rows.map((r) => el('tr', { 'data-kind': r.kind },
+      el('td', {}, statusText(...TODO_STATE[r.kind])),
+      el('td', {}, r.batch ? bref(r.batch.name) : jobLink(r.job.id)),
+      textCell(todoText(r)), timeCell(r.at))))
+    : el('p', { id: 'todo-none', class: 'muted' }, '暂无待处理的事项。');
+  return [el('div', { class: 'section-head' }, el('h2', { id: 'todo-head' }, '待我处理', rows.length ? el('span', { class: 'count' }, String(rows.length)) : null,
+    info('列出需要本账号处理的事项：请本账号复核的批次、复核通过待入库的批次、本账号被退回或尚未提交复核的批次，以及本账号近 7 天提交且执行失败的任务。', '待我处理说明'))), body];
+}
+
 // The reports measured on a version of a line's benchmark test set as a whole: all its images, no folders
 // chosen (models are compared on these only).
 export function onBenchmark(evals, versionId) {
@@ -4049,13 +4112,16 @@ async function overviewPage(query) {
   const at = { ...scopeOf(query), q: '' };
   scope = at;
   renderNav();
-  const tree = await api.sites();
+  const home = !at.site && !at.line;
+  const [tree, todo] = await Promise.all([api.sites(), home ? todoLists() : null]);
   const side = placeTree(tree, at, null, (site, line) => hrefOf([], { site, line }));
   const site = tree.sites.find((s) => s.code.toLowerCase() === at.site.toLowerCase());
   if (!at.line) {
     show(at.site ? crumbs(null, at) : el('nav', { class: 'crumbs' }, sideToggle()), el('h1', {}, at.site ? (site ? placeText(site) : at.site) : '概览',
       info('点击产线，可查看其当前发布的模型、最近评估、训练集快照、数据池和在办批次。', '概览说明')), side,
-      el('div', { class: 'browse' }, el('div', { class: 'list' }, lineTable(tree, at))));
+      el('div', { class: 'browse' }, el('div', { class: 'list' },
+        todo ? [todoSection(todo), el('div', { class: 'section-head' }, el('h2', { id: 'lines-head' }, '各产线'))] : null,
+        lineTable(tree, at))));
     return;
   }
   const where = { site: at.site, line: at.line };
