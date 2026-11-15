@@ -37,7 +37,7 @@ const { chromium } = require('playwright');
   seen.navOn = await page.textContent('#nav a.on');
   seen.lineOn = await page.textContent('#places li.line a.on');
   seen.release = { ref: await page.textContent('#release .ref'), sub: await page.textContent('#release .sub'),
-    state: await page.textContent('#release .state'), go: await page.getAttribute('#release a.go', 'href') };
+    acts: await page.textContent('#release .acts'), go: await page.getAttribute('#release a.go', 'href') };
   seen.models = await page.$$eval('table.models tr', (rows) => rows.slice(1).map((r) => [...r.querySelectorAll('td')].slice(0, 4).map((c) => c.textContent)));
   seen.data = await page.$$eval('table.data tr', (rows) => rows.slice(1).map((r) => [...r.querySelectorAll('td')].slice(0, 2).map((c) => c.textContent)));
   seen.batches = await page.$$eval('table.batches tr', (rows) => rows.map((r) => [r.querySelector('td a').textContent, r.querySelector('td.state').textContent]));
