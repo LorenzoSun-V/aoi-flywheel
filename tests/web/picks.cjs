@@ -56,6 +56,8 @@ const { chromium } = require('playwright');
   for (const batch of batches.split(',')) {
     page = await open(field);
     await page.goto(`${url}#/b/${batch}`);
+    await page.click('.batch-head .more-button');            // the form opens from 更多
+    await page.click('#prelabel-open');
     await page.waitForSelector('#prelabel-model');
     const form = await page.$eval('#prelabel-form', (f) => {
       const s = f.querySelector('#prelabel-model');

@@ -22,12 +22,14 @@ const { chromium } = require('playwright');
   // closing a batch: asked under the button, with a field for the reason
   await page.goto(`${url}#/b/${encodeURIComponent(batch)}`);
   await page.reload();
-  await page.waitForSelector('#close-batch');
+  await page.waitForSelector('.batch-head .more-button');
+  await page.click('.batch-head .more-button');             // 更多 › 关闭批次…
   await page.click('#close-batch');
   await page.waitForSelector('.ask .ask-reason');
   seen.closeAsk = await page.textContent('.ask .ask-text');
   await page.keyboard.press('Escape');
   seen.escaped = await page.locator('.ask').count();
+  await page.click('.batch-head .more-button');
   await page.click('#close-batch');
   await page.fill('.ask .ask-reason', '重复上传');
   await page.screenshot({ path: `${out}/feedback-close.png`, fullPage: true });

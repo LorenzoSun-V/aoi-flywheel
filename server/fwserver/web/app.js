@@ -3991,39 +3991,140 @@ function prelabelModels(versions, d) {
   return select;
 }
 
+// The four steps of a batch (上传, 提交复核, 复核, 入库), each done, under way (on), sent back (bad), ahead
+// (todo) or never reached (off: the batch was closed), with a line on where it stands. b: GET /batches/<name>.
+export function batchFlow(b, now = new Date()) {
+  const rev = b.revision;
+  const last = (step, n = rev) => b.steps.filter((s) => s.step === step && (n === null || s.revision === n)).pop();
+  const by = (s) => `${s.actor} · ${listWhen(s.at, now)}`;
+  const up = last('upload');
+  const sub = last('submit');
+  const ok = last('approve');
+  const flow = [
+    { name: '上传', state: 'done', text: `第 ${rev} 版` + (up ? ` · ${listWhen(up.at, now)}` : '') },
+    { name: '提交复核', state: sub ? 'done' : 'todo', text: sub ? by(sub) : '上传后提交复核' },
+    { name: '复核', state: ok ? 'done' : 'todo', text: ok ? `${ok.actor} 通过 · ${listWhen(ok.at, now)}` : '提交后由复核人复核' },
+    { name: '入库', state: b.imported ? 'done' : 'todo', text: b.imported ? `已入库，建立 ${b.imported}` : '复核通过后入库' },
+  ];
+  const set = (i, state, text) => { flow[i] = { ...flow[i], state, text }; };
+  if (b.status === 'open') set(1, 'on', `待 ${b.owner} 提交第 ${rev} 版`);
+  else if (b.status === 'review') set(2, 'on', `待 ${b.reviewer} 复核第 ${rev} 版`);
+  else if (b.status === 'rejected') {
+    set(0, 'on', `待 ${b.owner} 上传第 ${rev + 1} 版`);
+    set(1, 'todo', b.reviewer ? `上传后提交给 ${b.reviewer}` : '上传后提交复核');
+    set(2, 'bad', `第 ${rev} 版已退回`);
+  } else if (['approved', 'imported'].includes(b.status)) {
+    if (!sub) set(1, 'done', `${ok ? ok.actor : b.reviewer} 修改后的一版`);  // approved with the reviewer's own folder
+    if (b.status === 'approved') set(3, 'on', '复核通过，待入库');
+  } else if (b.status === 'closed') {
+    const at = flow.findIndex((s) => s.state !== 'done');
+    flow.forEach((s, i) => { if (i >= at && at >= 0) set(i, i === at ? 'bad' : 'off', i === at ? '批次已关闭' : ''); });
+  }
+  return flow;
+}
+
+// The images the last rejection pointed at, as the revision after it has them: changed (the image or its label
+// file differs), unchanged, or gone. rejected: that reject step; changed: changedImages of the two revisions.
+export function rejectionChecks(rejected, changed, paths) {
+  const has = new Set(paths);
+  const rows = rejected.images.map((p) => ({ path: p, note: (rejected.notes || {})[p] || '',
+    change: !has.has(p) ? 'gone' : changed.has(p) ? 'changed' : 'same' }));
+  return { rows, done: rows.filter((r) => r.change !== 'same').length };
+}
+const CHANGE_TEXT = { changed: '已修改', same: '未修改', gone: '已删除' };
+
+// The step bar of a batch.
+function flowBar(flow) {
+  return el('ol', { class: 'steps flow', id: 'batch-flow', 'aria-label': '批次进度' }, flow.map((s, i) =>
+    el('li', { class: s.state, 'aria-current': s.state === 'on' ? 'step' : null },
+      el('span', { class: 'n' }, s.state === 'done' ? icon('check') : String(i + 1)),
+      el('span', { class: 'what' }, el('span', { class: 'name' }, s.name), el('span', { class: 'said' }, s.text)))));
+}
+
+// A labelling batch, laid out along its course: where it stands, then what the account viewing it does next
+// (the labeler: the rejection to fix, or submitting; the reviewer: what changed since the revision sent back,
+// and the review; importing; what import made), then its revisions, pre-labels, changes and steps.
 async function batchPage(name, query) {
   const show = live();
   let modelVersions = null;  // every model version, read once per visit: the page redraws while a pre-label runs
+  let prelabelOpen = query.get('prelabel') === '1';  // the pre-label form, opened from 更多
   const msg = el('div');
   const say = (e) => msg.replaceChildren(errorBox(e));
   const draw = async () => {
     const b = await api.batch(name);
     const has = (a) => b.actions.includes(a);
+    const now = new Date();
     const newer = Number(query.get('new')) || b.revision;
     const older = Number(query.get('old')) || newer - 1;
     const compare = older >= 1 && older !== newer ? await api.compareBatch(b.name, older, newer) : null;
     const act = (fn, said) => async () => { try { msg.replaceChildren(); await fn(); await draw(); toastDone(said); } catch (e) { say(e); } };
-    const forms = [];
-    if (has('revise')) {
-      forms.push(el('div', { class: 'row' }, el('a', { class: 'button', href: hrefOf(['batch-up', b.name]) }, '上传新版次'),
-        info(`也可使用命令行：先用 fw batch get ${b.name} 取回，在 LiteAnno 中修改后，执行 fw batch update ${b.name} <目录> --labeler <姓名>。`, '命令行说明')));
+    const files = await filesOf(await api.version(b.name, b.revision));
+    const images = files.filter((f) => IMAGE_EXTS.has(ext(f.path)));
+    const imageHref = (rev, p, q) => hrefOf(['img', b.name, String(rev), p], q);
+    const reviewing = has('approve') || has('reject');
+    const key = reviewKey(me ? me.name : '', b.name, b.revision);
+    const state = reviewing ? loadReview(key) : null;
+    const seen = reviewing ? images.filter((f) => state.seen.has(f.path)).length : 0;
+    const lastRejection = (rev) => b.steps.filter((s) => s.step === 'reject' && s.revision === rev).pop() || null;
+    const cards = [];
+
+    // the head: where the batch goes, who has it, the next step of this account and the rest behind 更多
+    const head = el('div', { class: 'row batch-head' });
+    const next = reviewing && b.status === 'review' && images.length
+      ? el('a', { class: 'button primary', id: 'review-start', href: imageHref(b.revision, (images.find((f) => !state.seen.has(f.path)) || images[0]).path) },
+        seen ? '继续复核' : '开始复核')
+      : has('revise') && b.status === 'rejected'
+        ? el('a', { class: 'button primary', id: 'revise', href: hrefOf(['batch-up', b.name]) }, `上传第 ${b.revision + 1} 版`) : null;
+    const more = [
+      has('revise') && b.status !== 'rejected' ? { text: '上传新版次', icon: 'upload', href: hrefOf(['batch-up', b.name]), id: 'revise' } : null,
+      has('prelabel') ? { text: '运行预标注…', icon: 'chip', id: 'prelabel-open', run: () => { prelabelOpen = true; draw(); } } : null,
+      { text: '复制取回命令', icon: 'copy', copy: `fw batch get ${b.name}`, id: 'copy-get' },
+      has('close') ? { text: '关闭批次…', icon: 'remove', id: 'close-batch', run: () => askFirst(head, {
+        text: `关闭 ${b.name} 后不再复核或入库，各版内容保留。`, reason: '关闭原因（选填）', go: '确认关闭',
+        run: async (why) => { await api.batchStep(b.name, 'close', { comment: why }); await draw(); toastDone(`已关闭 ${b.name}`); } }) } : null,
+    ].filter(Boolean);
+    head.append(
+      el('div', { class: 'facts', id: 'batch-facts' }, [
+        ['入库到', [el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` / ${b.dir}/`]],
+        ['上传账号', b.owner],
+        ['复核人', b.reviewer ? b.reviewer + (me && b.reviewer === me.name ? '（本账号）' : '') : '未指定'],
+        [b.imported ? '入库的版次' : '当前', `第 ${b.revision} 版 · ${images.length} 张图`],
+      ].map(([k, v]) => el('span', {}, el('span', { class: 'muted' }, k), ' ', v))),
+      el('div', { class: 'actions' }, next, moreMenu(b.name, more, true)));
+
+    // the labeler: the revision sent back, image by image
+    if (b.status === 'rejected') {
+      const r = lastRejection(b.revision);
+      cards.push(el('div', { class: 'panel card bad-card', id: 'rejected-card' },
+        el('h3', {}, has('revise') ? `第 ${b.revision} 版被退回，请修改后上传第 ${b.revision + 1} 版` : `第 ${b.revision} 版已退回`,
+          has('revise') ? info([`也可使用 fw batch get ${b.name} 取回到本地，用 LiteAnno 修改后上传：fw batch update ${b.name} <目录> --labeler <姓名>。`,
+            '预标注（更多 › 运行预标注）的结果不会自动写入批次，取回修改后需重新上传。'], '修改说明') : null),
+        r ? [el('p', { class: 'muted small' }, `${r.actor} · ${listWhen(r.at, now)}`), el('p', { class: 'said' }, r.comment),
+          r.images.length ? el('table', { class: 'problems', id: 'rejected-images' },
+            el('tr', {}, el('th', {}, `问题图片（${r.images.length}）`), el('th', {}, '说明')),
+            r.images.map((p) => el('tr', {}, el('td', { class: 'mono' }, el('a', { href: imageHref(b.revision, p) }, p)),
+              el('td', { class: 'wrap' }, (r.notes || {})[p] || '')))) : null] : null,
+        has('revise') ? el('div', { class: 'row' }, el('a', { class: 'button primary', href: hrefOf(['batch-up', b.name]) }, `上传第 ${b.revision + 1} 版`)) : null));
+    }
+    if (has('submit')) {
+      const names = await api.reviewers();
+      const who = reviewerSelect(names, '选择复核人');
+      if (b.reviewer && names.includes(b.reviewer)) who.value = b.reviewer;
+      cards.push(el('div', { class: 'panel card', id: 'submit-card' }, el('h3', {}, `第 ${b.revision} 版已上传，请提交复核`),
+        el('div', { class: 'row' }, who, el('button', { class: 'primary', id: 'submit-review', onclick: act(async () => {
+          if (!who.value) throw new Error('请选择复核人。');
+          await api.batchStep(b.name, 'submit', { reviewer: who.value, revision: b.revision });
+        }, `已提交复核，复核人 ${who.value}`) }, `提交第 ${b.revision} 版复核`))));
     }
     const pre = await api.batchPrelabels(b.name);
-    if (pre.prelabels.some((r) => ['queued', 'running'].includes(r.status))) {
-      const tick = async () => {  // while something is being typed: not now, but ask again
-        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) refreshLater(tick, 10000);
-        else await draw();
-      };
-      refreshLater(tick, 10000);
-    }
-    if (has('prelabel')) {
+    if (has('prelabel') && prelabelOpen) {
       const d = pre.defaults;
       if (!modelVersions) modelVersions = allModelVersions().catch((e) => { modelVersions = null; throw e; });
       const versions = await modelVersions;
       const model = prelabelModels(versions, d);
       const runner = el('select', { id: 'prelabel-runner' }, d.runners.map((r) => el('option', { value: r }, r)));
       const conf = el('input', { type: 'text', id: 'prelabel-conf', class: 'short', placeholder: '0.1' });
-      forms.push(el('div', { class: 'panel form', id: 'prelabel-form' },
+      cards.push(el('div', { class: 'panel form', id: 'prelabel-form' },
         el('h3', {}, '预标注', info([`由模型为第 ${b.revision} 版的图片预先画框，任务在 GPU 机上排队运行；完成后，使用 fw batch get ${b.name} --prelabel 取回到本地修改。`,
           d.model ? `默认使用 ${d.site}/${d.line} 当前发布的模型（${d.model.release}）。` : '',
           '预标注结果不会自动写入批次，修改后需重新上传。'], '预标注说明')),
@@ -4031,47 +4132,41 @@ async function batchPage(name, query) {
         el('label', {}, '模型版本', model),
         d.runners.length ? el('label', {}, '推理环境', runner) : el('p', { class: 'bad' }, '暂无可用的推理环境，请联系算法工程师在 GPU 机上登记。'),
         el('label', {}, '最低分数', conf),
-        el('div', { class: 'row' }, el('button', { id: 'prelabel-go', disabled: !d.runners.length || model.disabled, onclick: act(async () => {
+        el('div', { class: 'row' }, el('button', { id: 'prelabel-go', class: 'primary', disabled: !d.runners.length || model.disabled, onclick: act(async () => {
           if (!model.value) throw new Error('请选择模型版本。');
           const c = conf.value.trim();
           if (c && !(Number(c) > 0 && Number(c) < 1)) throw new Error('最低分数须在 0 和 1 之间。');
-          return api.prelabelBatch(b.name, { model: model.value, runner: runner.value || null,
-            conf: c ? Number(c) : null, revision: b.revision });
-        }, '已提交预标注任务') }, '运行预标注'))));
+          await api.prelabelBatch(b.name, { model: model.value, runner: runner.value || null, conf: c ? Number(c) : null, revision: b.revision });
+          prelabelOpen = false;
+        }, '已提交预标注任务') }, '运行预标注'),
+        el('button', { type: 'button', onclick: () => { prelabelOpen = false; draw(); } }, '取消'))));
     }
-    if (has('submit')) {
-      const names = await api.reviewers();
-      const who = reviewerSelect(names, '选择复核人');
-      if (b.reviewer && names.includes(b.reviewer)) who.value = b.reviewer;
-      forms.push(el('div', { class: 'row' }, who, el('button', { class: 'primary', id: 'submit-review', onclick: act(async () => {
-        if (!who.value) throw new Error('请选择复核人。');
-        await api.batchStep(b.name, 'submit', { reviewer: who.value, revision: b.revision });
-      }, `已提交复核，复核人 ${who.value}`) }, `提交第 ${b.revision} 版复核`)));
+
+    // the reviewer: what changed since the revision before, above all on the images sent back
+    if (reviewing && b.status === 'review' && b.revision > 1) {
+      const before = await filesOf(await api.version(b.name, b.revision - 1));
+      const changed = changedImages(before, files);
+      const sent = lastRejection(b.revision - 1);
+      const checks = sent && sent.images.length ? rejectionChecks(sent, changed, images.map((f) => f.path)) : null;
+      const c = compare && compare.new_id && older === b.revision - 1 && newer === b.revision ? compare : await api.compareBatch(b.name, b.revision - 1, b.revision);
+      const firstChanged = images.find((f) => changed.has(f.path));
+      const tile = (label, value, id, bad = false) => el('div', { class: bad ? 'tile-stat bad' : 'tile-stat', id }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value));
+      cards.push(el('div', { class: 'panel card', id: 'since-card' },
+        el('div', { class: 'row' }, el('h3', { style: 'flex:1;margin:0' }, `第 ${b.revision} 版与第 ${b.revision - 1} 版相比`),
+          el('a', { href: hrefOf(['diff', b.name], { old: String(b.revision - 1), new: String(b.revision) }) }, '查看全部文件变化')),
+        el('div', { class: 'stats' }, tile('改动的图片', String(changed.size - c.images.added), 'since-changed'),
+          tile('新增的图片', String(c.images.added), 'since-added'), tile('删除的图片', String(c.images.removed), 'since-removed'),
+          checks ? tile('上次退回的图片已改', `${checks.done} / ${checks.rows.length}`, 'since-fixed', checks.done < checks.rows.length) : null),
+        checks ? el('table', { id: 'since-rejected' },
+          el('tr', {}, ['上次退回的图片', '退回说明', `第 ${b.revision} 版`, ''].map((h) => el('th', {}, h))),
+          checks.rows.map((r) => el('tr', {}, el('td', { class: 'mono' }, r.path), el('td', { class: 'wrap' }, r.note),
+            el('td', { class: r.change === 'same' ? 'bad' : '' }, CHANGE_TEXT[r.change]),
+            el('td', {}, r.change === 'gone' ? '' : el('a', { href: imageHref(b.revision, r.path) }, '看图'))))) : null,
+        firstChanged ? el('div', { class: 'row' }, el('a', { class: 'button', id: 'review-changed', href: imageHref(b.revision, firstChanged.path, { f: 'changed' }) },
+          `只看改动的 ${changed.size} 张`)) : null));
     }
-    if (has('import')) {
-      const replace = el('input', { type: 'checkbox', id: 'import-replace' });
-      const out = el('div');
-      const preview = async () => {
-        try {
-          const body = { replace: replace.checked };
-          const plan = await api.batchStep(b.name, 'import/preview', body);
-          const go = plan.reasons.length ? null : el('button', { class: 'primary', id: 'import-go', onclick: act(() => api.batchStep(b.name, 'import',
-            { ...body, expect_latest_id: plan.expect_latest_id }), `已入库，建立 ${plan.ref}`) }, `入库，建立 ${plan.ref}`);
-          out.replaceChildren(...present([changeReport(plan), go ? el('div', { class: 'row' }, go) : null]));
-        } catch (e) { out.replaceChildren(errorBox(e)); }
-      };
-      forms.push(el('div', { class: 'panel form' },
-        el('p', {}, '复核已通过，可以入库。', info(`入库将第 ${b.revision} 版作为 ${b.dir}/ 加入 ${b.pool}，检查规则与「上传新增目录」相同，文件无需重新上传。`, '入库说明')),
-        checkRow(replace, '替换已有目录', `${b.pool} 中已有 ${b.dir}/ 时，以本批次的内容整体替换。`),
-        el('div', { class: 'row' }, el('button', { id: 'import-preview', onclick: preview }, '预览入库')), out));
-    }
-    if (has('approve') || has('reject')) {
+    if (reviewing) {
       // the problem images marked in the viewer (kept in this browser), which a rejection sends with their notes
-      const key = reviewKey(me ? me.name : '', b.name, b.revision);
-      const state = loadReview(key);
-      const images = (await filesOf(await api.version(b.name, b.revision))).filter((f) => IMAGE_EXTS.has(ext(f.path)));
-      const seen = images.filter((f) => state.seen.has(f.path)).length;
-      const next = images.find((f) => !state.seen.has(f.path)) || images[0];
       const comment = el('textarea', { id: 'review-comment', rows: 3, placeholder: '复核意见：退回时必填，请写明需要修改之处' });
       const marks = el('div', { id: 'review-marks' });
       const marksName = el('span', { class: 'name', id: 'review-marks-name' });
@@ -4083,7 +4178,7 @@ async function batchPage(name, query) {
             const note = el('input', { type: 'text', maxlength: '200', placeholder: '说明（选填）', 'aria-label': `${p} 的说明`,
               oninput: () => { state.marks.set(p, note.value); saveReview(key, state); } });
             note.value = state.marks.get(p);
-            return el('tr', {}, el('td', { class: 'mono' }, el('a', { href: hrefOf(['img', b.name, String(b.revision), p]) }, p)), el('td', {}, note),
+            return el('tr', {}, el('td', { class: 'mono' }, el('a', { href: imageHref(b.revision, p) }, p)), el('td', {}, note),
               el('td', {}, el('button', { type: 'button', class: 'link', onclick: () => { state.marks.delete(p); saveReview(key, state); listMarks(); } }, '移除')));
           })) : el('p', { class: 'muted' }, '暂无标出的问题图片。'));
       };
@@ -4101,12 +4196,12 @@ async function batchPage(name, query) {
         listMarks();
       };
       path.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
-      forms.push(el('div', { class: 'panel form', id: 'review-form' },
+      cards.push(el('div', { class: 'panel form card', id: 'review-form' },
         el('div', { class: 'row' }, el('h3', { style: 'flex:1;margin:0' }, has('approve') ? `复核第 ${b.revision} 版` : `已通过；入库前发现问题仍可退回第 ${b.revision} 版`,
-          info(['在看图页逐张查看，标出问题图片并可为每张写一句说明；标记仅保存在本机浏览器中，退回时随意见一并发出，通过或退回后清除。',
+          info(['请在看图页逐张查看，标出问题图片并可为每张写一句说明；标记仅保存在本机浏览器中，退回时随意见一并发出，通过或退回后清除。',
             `也可使用 fw batch get ${b.name} 取回到本地，用 LiteAnno 打开，再在下方按路径添加问题图片。`], '复核说明')),
           el('span', { class: 'muted', id: 'review-seen' }, `已看 ${seen} / ${images.length}`),
-          next ? el('a', { class: 'button primary', id: 'review-start', href: hrefOf(['img', b.name, String(b.revision), next.path]) }, seen ? '继续复核' : '开始复核') : null),
+          b.status !== 'review' && images.length ? el('a', { class: 'button', id: 'review-start', href: imageHref(b.revision, images[0].path) }, '查看图片') : null),
         el('label', {}, '意见', comment),
         el('div', { class: 'label' }, marksName,
           el('div', {}, marks, el('div', { class: 'row mark-add' }, path, el('button', { type: 'button', id: 'mark-add', onclick: add }, '添加'), wrong))),
@@ -4121,11 +4216,56 @@ async function batchPage(name, query) {
             dropReview(key);
           }, `已退回第 ${b.revision} 版`) }, '退回'))));
     }
-    if (has('close')) {
-      const row = el('div', { class: 'row' }, el('button', { id: 'close-batch', onclick: () => askFirst(row, {
-        text: `关闭 ${b.name} 后不再复核或入库，各版内容保留。`, reason: '关闭原因（选填）', go: '确认关闭',
-        run: async (why) => { await api.batchStep(b.name, 'close', { comment: why }); await draw(); toastDone(`已关闭 ${b.name}`); } }) }, '关闭批次'));
-      forms.push(row);
+
+    // importing: what goes in, asked once more before the pool version is made
+    if (has('import')) {
+      const replace = el('input', { type: 'checkbox', id: 'import-replace' });
+      const out = el('div');
+      const preview = async () => {
+        try {
+          const body = { replace: replace.checked };
+          const plan = await api.batchStep(b.name, 'import/preview', body);
+          const row = el('div', { class: 'row' });
+          if (!plan.reasons.length) {
+            row.append(el('button', { class: 'primary', id: 'import-go', onclick: () => askFirst(row, {
+              text: `将第 ${b.revision} 版写入 ${b.pool} / ${b.dir}/，建立 ${plan.ref}。版本建立后不能修改或删除。`, go: '确认入库',
+              run: async () => {
+                await api.batchStep(b.name, 'import', { ...body, expect_latest_id: plan.expect_latest_id });
+                await draw();
+                toastDone(`已入库，建立 ${plan.ref}`);
+              } }) }, `入库，建立 ${plan.ref}`));
+          }
+          out.replaceChildren(...present([el('h3', {}, '入库预览'), changeReport(plan), row]));
+        } catch (e) { out.replaceChildren(errorBox(e)); }
+      };
+      cards.push(el('div', { class: 'panel form card', id: 'import-card' },
+        el('h3', {}, '复核已通过，可以入库', info(`入库将第 ${b.revision} 版作为 ${b.dir}/ 加入 ${b.pool}，检查规则与「上传新增目录」相同，文件无需重新上传。`, '入库说明')),
+        checkRow(replace, '替换已有目录', `${b.pool} 中已有 ${b.dir}/ 时，以本批次的内容整体替换。`),
+        el('div', { class: 'row' }, el('button', { id: 'import-preview', onclick: preview }, '预览入库')), out));
+    }
+    // imported: what it made, and where to go from there
+    if (b.imported) {
+      const [pool, number] = b.imported.split('@');
+      cards.push(el('div', { class: 'panel card ok-card', id: 'imported-card' },
+        el('h3', {}, `已入库，建立 ${b.imported}`),
+        el('p', {}, `第 ${b.revision} 版的 ${images.length} 张图片已写入 ${b.pool} / ${b.dir}/，批次已结束。`),
+        el('div', { class: 'row' },
+          can('datasets.write') ? el('a', { class: 'button primary', id: 'imported-trainset', href: hrefOf(['trainset-new'], { from: b.imported }) }, `用 ${b.imported} 建立训练集快照`) : null,
+          el('a', { class: 'button', href: hrefOf(['v', pool, number]) }, `查看 ${b.imported}`),
+          Number(number) > 1 ? el('a', { class: 'button', href: hrefOf(['diff', pool], { old: String(Number(number) - 1), new: number }) }, `与 ${pool}@${Number(number) - 1} 比较`) : null)));
+    }
+    if (b.status === 'closed') {
+      const c = b.steps.filter((s) => s.step === 'close').pop();
+      cards.push(el('div', { class: 'panel card', id: 'closed-card' }, el('h3', {}, '批次已关闭'),
+        c ? el('p', { class: 'muted' }, `${c.actor} · ${listWhen(c.at, now)}` + (c.comment ? `：${c.comment}` : '')) : null));
+    }
+
+    if (pre.prelabels.some((r) => ['queued', 'running'].includes(r.status))) {
+      const tick = async () => {  // while something is being typed: not now, but ask again
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) refreshLater(tick, 10000);
+        else await draw();
+      };
+      refreshLater(tick, 10000);
     }
     const revisions = b.revisions.slice().reverse().map((r) => el('tr', {},
       el('td', {}, el('a', { href: hrefOf(['v', b.name, String(r.number)]) }, `第 ${r.number} 版`)),
@@ -4133,19 +4273,16 @@ async function batchPage(name, query) {
       el('td', {}, r.labeler + (r.by_reviewer ? '（复核人修改）' : '')), el('td', {}, r.created_by), timeCell(r.created_at),
       textCell(r.note),
       el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '与上一版比较') : '')));
-    const steps = b.steps.map((s) => el('tr', {},
+    const steps = b.steps.slice().reverse().map((s) => el('tr', {},
       timeCell(s.at), el('td', {}, s.actor),
       el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.job_id ? `（任务 ${s.job_id}）` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
         s.pool_version ? ['，成为 ', vref(s.pool_version)] : null),
       el('td', { class: 'wrap' }, s.comment, s.images.length ? el('ul', { class: 'problems' }, s.images.map((i) => el('li', {},
-        el('a', { class: 'mono', href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i),
+        el('a', { class: 'mono', href: imageHref(s.revision, i) }, i),
         (s.notes || {})[i] ? `：${s.notes[i]}` : null))) : null)));
     show(crumbs('batches', b, b.name),
       el('h1', {}, b.name, statusText(BATCH_DOT[b.status], b.status_text, 'batch-status')),
-      el('p', {}, '入库目标：', el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` / ${b.dir}/`,
-        b.imported ? ['；已入库为 ', vref(b.imported)] : null,
-        `。上传账号：${b.owner}；复核人：${b.reviewer || '未指定'}。`),
-      msg, forms,
+      head, flowBar(batchFlow(b, now)), msg, cards,
       el('h2', {}, '各版次'),
       el('table', {}, el('tr', {}, [['版次'], ['文件', 'num'], ['大小', 'num'], ['标注人'], ['上传账号'], ['时间'], ['说明'], ['']]
         .map(([h, c]) => el('th', { class: c }, h))), revisions),
@@ -4160,7 +4297,7 @@ async function batchPage(name, query) {
             el('td', {}, r.submitted_by), timeCell(r.created_at),
             el('td', {}, r.prediction_set ? [el('a', { href: hrefOf(['p', String(r.prediction_set)]) }, `预测集 #${r.prediction_set}`),
               r.revision === b.revision ? el('div', { class: 'mono muted' }, `fw batch get ${b.name} --prelabel`) : null] : ''))))] : null,
-      compare ? [el('h2', {}, '本版改动'), compareTable(compare)] : null,
+      compare ? [el('h2', { id: 'compare' }, '本版改动'), compareTable(compare)] : null,
       el('h2', {}, '流转记录'),
       el('table', { id: 'batch-steps' }, el('tr', {}, ['时间', '账号', '操作', '意见'].map((h) => el('th', {}, h))), steps));
   };

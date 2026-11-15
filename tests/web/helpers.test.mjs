@@ -9,7 +9,7 @@ import {
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
-  fitView, zoomAt, readReview, reviewText, reviewKey, changedImages, reviewMatch, stepTo, stripWindow, rejectBody,
+  batchFlow, rejectionChecks, fitView, zoomAt, readReview, reviewText, reviewKey, changedImages, reviewMatch, stepTo, stripWindow, rejectBody,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -491,4 +491,36 @@ test('the images under review are filtered and paged through, and a rejection se
   const many = Array.from({ length: 500 }, (_, i) => `${i}`);
   assert.deepEqual(stripWindow(many, 250, () => true, 2), [248, 249, 250, 251, 252]);
   assert.deepEqual(rejectBody(' 请补标 ', state.marks, 2), { comment: '请补标', images: ['b.png', 'd.png'], notes: { 'b.png': '漏标' }, revision: 2 });
+});
+
+test('a batch shows its four steps by where it stands, and what became of the images sent back', () => {
+  const now = new Date(2026, 10, 15, 18, 0);
+  const at = new Date(2026, 10, 15, 17, 12).toISOString();
+  const step = (s, revision, actor = 'li') => ({ step: s, revision, actor, at });
+  const b = (status, steps, more = {}) => ({ status, revision: 2, owner: 'li', reviewer: 'zhang', imported: null, steps, ...more });
+  const states = (x) => batchFlow(x, now).map((s) => s.state);
+  const texts = (x) => batchFlow(x, now).map((s) => s.text);
+  const up = [step('upload', 1), step('submit', 1), step('reject', 1, 'zhang'), step('upload', 2)];
+  assert.deepEqual(states(b('open', up)), ['done', 'on', 'todo', 'todo']);
+  assert.equal(texts(b('open', up))[1], '待 li 提交第 2 版');
+  const sent = [...up, step('submit', 2)];
+  assert.deepEqual(states(b('review', sent)), ['done', 'done', 'on', 'todo']);
+  assert.deepEqual(texts(b('review', sent)).slice(0, 3), ['第 2 版 · 今天 17:12', 'li · 今天 17:12', '待 zhang 复核第 2 版']);
+  const back = [...sent, step('reject', 2, 'zhang')];
+  assert.deepEqual(states(b('rejected', back)), ['on', 'todo', 'bad', 'todo']);
+  assert.deepEqual(texts(b('rejected', back)).slice(0, 3), ['待 li 上传第 3 版', '上传后提交给 zhang', '第 2 版已退回']);
+  const ok = [...sent, step('approve', 2, 'zhang')];
+  assert.deepEqual(states(b('approved', ok)), ['done', 'done', 'done', 'on']);
+  assert.deepEqual(states(b('imported', [...ok, step('import', 2, 'zhang')], { imported: 'P@5' })), ['done', 'done', 'done', 'done']);
+  assert.equal(texts(b('imported', ok, { imported: 'P@5' }))[3], '已入库，建立 P@5');
+  // approved with the reviewer's own folder: a revision nobody submitted
+  const own = [...sent, step('approve', 3, 'zhang')];
+  assert.deepEqual(batchFlow(b('approved', own, { revision: 3 }), now).map((s) => [s.state, s.text]).slice(1, 3),
+    [['done', 'zhang 修改后的一版'], ['done', 'zhang 通过 · 今天 17:12']]);
+  assert.deepEqual(states(b('closed', [...sent, step('close', null)])), ['done', 'done', 'bad', 'off']);
+  assert.equal(texts(b('closed', up))[1], '批次已关闭');
+
+  const checks = rejectionChecks({ images: ['a.png', 'b.png', 'c.png'], notes: { 'a.png': '漏标' } }, new Set(['a.png']), ['a.png', 'b.png']);
+  assert.deepEqual(checks, { done: 2, rows: [{ path: 'a.png', note: '漏标', change: 'changed' },
+    { path: 'b.png', note: '', change: 'same' }, { path: 'c.png', note: '', change: 'gone' }] });
 });
