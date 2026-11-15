@@ -65,6 +65,13 @@ const { chromium } = require('playwright');
   await page.click('#model-list th:nth-child(1)');
   await page.click('#model-list th:nth-child(1)');
   seen.models = { names: await ids('#model-list'), sorted: await sorted('#model-list') };
+  // another page forgets the order; coming back shows the list as it comes
+  const name = await page.textContent('#model-list tr:nth-child(2) td:first-child a');
+  await page.click('#model-list tr:nth-child(2) td:first-child a');
+  await page.waitForFunction((n) => document.querySelector('h1')?.textContent.includes(n) && !document.querySelector('#model-list'), name);
+  await page.goBack();
+  await page.waitForSelector('#model-list');
+  seen.modelsBack = { names: await ids('#model-list'), sorted: await sorted('#model-list') };
 
   seen.errors = errors;
   console.log(JSON.stringify(seen));

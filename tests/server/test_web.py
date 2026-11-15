@@ -254,6 +254,7 @@ def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens
     assert seen['keyboard'] == [['提交人', 'ascending']]
     assert seen['models']['names'] == sorted(models.values(), reverse=True)
     assert seen['models']['sorted'] == [['名称', 'descending']]
+    assert seen['modelsBack']['sorted'] == [] and seen['modelsBack']['names'] == sorted(models.values())  # the server's order again
 
 def write_tree(root: Path, files: dict) -> Path:
     for rel, data in files.items():

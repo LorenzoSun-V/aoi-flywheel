@@ -157,9 +157,11 @@ export function compareCells(a, b, numeric, desc = false) {
 }
 
 // A list whose columns sort on a click (or Enter) on their header; a second click reverses. The order chosen
-// stays for the table's id while the page is drawn again (a refresh, the next page of rows). Only the rows
-// shown are sorted. Returns the table; table.resort() sorts rows added later.
+// stays for the table's id while the same page is drawn again (a refresh, the next page of rows, another site or
+// status of it); another page forgets it (render). Only the rows shown are sorted. Returns the table;
+// table.resort() sorts rows added later.
 const sortOrders = new Map();
+let sortedOn = null;  // the page (its address without the query) the orders were chosen on
 function sortable(table) {
   const heads = [...table.rows[0].cells];
   const keyOf = (td) => (td.hasAttribute('data-sort') ? td.dataset.sort : td.textContent.trim());
@@ -2488,11 +2490,12 @@ async function jobsPage(query) {
   let earlier = false;  // older pages shown: the page is not redrawn on its own any more, which would drop them
   const more = el('button', { id: 'jobs-more', type: 'button', hidden: !first.more, onclick: async () => {
     more.disabled = true;
+    earlier = true;  // from now on: a refresh would draw the page again while the rows asked for are on their way
+    clearTimeout(timer);
     try {
       const r = await ask(last);
       for (const j of r.jobs) table.append(rowOf(j));
       if (r.jobs.length) last = r.jobs[r.jobs.length - 1].id;
-      earlier = true;
       table.resort();
       more.hidden = !r.more;
     } catch (e) { more.after(errorBox(e)); }
@@ -4494,6 +4497,8 @@ async function render() {
   hideTip();
   const show = live();
   const { parts, query } = route(location.hash);
+  const path = (location.hash || '#/').split('?')[0];
+  if (path !== sortedOn) { sortOrders.clear(); sortedOn = path; }
   renderNav();
   const signingIn = parts[0] === 'login' || !token();
   document.body.classList.toggle('login', signingIn);  // no side bar before one is signed in
