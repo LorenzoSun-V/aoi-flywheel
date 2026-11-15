@@ -447,10 +447,11 @@ function errorBox(e) {
 // Asking on the page itself before a change that is hard to take back (not the browser's own confirm or prompt
 // boxes): what will happen, a field for the reason when there is one, the confirming button and 取消. It opens
 // under `at` (under a table row: a row of its own across the table). run(reason) makes the change; a refusal is
-// shown in place. One question at a time; Esc or 取消 closes it (cancel: what to put back then).
+// shown in place. One question at a time; Esc, 取消 or another question opening closes it (cancel: what to put
+// back then, such as the role a select was changed to).
 let asked = null;
 function askFirst(at, { text, reason = null, go, run, cancel = null }) {
-  if (asked) asked.close();
+  if (asked) asked.close(true);
   const field = reason ? el('input', { type: 'text', class: 'ask-reason', placeholder: reason, size: 36, 'aria-label': reason }) : null;
   const err = el('span', { class: 'bad' });
   const yes = el('button', { type: 'button', class: 'danger ask-go' }, go);
@@ -458,12 +459,13 @@ function askFirst(at, { text, reason = null, go, run, cancel = null }) {
   const body = el('div', { class: 'ask', role: 'group', 'aria-label': go }, el('span', { class: 'ask-text' }, text), field,
     el('span', { class: 'row' }, yes, no), err);
   const node = at.tagName === 'TR' ? el('tr', { class: 'asking' }, el('td', { colspan: String(at.children.length) }, body)) : body;
-  const close = () => {
+  const close = (cancelled = false) => {
     node.remove();
     if (asked && asked.node === node) asked = null;
+    if (cancelled && cancel) cancel();
   };
-  no.addEventListener('click', () => { close(); if (cancel) cancel(); });
-  body.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); if (cancel) cancel(); } });
+  no.addEventListener('click', () => close(true));
+  body.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { ev.stopPropagation(); close(true); } });
   yes.addEventListener('click', async () => {
     yes.disabled = true;
     err.textContent = '';
@@ -3376,10 +3378,14 @@ async function usersPage() {
       const pick = el('select', {}, (u.role === 'worker' ? [['worker', roles.worker]] : people).map(([k, v]) => el('option', { value: k }, v)));
       pick.value = u.role;
       pick.disabled = u.role === 'worker' || !!u.disabled_at;
-      pick.addEventListener('change', () => askFirst(tr, {
-        text: `将 ${u.name} 的角色改为${roles[pick.value]}，自下一次请求起生效，无需重新发放凭据。`, go: '确认修改',
-        run: async () => { await api.setRole(u.name, pick.value); await draw(); toastDone(`已将 ${u.name} 的角色改为${roles[pick.value]}`); },
-        cancel: () => { pick.value = u.role; } }));
+      pick.addEventListener('change', () => {
+        const chosen = pick.value;
+        askFirst(tr, {
+          text: `将 ${u.name} 的角色改为${roles[chosen]}，自下一次请求起生效，无需重新发放凭据。`, go: '确认修改',
+          run: async () => { await api.setRole(u.name, chosen); await draw(); toastDone(`已将 ${u.name} 的角色改为${roles[chosen]}`); },
+          cancel: () => { pick.value = u.role; } });
+        pick.value = chosen;  // a question of this row open before put the role back when this one replaced it
+      });
       const toggle = el('button', { class: 'toggle', onclick: async () => {
         if (u.disabled_at) {
           try { await api.setDisabled(u.name, false); await draw(); toastDone(`已启用 ${u.name}`); } catch (e) { say(e); }

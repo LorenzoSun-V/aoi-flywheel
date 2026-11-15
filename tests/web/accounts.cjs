@@ -1,7 +1,7 @@
 // Accounts and the record of who did what, in the browser (run by tests/server/test_web.py):
 // node accounts.cjs <url> <admin token> <new account name> <a dataset with a version> <out dir>.
 // As the administrator: makes the account, changes its role (asked on the page, not in a browser box; 取消 puts the
-// role back), gives it a token, reads the record. Then signs in with that token (a field account) and looks at what
+// role back, and so does another question opening), gives it a token, reads the record. Then signs in with that token (a field account) and looks at what
 // it is shown. Prints one JSON line of what it saw.
 const { chromium } = require('playwright');
 
@@ -33,6 +33,16 @@ const { chromium } = require('playwright');
   seen.asked = await page.textContent('tr.asking .ask-text');
   await page.click('tr.asking .ask-cancel');
   seen.cancelled = [await page.locator('tr.asking').count(), await row.locator('select').inputValue()];
+  // another role picked while asked: that one is asked; another question opening answers 取消, the role goes back
+  await row.locator('select').selectOption('field');
+  await page.waitForSelector('tr.asking .ask-go');
+  await row.locator('select').selectOption('admin');
+  await page.waitForFunction(() => document.querySelector('tr.asking .ask-text')?.textContent.includes('改为管理员'));
+  seen.repicked = [await page.locator('tr.asking').count(), await row.locator('select').inputValue()];
+  await page.locator('main tr').filter({ hasNotText: name }).locator('button.toggle:has-text("停用")').first().click();
+  await page.waitForFunction(() => document.querySelector('tr.asking .ask-text')?.textContent.includes('停用'));
+  seen.replaced = [await page.locator('tr.asking').count(), await row.locator('select').inputValue()];
+  await page.click('tr.asking .ask-cancel');
   await row.locator('select').selectOption('field');
   await page.click('tr.asking .ask-go');
   await page.waitForFunction(() => !document.querySelector('tr.asking') && document.getElementById('toast').textContent.includes('角色'));

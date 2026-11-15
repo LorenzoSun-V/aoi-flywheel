@@ -236,6 +236,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '任务', '预测集', '操作记录', '账号']
     assert seen['made'] == f'已新建账号 {name}' and seen['dialogs'] == []                 # asked on the page itself
     assert '改为现场实施' in seen['asked'] and seen['cancelled'] == [0, 'algo']
+    assert seen['repicked'] == [1, 'admin'] and seen['replaced'] == [1, 'algo']  # a question replaced puts its role back
     assert seen['changed'] == f'已将 {name} 的角色改为现场实施' and seen['role'] == 'field'
     assert seen['token'].startswith('fw_') and '只显示这一次' in seen['tokens'] and '现场笔记本' in seen['tokens']
     assert '账号名只能用' in seen['refused']
