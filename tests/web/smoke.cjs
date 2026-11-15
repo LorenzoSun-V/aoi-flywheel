@@ -29,7 +29,7 @@ const { chromium } = require('playwright');
   await page.click(`a:text-is("${dataset}")`);
   await page.waitForSelector('select#old');  // the dataset's page (the list has tables too)
   seen.versions = await page.$$eval('#versions tr td:first-child', (tds) => tds.map((t) => t.textContent));
-  await page.click(`text=${dataset}@2`);
+  await page.click(`#versions a[title="${dataset}@2"]`);
   await page.waitForSelector('.folders');
   seen.folders = await page.$$eval('.folders a', (as) => as.map((a) => a.textContent));
   await page.click('.folders a >> nth=0');

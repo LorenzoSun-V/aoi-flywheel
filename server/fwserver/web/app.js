@@ -750,7 +750,8 @@ async function datasetsPage(query) {
     kindColumn ? el('td', {}, KIND_NAMES[d.kind] || d.kind) : null,
     el('td', {}, [d.site, d.line].filter(Boolean).join(' / ') || (d.kind === 'trainset' ? '跨产线' : '-')),
     numCell(d.version_count),
-    el('td', {}, d.latest ? [el('a', { class: 'ref', href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref), labelChips(d.latest)] : '-'),
+    el('td', {}, d.latest ? [el('a', { class: 'ref', href: hrefOf(['v', d.name, String(d.latest.number)]), title: d.latest.ref },
+      `@${d.latest.number}`), labelChips(d.latest)] : '-'),  // the name is the row's first column
     numCell(d.latest ? d.latest.file_count : null), numCell(d.latest ? sizeText(d.latest.total_bytes) : null),
     d.latest ? timeCell(d.latest.created_at) : el('td', {}, '-'),
     textCell(d.note))));
@@ -876,9 +877,11 @@ async function datasetPage(name, added) {
     el('table', { id: 'versions' }, el('tr', {}, [['版本'], ['版本号'], ['父版本'], ['文件', 'num'], ['大小', 'num'], ['目录变化'], ['来源'], ['登记人'], ['时间'], ['备注']]
       .map(([h, c]) => el('th', { class: c }, h))),
       list.map((v) => el('tr', {},
-        el('td', {}, el('a', { href: hrefOf(['v', d.name, String(v.number)]) }, v.ref)),
+        // the dataset's name is the page's title: a version is its number here, its whole reference on pointing
+        el('td', {}, el('a', { href: hrefOf(['v', d.name, String(v.number)]), title: v.ref }, `@${v.number}`)),
         el('td', {}, labelChips(v)),
-        el('td', {}, v.parent ? el('a', { class: 'ref', href: hrefOf(['v', d.name, String(v.parent.number)]) }, v.parent.ref) : '-'),
+        el('td', {}, v.parent ? el('a', { class: 'ref', href: hrefOf(['v', d.name, String(v.parent.number)]), title: v.parent.ref },
+          `@${v.parent.number}`) : '-'),
         numCell(v.file_count), numCell(sizeText(v.total_bytes)),
         textCell(opsText(v.ops)), sourceCell(v.source), el('td', {}, v.created_by), timeCell(v.created_at),
         textCell(v.note)))),
@@ -1654,9 +1657,10 @@ const vref = (ref) => {  // NAME@N -> link to the dataset version page
   const [name, number] = ref.split(':')[0].split('@');
   return el('a', { class: 'ref', href: hrefOf(['v', name, number]) }, ref);
 };
-const mref = (ref) => {
+// own: in a list of the model's own versions, where its name is said already: the number, all of it on pointing
+const mref = (ref, own = false) => {
   const [name, number] = ref.split('@');
-  return el('a', { class: 'ref', href: hrefOf(['mv', name, number]) }, ref);
+  return el('a', { class: 'ref', href: hrefOf(['mv', name, number]), title: own ? ref : null }, own ? `@${number}` : ref);
 };
 const jobLink = (id) => (id ? el('a', { class: 'ref', href: hrefOf(['job', String(id)]) }, `任务 ${id}`) : '-');
 
@@ -1674,7 +1678,7 @@ async function modelsPage(query) {
         rows.map((m) => el('tr', {},
           el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
           el('td', {}, `${m.site} / ${m.line}`), el('td', {}, TASK_NAMES[m.task] || m.task),
-          numCell(m.version_count), el('td', {}, m.latest ? mref(m.latest) : '-'),
+          numCell(m.version_count), el('td', {}, m.latest ? mref(m.latest, true) : '-'),
           el('td', {}, m.created_by), timeCell(m.created_at), textCell(m.note))))
         : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的模型。' : '暂无模型。')));
 }
@@ -1691,7 +1695,7 @@ async function modelPage(name) {
     el('h2', {}, '版本'),
     list.length ? el('table', {}, el('tr', {}, [['版本'], ['版本号'], ['训练集快照'], ['ONNX', 'num'], ['代码提交'], ['标记'], ['登记人'], ['时间'], ['备注']]
       .map(([h, c]) => el('th', { class: c }, h))),
-      list.map((v) => el('tr', {}, el('td', {}, mref(v.ref)), el('td', {}, labelChips(v)), el('td', {}, vref(v.trainset.ref)),
+      list.map((v) => el('tr', {}, el('td', {}, mref(v.ref, true)), el('td', {}, labelChips(v)), el('td', {}, vref(v.trainset.ref)),
         el('td', { class: 'num', title: v.onnx_sha256 }, sizeText(v.onnx_size || 0)),
         el('td', { class: 'mono', title: v.code_commit ? `${v.code_repo || ''} ${v.code_commit}`.trim() : null },
           v.code_commit ? v.code_commit.slice(0, 10) + (v.code_dirty ? '*' : '') : '-'),
@@ -1717,7 +1721,7 @@ function evalTable(rows, withModel) {
         compare.disabled = pick.size !== 2;
       } })),
       el('td', {}, el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`)),
-      withModel ? el('td', {}, mref(e.model_version.ref)) : null,
+      withModel ? el('td', {}, mref(e.model_version.ref, true)) : null,  // the model's page: its own versions
       el('td', {}, vref(e.testset.ref)), textCell(e.dirs.join('、') || '全部'),
       el('td', {}, `${e.tool} ${e.tool_version}`.trim() || '-'), el('td', {}, jobLink(e.job_id)),
       el('td', {}, e.created_by), timeCell(e.created_at), textCell(e.note)))),

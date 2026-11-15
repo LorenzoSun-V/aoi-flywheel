@@ -79,7 +79,7 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert '凭据无效' in seen['wrong']
     assert seen['home'] == '概览'
     assert name in seen['datasets'] and tokens['algo_name'] in seen['who']
-    assert seen['versions'] == [f'{name}@2', f'{name}@1']
+    assert seen['versions'] == ['@2', '@1']
     assert [f.split()[0] for f in seen['folders']] == ['A', 'B', 'C']
     assert seen['tiles'] == 4 and seen['labeled'] == 3
     assert 'scratch × 1' in seen['image'] and 'dent × 1' in seen['image'] and '未确认' in seen['image']
@@ -243,7 +243,8 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_every_page_keeps_rows_on_one_line_and_forms_to_one_width(service, tokens, api, make_api, tmp_path):
-    """Tables: one line per row at 1180 wide, a long note cut short with its whole text on pointing, times as
+    """Tables: one line per row at 1180 wide, inside their panels with a few words of every text left (a
+    version as its number in its dataset's table), a long note cut short with its whole text on pointing, times as
     今天 HH:MM, sources by how and which folder, numbers on the right, version labels not in a state's colour;
     a batch's state as a dot and words; forms of one width with their check boxes under the fields; files chosen
     in a box; the sign-in page without the side bar; the account's name and role on two lines."""
@@ -281,6 +282,8 @@ def test_every_page_keeps_rows_on_one_line_and_forms_to_one_width(service, token
     assert seen['numbersRight'] == ['right', 'right']
     assert seen['labelChip'] != 'rgb(230, 244, 234)'                       # not the green of 复核通过
     assert seen['removeButton'] == 1
+    assert seen['versionRefs'] == [['@1', f'{name}@1']]  # the parent: its number, all of it on pointing
+    assert seen['tables'] == {page: {'wide': [], 'narrow': []} for page in ('pool', 'events', 'datasets', 'batches', 'batch')}
     assert seen['batchState'] == ['已退回', True]
     assert seen['steps'] == ['时间', '账号', '操作', '意见'] and seen['stepsTitle'] == '流转记录'
     assert seen['formWidth'] <= 720 and seen['checkUnderFields']
@@ -542,7 +545,7 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert seen['proposed'] == 'v0.1.0' and seen['next'] == 'v0.2.0'
-    assert f'{name}@1' in seen['row'] and 'v0.1.0' in seen['row']
+    assert seen['row'].startswith('@1') and seen['rowRef'] == f'{name}@1' and 'v0.1.0' in seen['row']
     assert f'已经用在 {name}@1 上' in seen['taken']
     assert seen['title'].startswith(f'{name}@1') and 'v0.1.0' in seen['title']
     assert api.version(name, 'v0.1.0')['number'] == 1 and api.labels(name)['labels'][0]['note'] == '冷启动'
@@ -678,20 +681,22 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
         first[f'A/img{i}.json'] = label('scratch' if i % 2 else 'dent')
     first['A/neg0.png'] = real_png(200, 100, seed + 20)
     first['A/neg1.png'] = real_png(200, 100, seed + 21)
-    older = pool(api, tmp_path / 'older', {'A/old.png': real_png(200, 100, seed + 40)}, name=f'0{os.urandom(3).hex()}')
-    name = pool(api, tmp_path, first)  # the line's newest pool, though not the first by name
+    line = f'R{os.urandom(3).hex()}'  # a line of its own: no pool of another test is the line's newest
+    older = pool(api, tmp_path / 'older', {'A/old.png': real_png(200, 100, seed + 40)}, site='WEB', line=line,
+                 name=f'0{os.urandom(3).hex()}')
+    name = pool(api, tmp_path, first, site='WEB', line=line)  # the line's newest pool, though not the first by name
     both = dict(first, **{f'B/b{i}.png': real_png(200, 100, seed + 30 + i) for i in range(3)},
                 **{f'B/b{i}.json': label('scratch') for i in range(3)})
     add_version(api, tmp_path, name, both)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(['node', str(WEB_TESTS / 'trainset.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, str(shots)],
-                       capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    r = subprocess.run(['node', str(WEB_TESTS / 'trainset.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, str(shots),
+                        'WEB', line], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     snap = f'{name}-det'
-    assert seen['overview'] == '#/trainset-new?site=SES&line=TX'
+    assert seen['overview'] == f'#/trainset-new?site=WEB&line={line}'
     assert seen['first'] == {'name': snap, 'mode': f'将建立 {snap}@1', 'sources': [f'{name}@1'], 'classes': '',
                              'val': '0.2', 'test': '0.1', 'newTo': None}
     assert "'dent' 不在类别表里" in seen['missing']['error'] and seen['missing']['create'] == 0  # refused, nothing to make

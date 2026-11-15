@@ -75,10 +75,11 @@ button.tool:hover, a.tool:hover { background: var(--soft); color: var(--text); t
    source, details) takes the room that is left and is cut short, its whole text on pointing (its title) */
 table { border-collapse: separate; border-spacing: 0; width: 100%; background: var(--panel); border: 1px solid var(--line);
         border-radius: var(--radius); }
-th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); vertical-align: baseline; white-space: nowrap; }
-td.text { width: 40%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: baseline; white-space: nowrap; }
+td.text { width: 40%; min-width: 6em; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
 table:has(td.text) :is(th, td) { width: 1%; }  /* a table with a long text: the other columns as wide as they need */
 table:has(td.text) td.text { width: 40%; }
+table:has(td.text) tr:has(td.text ~ td.text) td.text { width: 20%; }  /* several texts in a row share that room */
 td.wrap { white-space: normal; }
 td:not(:first-child) a.ref { color: var(--text); }  /* only the first column's link is the row's own */
 td a.ref:hover { color: var(--accent); }
@@ -292,6 +293,10 @@ h1 .status { font-size: 14px; font-weight: 500; letter-spacing: 0; vertical-alig
 .cols.one { grid-template-columns: minmax(0, 1fr); }
 .cols .right { padding-left: 32px; border-left: 1px solid var(--line); }
 @media (max-width: 1240px) {
+  main { padding-left: 24px; padding-right: 24px; }  /* a narrow window: the room goes to the tables */
+  th, td { padding-left: 8px; padding-right: 8px; }
+  :is(th, td):first-child { padding-left: 12px; }
+  :is(th, td):last-child { padding-right: 12px; }
   .cols { grid-template-columns: minmax(0, 1fr); }
   .cols .right { padding-left: 0; border-left: 0; }
 }

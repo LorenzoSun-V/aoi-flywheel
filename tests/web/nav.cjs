@@ -89,7 +89,7 @@ const { chromium } = require('playwright');
   seen.crumbs = await page.$$eval('.crumbs .path a, .crumbs .path .here', (c) => c.map((x) => [x.textContent, x.getAttribute('href')]));
   seen.onInDataset = await page.textContent('#nav a.on');
   await page.screenshot({ path: `${out}/nav-dataset.png`, fullPage: true });
-  await page.click(`a:text-is("${pool}@1")`);
+  await page.click(`#versions a[title="${pool}@1"]`);
   await page.waitForSelector('.folders');
   seen.versionCrumbs = await page.$$eval('.crumbs .path a, .crumbs .path .here', (c) => c.map((x) => x.textContent));
   await page.click('.crumbs button.back');

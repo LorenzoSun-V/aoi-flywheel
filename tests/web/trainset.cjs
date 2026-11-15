@@ -1,5 +1,5 @@
 // Building a training-set snapshot in the browser (run by tests/server/test_web.py):
-// node trainset.cjs <url> <algo token> <field token> <pool with versions 1 and 2> <out dir>.
+// node trainset.cjs <url> <algo token> <field token> <pool with versions 1 and 2> <out dir> <site> <line of the pool>.
 // From the pool's first version: the name the page proposes, a class missing from the table refused, the preview,
 // the snapshot and how to fetch it; from the second version: the next version of that snapshot, continuing its
 // split; a snapshot's name typed and previewed at once; a line's newest pool as the source; a pool's name refused
@@ -7,7 +7,7 @@
 const { chromium } = require('playwright');
 
 (async () => {
-  const [url, token, field, pool, out] = process.argv.slice(2);
+  const [url, token, field, pool, out, site, line] = process.argv.slice(2);
   const browser = await chromium.launch();
   const errors = [];
   // a page (and browser context) of its own for each account: a request the page of the last account still makes
@@ -41,7 +41,7 @@ const { chromium } = require('playwright');
   try {
 
   // the line's overview leads here too
-  await page.goto(`${url}#/?site=SES&line=TX`);
+  await page.goto(`${url}#/?site=${site}&line=${line}`);
   await page.waitForSelector('#data-new');
   seen.overview = await page.getAttribute('#snapshot-new', 'href');
 
@@ -89,7 +89,7 @@ const { chromium } = require('playwright');
   seen.next = await form();
 
   // started from the line: its newest pool is the source, the snapshot that took data from it continued
-  await page.goto(`${url}#/trainset-new?site=SES&line=TX`);
+  await page.goto(`${url}#/trainset-new?site=${site}&line=${line}`);
   await page.reload();  // the form of the page before (the same route) is not taken for this one
   seen.line = await form();
 
