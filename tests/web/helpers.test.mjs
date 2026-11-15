@@ -8,7 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
-  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -418,4 +418,19 @@ test('the record of operations says each one in words and leads to what it was d
   ];
   for (const [action, object, href] of links) assert.equal(eventHref(action, object), href, action);
   assert.equal(eventHref('user.role', 'zhang', true), '#/users');
+});
+
+test('the data to evaluate or predict on is offered by kind, the line of the model first', () => {
+  const v = { ref: 'x@1' };
+  const datasets = [
+    { name: 'B-test', kind: 'test', site: 'B', line: 'L', latest: v }, { name: 'A-test', kind: 'test', site: 'A', line: 'L', latest: v },
+    { name: 'A-empty', kind: 'test', site: 'A', line: 'L', latest: null }, { name: 'A-pool', kind: 'pool', site: 'A', line: 'L', latest: v },
+    { name: 'A-snap', kind: 'trainset', site: 'A', line: 'L', latest: v }, { name: 'A-pool-20261101', kind: 'batch', site: 'A', line: 'L', latest: v },
+    { name: 'shared', kind: 'regression', site: '', line: '', latest: v }, { name: 'C-pool', kind: 'pool', site: 'C', line: 'L', latest: v },
+  ];
+  const names = (groups) => groups.map(([label, list]) => [label, list.map((d) => d.name)]);
+  assert.deepEqual(names(dataChoices(datasets, { site: 'b', line: 'l' })),
+    [['测试集', ['B-test', 'A-test']], ['回归集', ['shared']], ['数据池', ['A-pool', 'C-pool']]]);
+  assert.deepEqual(names(dataChoices(datasets)), [['测试集', ['A-test', 'B-test']], ['回归集', ['shared']], ['数据池', ['A-pool', 'C-pool']]]);
+  assert.deepEqual(dataChoices([]), []);
 });

@@ -177,7 +177,11 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
     assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
-    assert 'nope' in seen['refused']
+    assert seen['refused'] == '最低分数 conf 须在 0 和 1 之间，例如 0.1。'
+    assert seen['evalData']['value'] == f'{snapshot["ref"]}:test' and not seen['evalData']['versionShown']
+    assert seen['evalData']['groups'][0] == '训练集快照' and '数据池' in seen['evalData']['groups']  # other tests' sets too
+    assert seen['poolOffered'] and seen['dirs'] == ['A/（3 张图片）', 'B/（1 张图片）']   # picked, not typed
+    assert seen['version'] == ['1', [f'{data}（最新）']]
     job_id = int(seen['job'].split('/')[-1])
     assert seen['job'] == f'/job/{job_id}' and '排队' in seen['jobText'] and data in seen['jobText'] and seen['cancel']
     job = api.job(job_id)
@@ -255,6 +259,50 @@ def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens
     assert seen['models']['names'] == sorted(models.values(), reverse=True)
     assert seen['models']['sorted'] == [['名称', 'descending']]
     assert seen['modelsBack']['sorted'] == [] and seen['modelsBack']['names'] == sorted(models.values())  # the server's order again
+
+
+@pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
+def test_evaluations_start_on_the_benchmark_and_data_is_picked_not_typed(service, tokens, api, make_api, gpu, snapshot, tmp_path):  # noqa: F811
+    """The evaluation form of a model version starts on its line's benchmark test set (the one the overview compares
+    on), with its versions and folders to pick; the batch's pre-labelling form lists the model versions of the
+    batch's line, the deprecated ones left out."""
+    from test_evals import add_runner, trained
+    from test_trainsets import add_version
+    from fw import ops
+    from helpers import quiet, register_place, write
+    site = f'K{os.urandom(3).hex().upper()}'
+    register_place(site, 'L1')
+    seed = int.from_bytes(os.urandom(2), 'big')
+    bench = f'{site}-test'
+    api.create_dataset(bench, site, 'L1', 'test', '')
+    add_version(api, tmp_path, bench, {f'D{d}/img{i}.{x}': (real_png(64, 32, seed + 10 * d + i) if x == 'png' else label('scratch'))
+                                       for d in (1, 2) for i in range(d) for x in ('png', 'json')})
+    api.set_benchmark(f'{site}/L1', bench)
+    name = f'{site}-det'
+    api.create_model(name, site, 'L1', 'det', '')
+    old, mv = trained(api, name, snapshot, tmp_path), trained(api, name, snapshot, tmp_path)
+    api.set_tag(name, old['number'], 'deprecated', True, '漏检较多')
+    r = add_runner(gpu)
+    pool_name = pool(api, tmp_path / 'p', {'20261101/a.png': real_png(64, 32, seed)}, site=site, line='L1')
+    folder = tmp_path / '20261102'
+    write(folder, 'x.png', real_png(64, 32, seed + 99))
+    b = ops.upload_batch(make_api('field'), folder, pool_name, '张三', echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run(['node', str(WEB_TESTS / 'picks.cjs'), service.url + '/', tokens['algo'], tokens['field'], mv['ref'], bench,
+                          r['ref'], b['name'], str(shots)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['eval']['data'] == f'@{bench}' and seen['eval']['versions'] == [f'{bench}@1（最新）']
+    assert seen['eval']['dirs'] == ['D1/（1 张图片）', 'D2/（2 张图片）'] and seen['eval']['typed'] == ['short']
+    job = api.job(seen['job'])
+    assert job['kind'] == 'eval' and job['params']['data']['ref'] == f'{bench}@1' and job['params']['data']['dirs'] == ['D2']
+    assert job['params']['data']['images'] == 2 and job['params']['model']['ref'] == mv['ref']
+    assert seen['split'] == [True, True]
+    assert seen['prelabel']['tag'] == 'SELECT' and seen['prelabel']['value'] == mv['ref']
+    assert seen['prelabel']['options'] == [mv['ref']]                      # the deprecated version is not offered
+    api.cancel_job(seen['job'])
 
 def write_tree(root: Path, files: dict) -> Path:
     for rel, data in files.items():

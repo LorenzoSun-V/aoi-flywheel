@@ -25,15 +25,24 @@ const { chromium } = require('playwright');
     seen.info = await page.textContent('dl.kv');
     seen.evals = await page.$$eval('a[href^="#/eval/"]', (as) => as.map((a) => a.textContent));
     await page.screenshot({ path: `${out}/model-version.png`, fullPage: true });
+    // the evaluation starts on the snapshot's test split (no benchmark test set here): no version, no folders
+    await page.waitForSelector('#eval-data');
+    seen.evalData = await page.$eval('#eval-data', (s) => ({ value: s.value, groups: [...s.querySelectorAll('optgroup')].map((g) => g.label),
+      versionShown: !s.closest('form').querySelector('#eval-version').closest('label').hidden }));
     const form = page.locator('form', { hasText: '预标注' });
-    await form.locator('input[placeholder^="数据池版本"]').fill('nope@1');
+    const pool = arg.split('@')[0];
+    seen.poolOffered = await page.$eval('#predict-data', (s, p) => [...s.options].some((o) => o.value === `@${p}`), pool);
+    await page.selectOption('#predict-data', `@${pool}`);
+    await page.waitForFunction(() => document.querySelectorAll('#predict-dirs input[type=checkbox]').length > 0);
+    seen.dirs = await page.$$eval('#predict-dirs label', (ls) => ls.map((l) => l.textContent));
+    seen.version = await page.$eval('#predict-version', (s) => [s.value, [...s.options].map((o) => o.textContent)]);
+    await page.check('#predict-dirs input[value="A"]');
+    await form.locator('input.short').fill('2');
     await form.locator('button[type=submit]').click();
     await form.locator('.error').waitFor();
     seen.refused = await form.locator('.error').textContent();
-    errors.length = 0;  // the 404 of the refused submit
-    await form.locator('input[placeholder^="数据池版本"]').fill(arg);
-    await form.locator('input[placeholder^="目录"]').fill('A');
-    await form.locator('select').selectOption(runner);
+    await form.locator('input.short').fill('0.1');
+    await form.locator('select').first().selectOption(runner);
     await form.locator('button[type=submit]').click();
     await h1('推理（预标注）');
     seen.job = page.url().split('#')[1];
