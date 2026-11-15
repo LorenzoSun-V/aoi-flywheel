@@ -153,10 +153,10 @@ function statusText(color, text, id = null) {
   return el('span', { class: 'status', id }, el('span', { class: `dot ${color || 'gray'}` }), text);
 }
 
-// A hash shown by its first 12 characters, with a button that copies the whole of it.
-function hashText(digest, what = '哈希值') {
+// A hash shown by its first 12 characters (n), with a button that copies the whole of it.
+function hashText(digest, what = '哈希值', n = 12) {
   if (!digest) return '-';
-  return el('span', { class: 'hash', title: digest }, el('span', { class: 'mono' }, `${digest.slice(0, 12)}…`),
+  return el('span', { class: 'hash', title: digest }, el('span', { class: 'mono' }, digest.length > n ? `${digest.slice(0, n)}…` : digest),
     el('button', { class: 'tool', type: 'button', title: `复制完整${what}`, 'aria-label': `复制完整${what}`,
       onclick: async () => toast(await copyText(digest) ? `已复制${what}` : `浏览器不允许本页面写入剪贴板，请将鼠标指到${what}上查看完整内容`) }, icon('copy')));
 }
@@ -256,6 +256,7 @@ export const api = {
   chain: (ref) => call(`/chain?ref=${encodeURIComponent(ref)}`),
   currentRelease: (site, line) => call(`/releases/current?${new URLSearchParams({ site, line })}`),
   releases: (site, line) => call(`/releases?${new URLSearchParams({ site, line })}`),  // oldest deployed first
+  registerRelease: (body) => call('/releases', { method: 'POST', body }),
   runners: async () => (await call('/runners')).runners,
   jobs: async (status = '', limit = 100) => (await call(`/jobs?status=${encodeURIComponent(status)}&limit=${limit}`)).jobs,
   job: (id) => call(`/jobs/${Number(id)}`),
@@ -593,9 +594,9 @@ function tagChips(tags) {
 }
 
 // --- where a page is: the path from the home page, and the way back ---------------------------------------
-const SECTIONS = { datasets: '数据集', batches: '标注批次', models: '模型', jobs: '任务', predictions: '预测集',
-  events: '操作记录', users: '账号', me: '我的凭据', places: '现场和产线' };
-const PLACED = new Set(['datasets', 'batches', 'models']);  // the lists that are browsed by site and line
+const SECTIONS = { datasets: '数据集', batches: '标注批次', models: '模型', releases: '发布记录', jobs: '任务',
+  predictions: '预测集', events: '操作记录', users: '账号', me: '我的凭据', places: '现场和产线' };
+const PLACED = new Set(['datasets', 'batches', 'models', 'releases']);  // the lists that are browsed by site and line
 
 // The path to a page as [[text, link or null], ...]: the home page (the overview), the site and line the thing
 // belongs to (each leads to the overview of that place), its list (of that place), then the page's own steps
@@ -1882,9 +1883,11 @@ async function modelVersionPage(name, number) {
     pageHead([mv.ref, labelChips(mv), tagChips(mv.tags)],
       onnx && can('objects.download') ? el('button', { id: 'onnx-download', class: 'primary', onclick: (ev) => download(onnx, ev.currentTarget, saveAs) },
         icon('download'), '下载 ONNX') : null,
+      can('releases.write') ? el('a', { id: 'mv-release', class: 'button', href: hrefOf(['release-new'], { model: mv.ref }) }, '登记发布') : null,
       ...(writer ? tagButtons(mv, asking, () => modelVersionPage(name, number)) : []),
       info([`下载的 ONNX 文件名为 ${saveAs}：模型版本的引用${(mv.labels || []).length ? '和版本号' : ''}，可据此在平台上查到该版本。`,
         '现场使用 ONNX 在本机建立 TensorRT 引擎。',
+        ...(can('releases.write') ? ['登记发布：部署成功后登记一次，记录部署时间、部署代码和推理环境；登记后不能修改。'] : []),
         ...(writer ? ['候选：该版本可考虑部署。', '弃用：提示不应再使用该版本，可填写原因。',
           '标记可随时取消；文件和记录均保留，每次标记和取消列在下方「标记记录」中。'] : [])], writer ? '下载和标记说明' : '下载说明')),
     asking,
@@ -1895,7 +1898,8 @@ async function modelVersionPage(name, number) {
       el('dt', {}, 'ONNX'), el('dd', {}, sizeText(mv.onnx_size || 0), '，sha256 ', hashText(mv.onnx_sha256, 'sha256')),
       el('dt', {}, '训练代码'), el('dd', {}, mv.code_commit ? [mv.code_repo ? `${mv.code_repo}，提交 ` : '提交 ', hashText(mv.code_commit, '提交号'),
         mv.code_dirty ? '（有未提交的改动）' : ''] : '未登记'),
-      el('dt', {}, '发布'), el('dd', {}, chain.releases.length ? chain.releases.map((r) => r.ref).join('、') : '未发布'),
+      el('dt', {}, '发布'), el('dd', { id: 'mv-releases' }, chain.releases.length ? chain.releases.map((r, i) => [i ? '、' : '',
+        el('a', { href: hrefOf(['releases'], { site: r.site, line: r.line, ref: r.ref }) }, r.ref)]) : '未发布'),
       el('dt', {}, '登记'), el('dd', {}, `${mv.created_by}，${when(mv.created_at)}`),
       el('dt', {}, '备注'), el('dd', {}, mv.note || '-'),
       history.length ? [el('dt', {}, '标记记录'), el('dd', {}, el('ul', { class: 'plain', id: 'tag-history' },
@@ -1979,6 +1983,178 @@ async function submitForms(mv) {
       () => ({ model: mv.ref, data: predData.value.trim(), dirs: dirsOf(predDirs), conf: Number(predConf.value) }),
       ['对数据池版本中的图片进行推理，结果保存为预测集。',
         '若相同的模型版本、推理环境、图片和 conf 已有结果，将直接复用，不再重复运行。']))];
+}
+
+// --- releases ----------------------------------------------------------------------------------------------
+// The current release of each line among releases listed oldest deployed first (as the server lists them): the
+// one deployed last on each line.
+export function currentReleases(list) {
+  const last = new Map();
+  for (const r of list) last.set(`${r.site}/${r.line}`.toLowerCase(), r.ref);
+  return new Set(last.values());
+}
+
+// What a registration says when it is done: a deployment registered before is that release (a retry); one
+// deployed before the current release of its line does not replace it.
+export function releaseDone(r) {
+  if (r.existing) return `该次部署已登记为 ${r.ref}`;
+  return r.current && r.current.ref !== r.ref ? `已登记发布 ${r.ref}；该产线当前发布仍为 ${r.current.ref}（部署时间更晚）` : `已登记发布 ${r.ref}`;
+}
+
+// A time as a datetime-local field holds it (the browser's clock, to the minute), and such a value with the
+// offset of its zone in minutes east of UTC, the ISO 8601 the server takes: 2026-11-20T10:30 at UTC+8 is
+// 2026-11-20T10:30+08:00.
+export function localTime(date) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+export function zonedTime(local, offset) {
+  const a = Math.abs(offset);
+  return `${local}${offset < 0 ? '-' : '+'}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
+}
+
+// The releases of the lines chosen in the tree, the latest deployment first, the current one of each line
+// marked. ref=<release>: that one picked out (the links of a model version's page lead here).
+async function releasesPage(query) {
+  const show = live();
+  const at = scopeOf(query);
+  scope = at;
+  renderNav();
+  const picked = query.get('ref') || '';
+  const [all, tree] = await Promise.all([api.releases(at.site, at.line), api.sites()]);
+  const current = currentReleases(all);
+  const q = at.q.toLowerCase();
+  const rows = all.slice().reverse().filter((r) => !q || [r.ref, r.model_version.ref, r.deploy_commit, r.gpu, r.note]
+    .some((x) => (x || '').toLowerCase().includes(q)));
+  const env = (r) => [r.gpu, r.trt_version && `TensorRT ${r.trt_version}`, r.precision].filter(Boolean).join(' · ');
+  const table = rows.length ? el('table', { id: 'releases' },
+    el('tr', {}, ['发布', '模型版本', '部署时间', '部署提交号', '推理环境', '引擎', '备注'].map((h) => el('th', {}, h))),
+    rows.map((r) => el('tr', { 'data-ref': r.ref, class: r.ref === picked ? 'picked' : '' },
+      el('td', { class: 'ref', title: `登记：${r.created_by}，${when(r.created_at)}` }, r.ref,
+        current.has(r.ref) ? [' ', el('span', { class: 'tag' }, '当前发布')] : null),
+      el('td', {}, mref(r.model_version.ref)),
+      timeCell(r.deployed_at),
+      el('td', { title: `部署仓库：${r.deploy_repo}` }, hashText(r.deploy_commit, '提交号', 8)),
+      env(r) ? textCell(env(r)) : el('td', { class: 'muted' }, '—'),
+      el('td', { title: r.engine_size ? `引擎大小 ${sizeText(r.engine_size)}` : null }, r.engine_sha256 ? hashText(r.engine_sha256, '引擎哈希', 8) : el('span', { class: 'muted' }, '—')),
+      textCell(r.note))))
+    : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的发布记录。' : '暂无发布记录。');
+  show(crumbs('releases', at), pageHead(['发布记录', info(['每条产线的当前发布是部署时间最晚的一次；补登以前的部署不改变当前发布。',
+    '发布由现场实施账号在部署成功后登记，登记后不能修改。对应 fw release register、fw release list。'], '发布记录说明')],
+  can('releases.write') ? el('a', { id: 'release-new', class: 'button primary', href: hrefOf(['release-new'], { site: at.site, line: at.line }) }, icon('plus'), '登记发布') : null),
+  browse(tree, at, ['releases'], {}, countsBy(tree, ['releases']), '按发布编号、模型版本或备注搜索', table));
+  const row = picked ? document.querySelector(`#releases tr[data-ref="${CSS.escape(picked)}"]`) : null;
+  if (row) row.scrollIntoView({ block: 'center' });
+}
+
+// Registering a release once a deployment succeeded, as fw release register does: the line, the model version
+// deployed, when, the deployment code and the environment the site built its engine in. The engine stays on the
+// site: picked here it is only hashed in the browser and its sha256 and size registered, never uploaded.
+// model=<version>: that version (from its page); site, line: the line (from its overview or record).
+async function releaseNewPage(query) {
+  const show = live();
+  if (!can('releases.write')) throw new Error('当前账号不能登记发布。发布由现场实施账号在部署成功后登记。');
+  const want = splitRef(query.get('model') || '');
+  const [tree, mv] = await Promise.all([api.sites(), want ? api.modelVersion(want.name, want.number) : null]);
+  const start = { site: query.get('site') || (mv ? mv.site : ''), line: query.get('line') || (mv ? mv.line : '') };
+  const head = [crumbs('releases', start, '登记发布'), el('h1', {}, '登记发布', info([
+    '现场部署成功后登记一次发布，平台为其编号（如 SES-TX-r3），即可从产线追溯到所用的模型版本和训练数据。',
+    '发布登记后不能修改或删除。同一次部署重复登记时，返回已登记的发布。对应 fw release register。'], '登记发布说明'))];
+  if (!tree.sites.some((x) => x.lines.length)) {
+    show(head, el('p', { class: 'muted' }, '尚未登记现场和产线，无法登记发布。'));
+    return;
+  }
+  const { site, line } = placePicker(tree, start);
+  const result = el('div', { id: 'release-result' });
+  // the model version: the one of the page it came from, else one of the chosen line's, chosen by hand
+  const pick = mv ? null : el('select', { id: 'release-model', 'aria-label': '模型版本' });
+  const tagText = (tags) => (tags || []).map((t) => ` · ${TAG_NAMES[t] || t}`).join('');
+  const versionText = (v) => `${v.ref}${(v.labels || []).length ? `（${v.labels.join('、')}）` : ''}${tagText(v.tags)}`;
+  const fillModels = async () => {
+    if (!pick) return;
+    const chosen = `${site.value}/${line.value}`;
+    pick.disabled = true;
+    pick.replaceChildren(el('option', { value: '' }, '正在读取模型版本…'));
+    const models = line.value ? await api.models({ site: site.value, line: line.value }) : [];
+    const lists = await Promise.all(models.map((m) => api.modelVersions(m.name)));
+    if (`${site.value}/${line.value}` !== chosen) return;
+    const all = lists.flat().sort((a, b) => b.id - a.id);  // the latest registered first
+    pick.replaceChildren(el('option', { value: '' }, all.length ? '请选择部署的模型版本' : '该产线暂无模型版本'),
+      all.map((v) => el('option', { value: v.ref }, versionText(v))));
+    pick.disabled = !all.length;
+  };
+  const model = mv ? el('div', { class: 'row', id: 'release-model' }, el('a', { href: hrefOf(['mv', mv.model, String(mv.number)]) }, mv.ref),
+    labelChips(mv), tagChips(mv.tags), mv.tags.includes('deprecated') ? el('span', { class: 'bad' }, '该版本已标记为弃用，请确认部署的是该版本。') : null) : pick;
+
+  const deployed = el('input', { id: 'release-at', type: 'datetime-local', value: localTime(new Date()) });
+  const repo = el('input', { id: 'release-repo', type: 'text', placeholder: '例如 https://git.example.com/deploy/trt.git' });
+  let typed = false;  // the address typed by hand stays when the line changes
+  repo.addEventListener('input', () => { typed = true; });
+  const fillRepo = async () => {  // the address of the line's previous release, the usual one
+    const chosen = `${site.value}/${line.value}`;
+    const list = line.value ? await api.releases(site.value, line.value) : [];
+    if (typed || `${site.value}/${line.value}` !== chosen) return;
+    repo.value = list.length ? list[list.length - 1].deploy_repo : '';
+  };
+  const commit = el('input', { id: 'release-commit', type: 'text', class: 'mono', placeholder: '部署仓库的提交号，例如 git rev-parse HEAD 的输出' });
+  const gpu = el('input', { id: 'release-gpu', type: 'text', class: 'short', placeholder: '选填，例如 RTX3070' });
+  const trt = el('input', { id: 'release-trt', type: 'text', class: 'short', placeholder: '选填，例如 10.3' });
+  const precision = el('select', { id: 'release-precision', class: 'short' }, el('option', { value: '' }, '未填写'),
+    ['fp16', 'fp32'].map((x) => el('option', { value: x }, x)));
+  const engine = fileInput({ id: 'release-engine' });
+  const note = el('input', { id: 'release-note', type: 'text', placeholder: '备注（选填）' });
+  const go = el('button', { id: 'release-go', class: 'primary', type: 'button' }, '登记发布');
+  const goRow = el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, go));
+
+  go.addEventListener('click', () => {
+    result.replaceChildren();
+    const ref = mv ? mv.ref : pick.value;
+    const file = engine.files[0] || null;
+    const problem = !line.value ? '请选择产线。' : !ref ? '请选择部署的模型版本。' : !deployed.value ? '请填写部署时间。'
+      : !repo.value.trim() ? '请填写部署仓库地址。' : !commit.value.trim() ? '请填写部署仓库的提交号。'
+        : file && !file.size ? `引擎文件 ${file.name} 是空文件。` : '';
+    if (problem) { result.replaceChildren(errorBox(problem)); return; }
+    const place = `${site.value}/${line.value}`;
+    askFirst(goRow, {
+      text: `将登记 ${ref} 在 ${place} 的发布，部署时间 ${deployed.value.replace('T', ' ')}${file ? `，引擎 ${file.name}` : ''}。发布登记后不能修改或删除。`,
+      go: '确认登记',
+      run: async () => {
+        let digest = null;
+        if (file) {  // hashed here; the file itself is not sent
+          const progress = bar();
+          result.replaceChildren(progress);
+          progress.set(0, file.size, '计算引擎的哈希…');
+          [digest] = await hashAll([file], (done) => progress.set(done, file.size, `计算引擎的哈希 ${sizeText(done)} / ${sizeText(file.size)}`));
+          result.replaceChildren();
+        }
+        const { name, number } = splitRef(ref);
+        const r = await api.registerRelease({ model: name, number, site: site.value, line: line.value,
+          deploy_repo: repo.value.trim(), deploy_commit: commit.value.trim(),
+          deployed_at: zonedTime(deployed.value, -new Date(deployed.value).getTimezoneOffset()),
+          gpu: gpu.value.trim(), trt_version: trt.value.trim(), precision: precision.value,
+          engine_sha256: digest, engine_size: file ? file.size : null, note: note.value.trim() });
+        location.hash = hrefOf(['releases'], { site: r.site, line: r.line, ref: r.ref });
+        toastDone(releaseDone(r));
+      } });
+  });
+  const changed = () => { Promise.all([fillModels(), fillRepo()]).catch((e) => result.replaceChildren(errorBox(e))); };
+  site.addEventListener('change', changed);
+  line.addEventListener('change', changed);
+  await Promise.all([fillModels(), fillRepo()]);
+
+  show(head, el('div', { class: 'panel form', id: 'release-form' },
+    el('label', {}, '现场', site), el('label', {}, '产线', line),
+    mv ? el('div', { class: 'label' }, el('span', { class: 'name' }, '模型版本'), model)
+      : field('模型版本', model, '该产线各模型的版本，最新登记的在前。标记为候选的版本可考虑部署。'),
+    field('部署时间', deployed, '部署成功的时间，按本机的时区；不能晚于服务器的当前时间。'),
+    field('部署仓库地址', repo, '部署所用代码仓库的地址，默认填入该产线上一次发布的地址。地址中不能包含账号或令牌。'),
+    field('部署提交号', commit, '部署仓库的 git 提交号（7 到 64 位十六进制）。'),
+    field('GPU 型号', gpu, '选填。现场建立引擎所用的 GPU。'),
+    field('TensorRT', trt, '选填。现场建立引擎所用的 TensorRT 版本。'),
+    field('精度', precision, '选填。现场建立引擎所用的精度。'),
+    field('引擎文件', engine, '选填。现场从 ONNX 建立的引擎文件：只在本机计算其 sha256 和大小并登记，文件不上传。'),
+    el('label', {}, '备注', note),
+    goRow), result);
 }
 
 // A model version registered from the browser: the ONNX (with its validation metrics and weights, if given)
@@ -3668,7 +3844,7 @@ async function placesPage() {
     el('tr', { class: 'site-row' }, el('td', {}, el('a', { href: hrefOf([], { site: s.code }) }, s.code)), rename(s.code, s),
       el('td', { class: 'muted', colspan: String(counts.length + (pools ? 1 : 0)) }, `${s.lines.length} 条产线`)),
     ...s.lines.map((x) => el('tr', {}, el('td', { class: 'indent' }, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${s.code} / ${x.code}`)),
-      rename(`${s.code}/${x.code}`, x), ...counts.map((k) => el('td', { class: 'num' }, String(x[k] || 0))),
+      rename(`${s.code}/${x.code}`, x), ...counts.map((k) => countCell(x, k, s.code, x.code)),
       pools ? el('td', {}, el('a', { class: 'small new-pool', href: hrefOf(['dataset-new'], { site: s.code, line: x.code }) }, '新建数据池')) : null))]);
   show(crumbs('places', null), el('h1', {}, '现场和产线', info(['数据池、模型和发布只能建在已登记的现场和产线下。',
     '代号（如 SES、TX）登记后不能修改，它用于训练集快照的目录和发布编号；显示名仅用于展示，可随时修改。'], '现场和产线说明')),
@@ -3730,12 +3906,18 @@ export function metricDelta(value, base) {
   return d === 0 ? '±0' : `${d > 0 ? '+' : '−'}${numberText(Math.abs(d))}`;
 }
 
+// A count of a line in the tables of lines; the releases lead to the line's record of them.
+function countCell(x, k, site, line) {
+  const n = String(x[k] || 0);
+  return el('td', { class: 'num' }, k === 'releases' && x[k] ? el('a', { class: 'releases', href: hrefOf(['releases'], { site, line }) }, n) : n);
+}
+
 function lineTable(tree, at) {
   const shown = shownPlaces(tree, placePrefs().hidden, at);  // the lines chosen in the tree
   const sites = shown.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
   const rows = sites.flatMap((s) => s.lines.map((x) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf([], { site: s.code, line: x.code }) }, `${placeText(s)} / ${placeText(x)}`)),
-    ...['datasets', 'snapshots', 'models', 'batches', 'releases'].map((k) => el('td', { class: 'num' }, String(x[k] || 0))))));
+    ...['datasets', 'snapshots', 'models', 'batches', 'releases'].map((k) => countCell(x, k, s.code, x.code)))));
   const all = tree.sites.filter((s) => !at.site || s.code.toLowerCase() === at.site.toLowerCase());
   const lines = (list) => list.reduce((n, s) => n + s.lines.length, 0);
   const missing = at.site ? lines(all) - lines(sites) : shown.hidden;  // of what this page would list
@@ -3884,7 +4066,10 @@ async function overviewPage(query) {
     api.benchmark(at.site, at.line).catch(none)]);
   // models are compared on the newest version of the line's benchmark test set, as a whole
   const benchVersion = bench && bench.current ? bench.current.latest : null;
-  const evals = benchVersion ? benchmarkByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat(), benchVersion.id) : {};
+  const [evalLists, versionLists] = await Promise.all([benchVersion ? Promise.all(models.map((m) => api.evals(m.name))) : [],
+    Promise.all(models.map((m) => api.modelVersions(m.name)))]);
+  const evals = benchVersion ? benchmarkByModel(evalLists.flat(), benchVersion.id) : {};
+  const versions = versionLists.flat();
   const head = (id, text, parts, link, ...more) => el('div', { class: 'section-head' }, el('h2', { id }, ...[].concat(text)),
     el('div', { class: 'links' }, ...more,
       el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link)));
@@ -3894,18 +4079,7 @@ async function overviewPage(query) {
   const line = site && site.lines.find((x) => x.code.toLowerCase() === at.line.toLowerCase());
   const mvHref = (ref) => { const [n, k] = ref.split('@'); return hrefOf(['mv', n, k]); };
 
-  const card = release
-    ? el('section', { id: 'release', class: 'release', 'aria-label': '当前发布' },
-      el('div', { class: 'chip' }, icon('chip')),
-      el('div', { class: 'what' }, el('div', { class: 'label' }, '当前发布'), el('div', { class: 'ref' }, release.ref),
-        el('div', { class: 'sub', title: `登记：${release.created_by}，${when(release.created_at)}${release.note ? `；备注：${release.note}` : ''}` },
-          el('span', { class: 'mv' }, release.model_version.ref), el('span', { class: 'bar' }), el('span', {}, `部署于 ${shortWhen(release.deployed_at)}`))),
-      el('div', { class: 'state' }, el('span', { class: 'dot green' }), '已部署'),
-      el('a', { class: 'button primary go', href: mvHref(release.model_version.ref) }, '查看模型版本', icon('arrow')))
-    : el('section', { id: 'release', class: 'release none', 'aria-label': '当前发布' },
-      el('div', { class: 'chip' }, icon('chip')),
-      el('div', { class: 'what' }, el('div', { class: 'label' }, '当前发布', info('部署成功后，使用 fw release register 登记发布。', '发布说明')),
-        el('p', { class: 'muted' }, '该产线尚未登记发布。')));
+  const card = releaseCard(release, versions, where, mvHref);
 
   const modelTable = models.length ? el('table', { class: 'models' },
     el('tr', {}, ['模型', '版本', ...KEY_METRICS].map((h, i) => el('th', { class: i > 1 ? 'num' : '' }, h)), el('th', { class: 'act' })),
@@ -3950,6 +4124,43 @@ async function overviewPage(query) {
           modelTable, line ? benchmarkBar(at, bench, data, () => overviewPage(query)) : null,
           head('data', '数据池与快照', ['datasets'], '全部数据集', newData, newSnapshot), dataTable),
         batchList ? el('div', { class: 'col right' }, head('batches', ['在办的批次', info('在办批次指尚未入库且未关闭的批次。', '在办批次说明')], ['batches'], '全部批次'), batchList) : null))));
+}
+
+// What runs on the line now: its current release and the model version of it, with the candidate versions newer
+// than that one. A field account (who deploys and registers releases) is offered the ONNX to download; the
+// others the model version's page.
+function releaseCard(release, versions, where, mvHref) {
+  const released = release ? versions.find((v) => v.id === release.model_version.id) || null : null;
+  const newer = newerCandidates(versions, released);
+  const deployer = can('releases.write') && !can('models.write');
+  const primary = released && deployer && can('objects.download')
+    ? el('button', { id: 'release-download', class: 'primary', title: `下载 ${onnxName(released)}`,
+      onclick: (ev) => download({ path: 'model.onnx', sha256: released.onnx_sha256, size: released.onnx_size }, ev.currentTarget, onnxName(released)) },
+    icon('download'), '下载 ONNX')
+    : release ? el('a', { class: 'button primary go', href: mvHref(release.model_version.ref) }, '查看模型版本', icon('arrow')) : null;
+  const links = el('div', { class: 'links' },
+    can('releases.write') ? el('a', { id: 'release-register', class: 'small with-icon', href: hrefOf(['release-new'], where) }, icon('plus'), '登记发布') : null,
+    release ? el('a', { id: 'release-list', class: 'small', href: hrefOf(['releases'], where) }, '发布记录') : null);
+  return el('section', { id: 'release', class: `release${release ? '' : ' none'}`, 'aria-label': '当前发布' },
+    el('div', { class: 'chip' }, icon('chip')),
+    el('div', { class: 'what' },
+      el('div', { class: 'label' }, '当前发布', release ? null : info(['现场部署成功后，请在此或模型版本页登记发布。', '也可使用 fw release register 登记。'], '发布说明')),
+      release ? [el('div', { class: 'ref' }, release.ref),
+        el('div', { class: 'sub', title: `登记：${release.created_by}，${when(release.created_at)}${release.note ? `；备注：${release.note}` : ''}` },
+          el('a', { class: 'mv', href: mvHref(release.model_version.ref) }, release.model_version.ref), el('span', { class: 'bar' }),
+          el('span', {}, `部署于 ${shortWhen(release.deployed_at)}`))]
+        : el('p', { class: 'muted' }, '该产线尚未登记发布。'),
+      newer.length ? el('p', { id: 'release-newer', class: 'newer' }, icon('tag'), release ? '比当前发布更新的候选版本：' : '候选版本：',
+        newer.map((v, i) => [i ? '、' : '', el('a', { href: mvHref(v.ref) }, v.ref)])) : null),
+    el('div', { class: 'acts' }, primary, links));
+}
+
+// The candidate versions (候选, not 弃用) registered after the version released on a line now, newest first; all
+// candidates when nothing is released there. Ids follow the order of registration, across the models of a line
+// (times are to the second).
+export function newerCandidates(versions, released) {
+  return versions.filter((v) => (v.tags || []).includes('candidate') && !(v.tags || []).includes('deprecated')
+    && (!released || v.id > released.id)).sort((a, b) => b.id - a.id);
 }
 
 // The line's benchmark test set under its models (the numbers of the table are measured on it), and for those
@@ -4002,13 +4213,14 @@ const NAV = [
   ['#/datasets', '数据集', 'datasets.read', /^#\/(datasets|d\/|v\/|img\/|diff\/|upload\/|add\/|remove\/)/, 'datasets'],
   ['#/batches', '标注批次', 'batches.read', /^#\/(batches|b\/|batch-new|batch-up\/)/, 'batches'],
   ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/, 'models'],
+  ['#/releases', '发布记录', 'models.read', /^#\/(releases|release-new)/, 'chip'],
   ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/, 'jobs'],
   ['#/predictions', '预测集', 'datasets.read', /^#\/(predictions|p\/)/, 'predictions'],
   ['#/events', '操作记录', 'events.read', /^#\/events/, 'events'],
   ['#/users', '账号', 'users.manage', /^#\/users/, 'users'],
 ];
 
-const SCOPED = new Set(['#/', '#/datasets', '#/batches', '#/models']);
+const SCOPED = new Set(['#/', '#/datasets', '#/batches', '#/models', '#/releases']);
 
 function renderNav() {
   const here = location.hash || '#/';
@@ -4073,6 +4285,8 @@ async function render() {
     else if (parts[0] === 'mv' && parts[2]) await modelVersionPage(parts[1], parts[2]);
     else if (parts[0] === 'eval' && parts[1]) await evalPage(parts[1]);
     else if (parts[0] === 'evals') await evalComparePage(query);
+    else if (parts[0] === 'releases') await releasesPage(query);
+    else if (parts[0] === 'release-new') await releaseNewPage(query);
     else if (parts[0] === 'jobs') await jobsPage(query);
     else if (parts[0] === 'job' && parts[1]) await jobPage(parts[1], query);
     else if (parts[0] === 'predictions') await predictionsPage();
@@ -4101,7 +4315,7 @@ async function render() {
 // address belongs to and the name in it, with the way back.
 const SECTION_OF = { d: 'datasets', v: 'datasets', img: 'datasets', diff: 'datasets', upload: 'datasets', add: 'datasets',
   remove: 'datasets', 'dataset-new': 'datasets', 'trainset-new': 'datasets', m: 'models', mv: 'models', eval: 'models',
-  evals: 'models', 'model-register': 'models', b: 'batches', 'batch-new': 'batches', 'batch-up': 'batches', job: 'jobs',
+  evals: 'models', 'model-register': 'models', releases: 'releases', 'release-new': 'releases', b: 'batches', 'batch-new': 'batches', 'batch-up': 'batches', job: 'jobs',
   p: 'predictions', places: 'places', datasets: 'datasets', models: 'models', batches: 'batches', jobs: 'jobs',
   predictions: 'predictions', events: 'events', users: 'users', me: 'me' };
 export function errorTrail(parts) {

@@ -8,6 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -321,4 +322,25 @@ test('a page that cannot be shown keeps the path of its section and the name ask
   assert.deepEqual(errorTrail(['b', 'SES-TX-20261104']), { section: 'batches', steps: ['SES-TX-20261104'] });
   assert.deepEqual(errorTrail(['users']), { section: 'users', steps: [] });
   assert.deepEqual(errorTrail(['nothing-here']), { section: null, steps: [] });
+});
+
+test('a release: the current one of each line, the newer candidates, the deployment time with its zone', () => {
+  const r = (site, line, n) => ({ site, line, ref: `${site}-${line}-r${n}` });
+  // listed oldest deployed first: the last of each line runs there now (codes of a line in any case)
+  assert.deepEqual([...currentReleases([r('SES', 'TX', 2), r('SES', 'TY', 1), r('ses', 'tx', 1)])].sort(), ['SES-TY-r1', 'ses-tx-r1']);
+  assert.deepEqual([...currentReleases([])], []);
+  const v = (id, tags) => ({ id, ref: `M@${id}`, tags });
+  const versions = [v(1, []), v(2, ['candidate']), v(3, ['candidate', 'deprecated']), v(5, ['candidate']), v(4, ['candidate'])];
+  assert.deepEqual(newerCandidates(versions, versions[1]).map((x) => x.id), [5, 4]);       // registered after it, not 弃用
+  assert.deepEqual(newerCandidates(versions, null).map((x) => x.id), [5, 4, 2]);           // nothing released: every candidate
+  assert.deepEqual(newerCandidates(versions, versions[3]), []);
+  assert.equal(releaseDone({ ref: 'SES-TX-r3', existing: false, current: { ref: 'SES-TX-r3' } }), '已登记发布 SES-TX-r3');
+  assert.equal(releaseDone({ ref: 'SES-TX-r3', existing: false, current: { ref: 'SES-TX-r2' } }),
+    '已登记发布 SES-TX-r3；该产线当前发布仍为 SES-TX-r2（部署时间更晚）');
+  assert.equal(releaseDone({ ref: 'SES-TX-r3', existing: true, current: { ref: 'SES-TX-r4' } }), '该次部署已登记为 SES-TX-r3');
+  assert.equal(localTime(new Date(2026, 0, 5, 7, 3, 59)), '2026-01-05T07:03');
+  assert.equal(zonedTime('2026-11-20T10:30', 480), '2026-11-20T10:30+08:00');
+  assert.equal(zonedTime('2026-11-20T10:30', 0), '2026-11-20T10:30+00:00');
+  assert.equal(zonedTime('2026-11-20T10:30', -570), '2026-11-20T10:30-09:30');
+  assert.equal(zonedTime('2026-11-20T10:30', 345), '2026-11-20T10:30+05:45');
 });

@@ -159,7 +159,7 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
         return json.loads(p.stdout.strip().splitlines()[-1])
 
     seen = walk('submit', data, r['ref'])  # other tests' runners are listed too
-    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '任务', '预测集', '操作记录']
+    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
     assert 'nope' in seen['refused']
@@ -233,7 +233,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
-    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '任务', '预测集', '操作记录', '账号']
+    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '预测集', '操作记录', '账号']
     assert seen['made'] == f'已新建账号 {name}' and seen['dialogs'] == []                 # asked on the page itself
     assert '改为现场实施' in seen['asked'] and seen['cancelled'] == [0, 'algo']
     assert seen['repicked'] == [1, 'admin'] and seen['replaced'] == [1, 'algo']  # a question replaced puts its role back
@@ -246,7 +246,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert 'from=algo' in seen['events'][1][4] and 'to=field' in seen['events'][1][4]
     assert seen['token'] not in json.dumps(seen['events'])
     # the account it made works, as a field account: it reads, and is offered nothing it may not do
-    assert seen['fieldNav'] == ['概览', '数据集', '标注批次', '模型', '预测集'] and seen['fieldWho'] == [name, '现场实施']
+    assert seen['fieldNav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '预测集'] and seen['fieldWho'] == [name, '现场实施']
     assert seen['fieldButtons'] == [] and '现场实施账号不能管理账号' in seen['fieldUsers']
     assert '现场笔记本' in seen['mine'] and '有效' in seen['mine']
     me = make_api(token=seen['token']).me()
@@ -459,6 +459,74 @@ def test_models_of_a_line_are_compared_on_its_benchmark_test_set(service, tokens
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_release_is_registered_and_read_on_the_web(service, tokens, api, make_api, tmp_path):
+    """A field account downloads the ONNX of its line's current release from the overview, is told of a newer
+    candidate, registers that version's deployment from its page (a refusal shown where it was asked; the engine
+    hashed in the browser, never uploaded) and finds it marked current on the line's record of releases; an
+    earlier deployment registered later leaves the current release, and the same one again is that release. An
+    algorithm engineer reads the record and is offered nothing to register."""
+    import datetime
+    import hashlib
+    from helpers import register_place
+    from test_models import files_in, register, release
+    from test_trainsets import make, pool, sample_files
+    site = f'S{os.urandom(4).hex()}'
+    register_place(site, 'TX')
+    snap = make(api, f'T-{os.urandom(4).hex()}', [f'{pool(api, tmp_path / "a", sample_files("2026-09", 2), site=site, line="TX")}@1'])
+    model = f'M-{os.urandom(4).hex()}'
+    api.create_model(model, site, 'TX', 'det', '')
+    for i in range(3):
+        register(api, model, snap, files_in(tmp_path, f'r{i}'))
+    for n, tag in ((2, 'candidate'), (2, 'deprecated'), (3, 'candidate')):  # @2: a candidate no more
+        api.set_tag(model, n, tag, True)
+    release(make_api('deploy'), f'{model}@1', '2026-11-01T10:00+08:00', site=site, line='TX')
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'releases.cjs'), service.url + '/', tokens['field'], tokens['algo'], site, model,
+                        str(shots)], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    r1, r2, r3 = (f'{site}-TX-r{n}' for n in (1, 2, 3))
+    # the card of a field account: the ONNX of what runs there, the newer candidate (not the deprecated one)
+    assert seen['card']['ref'] == r1 and seen['card']['acts'] == '下载 ONNX登记发布发布记录'
+    assert seen['downloaded'] == f'{model}@1.onnx' and seen['card']['newer'] == f'比当前发布更新的候选版本：{model}@3'
+    assert seen['versionActions'] == ['下载 ONNX', '登记发布']
+    # the form: the version of the page it came from, the line, the address of the line's last release
+    assert seen['form']['model'].startswith(f'{model}@3') and '候选' in seen['form']['model']
+    assert seen['form']['repo'] == 'https://git.example.com/deploy/trt.git' and (seen['form']['site'], seen['form']['line']) == (site, 'TX')
+    assert seen['missing'] == '请填写部署仓库的提交号。' and 'git 提交号' in seen['refused']
+    first = seen['first']
+    assert first['asked'].startswith(f'将登记 {model}@3 在 {site}/TX 的发布') and '引擎 model_fp16.engine' in first['asked']
+    assert '不能修改或删除' in first['asked'] and first['toast'] == f'已登记发布 {r2}'
+    assert first['picked'] == r2 and first['puts'] == 0                       # the engine is not uploaded
+    assert first['rows'][0][:2] == [f'{r2} 当前发布', f'{model}@3'] and first['rows'][0][4:] == ['RTX3070 · TensorRT 10.3 · fp16', first['rows'][0][5], '网页登记']
+    assert first['rows'][1][:2] == [r1, f'{model}@1']
+    engine = f'engine of {site}'.encode()
+    got = api.release(r2)
+    assert (got['engine_sha256'], got['engine_size']) == (hashlib.sha256(engine).hexdigest(), len(engine))
+    assert first['rows'][0][5] == got['engine_sha256'][:8] + '…'
+    assert (got['model_version']['ref'], got['deploy_commit'], got['gpu'], got['trt_version'], got['precision']) == (
+        f'{model}@3', '0123456789abcdef0123456789abcdef01234567', 'RTX3070', '10.3', 'fp16')
+    assert abs(datetime.datetime.fromisoformat(got['deployed_at']) - datetime.datetime.now(datetime.timezone.utc)) < datetime.timedelta(minutes=5)
+    assert api.missing([(got['engine_sha256'], len(engine))]) == [got['engine_sha256']]
+    # an earlier deployment of a deprecated version: registered, not current; the same again is that one
+    assert '已标记为弃用' in seen['deprecated']
+    assert seen['earlier']['toast'] == f'已登记发布 {r3}；该产线当前发布仍为 {r2}（部署时间更晚）'
+    assert seen['again']['toast'] == f'该次部署已登记为 {r3}'
+    assert seen['rows'] == [[f'{r2} 当前发布', f'{model}@3', seen['rows'][0][2]], [r3, f'{model}@2', '11月2日 09:00'], [r1, f'{model}@1', '11月1日 10:00']]
+    assert datetime.datetime.fromisoformat(api.release(r3)['deployed_at']) == datetime.datetime(2026, 11, 2, 1, 0, tzinfo=datetime.timezone.utc)
+    assert api.current_release(site, 'TX')['ref'] == r2 and len(api.releases(site, 'TX')) == 3
+    assert seen['after'] == {'ref': r2, 'newer': 0}
+    assert seen['count'] == ['3', f'#/releases?site={site}&line=TX'] and seen['fits'][0] <= seen['fits'][1] + 1, seen['fits']
+    # an algorithm engineer
+    assert seen['algo']['rows'] == 3 and seen['algo']['add'] == 0 and seen['algo']['register'] == 0
+    assert seen['algo']['acts'] == '查看模型版本发布记录' and seen['algo']['download'] == 0
+    assert seen['algo']['releases'] == [r2, f'#/releases?site={site}&line=TX&ref={r2}']
+    assert '当前账号不能登记发布' in seen['algo']['refused']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_one_finds_the_way_around(service, tokens, api, tmp_path):
     """The home page is the overview; a site folds up and only the ticked sites and lines are shown, which the
     browser remembers and which hides nothing from the lists; every page says where it is and its back button
@@ -592,7 +660,7 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     mv_name, mv_number = current['model_version']['ref'].split('@')
     assert seen['release']['ref'] == current['ref'] and current['model_version']['ref'] in seen['release']['sub']
     assert f'{at.month}月{at.day}日 {at:%H:%M}' in seen['release']['sub']
-    assert '已部署' in seen['release']['state'] and seen['release']['go'] == f'#/mv/{mv_name}/{mv_number}'
+    assert seen['release']['acts'] == '查看模型版本发布记录' and seen['release']['go'] == f'#/mv/{mv_name}/{mv_number}'
     assert rel['ref'].startswith('SES-TX-r')
     rows = {r[0]: r[1:] for r in seen['models']}
     assert rows[detr] == ['@2', '0.962', '0.846'] and rows[yolo] == ['@1', '0.928', '0.791']   # the evaluated version
