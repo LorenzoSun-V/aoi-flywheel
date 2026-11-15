@@ -24,6 +24,8 @@ NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
 KINDS = ('pool', 'test', 'regression', 'other')  # what people create
 MADE = {'trainset': ('训练集快照', 'fw trainset create'),  # made only by trainsets.py
         'batch': ('标注批次', 'fw batch update')}           # made only by batches.py: a batch's revisions
+KIND_NAMES = {'pool': '数据池', 'test': '测试集', 'regression': '回归集', 'other': '其他数据集',
+              'trainset': '训练集快照', 'batch': '标注批次'}
 
 
 class DatasetError(Exception):
@@ -176,6 +178,56 @@ def rename_place(conn, user_id: Optional[int], ref: str, name: str) -> dict:
         sites.rename(conn, site, line, name)
         events.record(conn, user_id, 'site.rename', '/'.join(x for x in found if x), name=name)
     return sites.tree(conn)
+
+
+def _line(conn, site: Any, line: Any) -> Tuple[int, str, str]:
+    """A registered line: its id and its codes."""
+    site, line = place(conn, site, line)
+    return sites.line_id(conn, site, line), site, line
+
+
+def benchmark(conn, site: str, line: str) -> dict:
+    """The line's benchmark test set now ('current': None when it never had one, its newest version 'latest':
+    None while it has none) and every setting of it, the newest first ('history')."""
+    found = sites.find(conn, site, line) if site and line else None
+    if found is None:
+        raise DatasetError(404, f'{site}/{line} 不是已登记的产线')
+    site, line = found
+    line_id = sites.line_id(conn, site, line)
+    history = [{'dataset': r['dataset'], 'note': r['note'], 'created_by': r['created_by'],
+                'created_at': _stamp(r['created_at'])} for r in sites.benchmarks(conn, line_id)]
+    current = None
+    if history:
+        latest = get_dataset(conn, history[0]['dataset'])['latest']
+        current = dict(history[0], latest=None if latest is None else
+                       {'id': latest['id'], 'number': latest['number'], 'ref': latest['ref'],
+                        'file_count': latest['file_count'], 'created_at': latest['created_at']})
+    return {'site': site, 'line': line, 'current': current, 'history': history}
+
+
+def set_benchmark(conn, user_id: int, ref: Any, dataset: Any, note: Any = '') -> dict:
+    """Make a test set of the line ('SES/TX') its benchmark: the test set its models are compared on."""
+    site, line = _place_ref(ref)
+    if line is None:
+        raise DatasetError(400, '请写明产线，例如 SES/TX')
+    line_id, site, line = _line(conn, site, line)
+    if not isinstance(dataset, str) or not dataset.strip():
+        raise DatasetError(400, '请选择作为基准的测试集')
+    d = get_dataset(conn, dataset.strip())
+    note = _note(note)
+    if d['kind'] != 'test':
+        raise DatasetError(400, f'{d["name"]} 是{KIND_NAMES.get(d["kind"], d["kind"])}，产线的基准只能是测试集')
+    if (d['site'].lower(), d['line'].lower()) != (site.lower(), line.lower()):
+        where = f'{d["site"]}/{d["line"]}' if d['site'] else '不属于任何产线'
+        raise DatasetError(400, f'测试集 {d["name"]}（{where}）不属于 {site}/{line}，请选择该产线的测试集')
+    with conn.transaction():
+        conn.execute('SELECT id FROM lines WHERE id = %s FOR UPDATE', (line_id,))  # one setting at a time
+        now = sites.benchmarks(conn, line_id)
+        if now and now[0]['dataset_id'] == d['id']:
+            raise DatasetError(409, f'{d["name"]} 已是 {site}/{line} 的基准测试集')
+        sites.set_benchmark(conn, line_id, d['id'], note, user_id)
+        events.record(conn, user_id, 'line.benchmark', f'{site}/{line}', dataset=d['name'], note=note)
+    return benchmark(conn, site, line)
 
 
 def where_place(site: str, line: str, q: str, alias: str = 'd') -> Tuple[List[str], List[Any]]:

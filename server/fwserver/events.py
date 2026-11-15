@@ -30,6 +30,7 @@ ACTIONS = {
     'site.add': '登记现场',
     'line.add': '登记产线',
     'site.rename': '改现场或产线的显示名',
+    'line.benchmark': '设定产线的基准测试集',
     'model.create': '新建模型',
     'model_version.register': '登记模型版本',
     'model_version.tag': '改模型标签',

@@ -30,6 +30,8 @@ const { chromium } = require('playwright');
   seen.menu = await page.$$eval('.menu [role=menuitem]', (items) => items.map((i) => [i.textContent, i.getAttribute('href')]));
   await page.keyboard.press('Escape');
   seen.data = await dataRows();
+  seen.benchmark = await page.textContent('#benchmark');
+  seen.benchmarkChange = await page.textContent('#benchmark-change');
   seen.batches = await page.$$eval('table.batches tr:nth-child(1) td', (c) => c.map((x) => x.querySelector('a') ? x.querySelector('a').textContent : x.textContent));
   seen.treeOn = await page.textContent('#places li.line a.on');
   seen.navModels = await page.getAttribute('#nav a:has-text("模型")', 'href');
@@ -56,6 +58,8 @@ const { chromium } = require('playwright');
     sections: await page.$$eval('main h2', (h) => h.map((x) => x.id)),
     release: await page.textContent('#release'),
     model: await page.textContent('table.models tr:nth-child(2) td'),
+    benchmark: await page.textContent('#benchmark'),
+    change: await page.$$eval('#benchmark-change', (b) => b.length),
     refused: await page.$$eval('main .error', (e) => e.map((x) => x.textContent)),
   };
   // an account without the capability: no link, and the page says why

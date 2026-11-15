@@ -236,6 +236,8 @@ export const api = {
   sites: () => call('/sites').then((tree) => { treeCache = tree; return tree; }),
   addSite: (ref, name) => call('/sites', { method: 'POST', body: { ref, name } }),
   renameSite: (ref, name) => call('/sites/name', { method: 'POST', body: { ref, name } }),
+  benchmark: (site, line) => call(`/sites/benchmark?${new URLSearchParams({ site, line })}`),
+  setBenchmark: (ref, dataset, note) => call('/sites/benchmark', { method: 'POST', body: { ref, dataset, note } }),
   retireLabel: (name, label, note) => call(`/datasets/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}/retire`, { method: 'POST', body: { note } }),
   retireModelLabel: (name, label, note) => call(`/models/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}/retire`, { method: 'POST', body: { note } }),
   setTag: (name, number, tag, added, note) => call(`/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/tags`, { method: 'POST', body: { tag, added, note } }),
@@ -253,6 +255,7 @@ export const api = {
   eval: (id) => call(`/evals/${Number(id)}`),
   chain: (ref) => call(`/chain?ref=${encodeURIComponent(ref)}`),
   currentRelease: (site, line) => call(`/releases/current?${new URLSearchParams({ site, line })}`),
+  releases: (site, line) => call(`/releases?${new URLSearchParams({ site, line })}`),  // oldest deployed first
   runners: async () => (await call('/runners')).runners,
   jobs: async (status = '', limit = 100) => (await call(`/jobs?status=${encodeURIComponent(status)}&limit=${limit}`)).jobs,
   job: (id) => call(`/jobs/${Number(id)}`),
@@ -1774,6 +1777,10 @@ async function modelsPage(query) {
 async function modelPage(name) {
   const show = live();
   const [m, versions, evals] = await Promise.all([api.model(name), api.modelVersions(name), api.evals(name)]);
+  const none = (e) => { if (e.status === 404) return null; throw e; };  // a line not registered, no release
+  const [bench, releases] = await Promise.all([can('sites.read') ? api.benchmark(m.site, m.line).catch(none) : null,
+    api.releases(m.site, m.line)]);
+  const release = releases.length ? releases[releases.length - 1] : null;  // the line's current release
   const list = versions.slice().reverse();
   const labels = list.length && can('models.write') ? await labelSection(m.name, true, () => modelPage(name)) : null;
   const menuOf = (v) => moreMenu(v.ref, [
@@ -1797,8 +1804,39 @@ async function modelPage(name) {
         el('td', {}, v.created_by), timeCell(v.created_at), textCell(v.note), el('td', { class: 'menu-cell' }, menuOf(v)))))
       : el('p', { class: 'muted' }, '暂无版本。'),
     labels ? labels.form : null,
+    benchmarkSection(m, bench, release, evals),
     el('h2', {}, '评估'), evalTable(evals.slice().reverse(), true),
     labels ? labels.list : null);
+}
+
+// A model's versions on its line's benchmark test set side by side: the version released on the line now is
+// marked, the others show their change from it.
+function benchmarkSection(m, bench, release, evals) {
+  const current = bench && bench.current;
+  const latest = current && current.latest;
+  const title = el('h2', { id: 'model-bench' }, '基准测试集上的指标', info(['各版本在产线基准测试集最新版本全部图片上的评估结果，按版本从新到旧排列。',
+    '该产线当前发布的版本标为「当前发布」，其余版本的指标后为相对它的变化。基准测试集在产线概览页设定。'], '基准测试集上的指标说明'));
+  const said = (text) => [title, el('p', { id: 'model-bench-none', class: 'muted' }, text)];
+  if (!bench) return said(`${m.site} / ${m.line} 不是已登记的产线，无法按基准测试集比较。`);
+  if (!current) return said(`产线 ${m.site} / ${m.line} 尚未设定基准测试集。`);
+  if (!latest) return said(`基准测试集 ${current.dataset} 暂无版本。`);
+  const rows = benchmarkByVersion(evals, latest.id);
+  if (!rows.length) return said(`暂无版本在基准测试集 ${latest.ref} 上评估。`);
+  const released = release ? rows.find((e) => e.model_version.ref === release.model_version.ref) : null;
+  const base = released ? Object.fromEntries(KEY_METRICS.map((k) => [k, released.metrics[k]])) : null;
+  return [title,
+    el('div', { class: 'bench-line' }, el('span', { class: 'muted' }, '基准测试集'),
+      el('a', { href: hrefOf(['v', current.dataset, String(latest.number)]) }, latest.ref)),
+    el('table', { id: 'bench-table', class: 'narrow' },
+      el('tr', {}, el('th', {}, '版本'), ...KEY_METRICS.map((k) => el('th', { class: 'num' }, k)), el('th', {}, '评估')),
+      rows.map((e) => el('tr', { class: e === released ? 'released' : '' },
+        el('td', {}, mref(e.model_version.ref, true), e === released ? el('span', { class: 'tag' }, '当前发布') : null),
+        ...KEY_METRICS.map((k) => {
+          const shown = Object.fromEntries(keyMetrics(e.metrics))[k];
+          const change = base && e !== released ? metricDelta(e.metrics[k], base[k]) : null;
+          return el('td', { class: `num${shown ? '' : ' muted'}` }, shown || '—', change ? el('span', { class: 'delta' }, ` ${change}`) : null);
+        }),
+        el('td', {}, el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`)))))];
 }
 
 function evalTable(rows, withModel) {
@@ -1808,18 +1846,25 @@ function evalTable(rows, withModel) {
     const [a, b] = [...pick];
     location.hash = hrefOf(['evals'], { a, b });
   } }, '比较所选的两份报告');
-  const head = ['', '编号', withModel ? '模型版本' : null, '测试集', '目录', '工具', '任务', '登记人', '时间', '备注'].filter((h) => h !== null);
-  return [el('table', {}, el('tr', {}, head.map((h) => el('th', {}, h))),
-    rows.map((e) => el('tr', {},
-      el('td', {}, el('input', { type: 'checkbox', onchange: (ev) => {
-        if (ev.target.checked) pick.add(String(e.id)); else pick.delete(String(e.id));
-        compare.disabled = pick.size !== 2;
-      } })),
-      el('td', {}, el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`)),
-      withModel ? el('td', {}, mref(e.model_version.ref, true)) : null,  // the model's page: its own versions
-      el('td', {}, vref(e.testset.ref)), textCell(e.dirs.join('、') || '全部'),
-      el('td', {}, `${e.tool} ${e.tool_version}`.trim() || '-'), el('td', {}, jobLink(e.job_id)),
-      el('td', {}, e.created_by), timeCell(e.created_at), textCell(e.note)))),
+  // the numbers that decide between versions are in the list; the tool, the job and the account on the report
+  const head = [[''], ['编号'], withModel ? ['模型版本'] : null, ['测试集'], ['目录'], ...KEY_METRICS.map((k) => [k, 'num']), ['时间'], ['备注']]
+    .filter(Boolean);
+  return [el('table', { class: 'evals' }, el('tr', {}, head.map(([h, c]) => el('th', { class: c }, h))),
+    rows.map((e) => {
+      const shown = Object.fromEntries(keyMetrics(e.metrics));
+      const time = timeCell(e.created_at);
+      time.title = `${e.created_by}，${when(e.created_at)}`;
+      return el('tr', { 'data-id': String(e.id) },
+        el('td', {}, el('input', { type: 'checkbox', 'aria-label': `选择评估 #${e.id}`, onchange: (ev) => {
+          if (ev.target.checked) pick.add(String(e.id)); else pick.delete(String(e.id));
+          compare.disabled = pick.size !== 2;
+        } })),
+        el('td', {}, el('a', { href: hrefOf(['eval', String(e.id)]) }, `#${e.id}`)),
+        withModel ? el('td', {}, mref(e.model_version.ref, true)) : null,  // the model's page: its own versions
+        el('td', {}, vref(e.testset.ref)), textCell(e.dirs.join('、') || '全部'),
+        ...KEY_METRICS.map((k) => el('td', { class: `num${shown[k] ? '' : ' muted'}` }, shown[k] || '—')),
+        time, textCell(e.note));
+    })),
   el('div', { class: 'row', style: 'margin-top:8px' }, compare)];
 }
 
@@ -3021,7 +3066,8 @@ async function batchesPage(query) {
   show(crumbs('batches', at), pageHead(['标注批次', info([
     '一个批次对应一个待加入数据池的目录。流程为：上传（每次上传冻结为一版，不进入数据池）、提交复核、退回或通过；通过后由算法工程师入库。',
     '左侧现场 / 产线后的数字为在办批次数，即尚未入库且未关闭的批次。'], '标注批次说明')],
-    can('batches.write') ? el('a', { id: 'batch-new', class: 'button primary', href: '#/batch-new' }, icon('plus'), '上传新批次') : null),
+    can('batches.write') ? el('a', { id: 'batch-new', class: 'button primary', href: hrefOf(['batch-new'], { site: at.site, line: at.line }) },
+      icon('plus'), '上传新批次') : null),
     browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '按批次名称搜索',
       el('div', { class: 'row tabs' }, tabs),
       rows.length ? el('table', {}, el('tr', {}, [['批次'], ['版次'], ['状态'], ['入库到'], ['文件', 'num'], ['大小', 'num'], ['上传账号'], ['标注人'], ['复核人'], ['最近变化']]
@@ -3119,6 +3165,21 @@ const reviewerSelect = (names, first) => el('select', { id: 'reviewer' },
   el('option', { value: '' }, first), names.map((n) => el('option', { value: n }, n)));
 
 // A new batch (name null), the owner's next revision, or (approve) the reviewer's corrected folder.
+// The data pools to choose from, grouped by site and line, with nothing chosen at first.
+function poolSelect(pools, tree) {
+  const names = new Map();
+  for (const s of (tree || { sites: [] }).sites) for (const x of s.lines) names.set(`${s.code}/${x.code}`.toLowerCase(), `${s.code} / ${placeText(x)}`);
+  const groups = new Map();
+  for (const d of pools) {
+    const key = `${d.site}/${d.line}`.toLowerCase();
+    if (!groups.has(key)) groups.set(key, { label: names.get(key) || `${d.site} / ${d.line}`, pools: [] });
+    groups.get(key).pools.push(d);
+  }
+  const sorted = [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
+  return el('select', { id: 'pool', required: true }, el('option', { value: '' }, pools.length ? '请选择数据池' : '暂无数据池'),
+    sorted.map((g) => el('optgroup', { label: g.label }, g.pools.map((d) => el('option', { value: d.name }, d.name)))));
+}
+
 async function batchUploadPage(name, query) {
   const show = live();
   const approve = query.get('approve') === '1';
@@ -3126,10 +3187,15 @@ async function batchUploadPage(name, query) {
   if (b && !b.actions.includes(approve ? 'approve' : 'revise')) {
     throw new Error(`${b.name} 当前状态为「${b.status_text}」，或不属于本账号，无法${approve ? '通过' : '上传新版次'}。`);
   }
-  const pools = b ? [] : (await api.datasets()).filter((d) => d.kind !== 'trainset');
+  // a batch goes into a data pool only: the pools, by site and line, none chosen unless the page was opened
+  // for one (a pool's page) or from a line that has only one
+  const [pools, tree] = b ? [[], null] : await Promise.all([api.datasets({ kind: 'pool' }), api.sites()]);
   const names = approve ? [] : await api.reviewers();
-  const pool = el('select', { id: 'pool' }, pools.map((d) => el('option', { value: d.name }, d.name)));
-  if (query.get('pool')) pool.value = query.get('pool');
+  const pool = poolSelect(pools, tree);
+  const at = scopeOf(query);
+  const ofLine = pools.filter((d) => at.line && d.site.toLowerCase() === at.site.toLowerCase() && d.line.toLowerCase() === at.line.toLowerCase());
+  if (pools.some((d) => d.name === query.get('pool'))) pool.value = query.get('pool');
+  else if (ofLine.length === 1) pool.value = ofLine[0].name;
   const batchName = el('input', { type: 'text', id: 'batch-name', placeholder: '字母、数字和 . _ -，例如 SES-TX-20261104' });
   const dir = el('input', { type: 'text', id: 'batch-dir', placeholder: '入库后在数据池中的目录名，选择目录后自动填写' });
   const labeler = el('input', { type: 'text', id: 'labeler', placeholder: approve ? '修改人姓名（必填）' : '标注人姓名（必填）' });
@@ -3141,6 +3207,7 @@ async function batchUploadPage(name, query) {
   const force = el('input', { type: 'checkbox' });
   const here = location.hash;
   const ready = () => {
+    if (!b && !pool.value) throw new Error('请选择目标数据池。');
     if (!labeler.value.trim()) throw new Error(approve ? '请填写修改人姓名。' : '请填写标注人姓名。');
     if (!b && !batchName.value.trim()) throw new Error('请填写批次名称。');
     if (!b && !dir.value.trim()) throw new Error('请填写池中目录。');
@@ -3164,7 +3231,7 @@ async function batchUploadPage(name, query) {
     label: approve ? '上传并通过' : b ? '上传新版次' : '上传批次',
     onPick: b ? null : (folder) => {
       dir.value = folder;
-      if (!batchName.value.trim()) batchName.value = `${pool.value}-${folder}`.replace(/[^A-Za-z0-9._-]/g, '');
+      if (!batchName.value.trim() && pool.value) batchName.value = `${pool.value}-${folder}`.replace(/[^A-Za-z0-9._-]/g, '');
     },
     ready, done });
   const title = approve ? `修改后通过 ${b.name}` : b ? `上传 ${b.name} 的新版次` : '上传新批次';
@@ -3176,7 +3243,8 @@ async function batchUploadPage(name, query) {
           '选择目录后，批次名称和池中目录将自动填写，可修改。'], '上传说明')),
     steps,
     el('div', { class: 'panel form' },
-      b ? null : el('label', {}, '目标数据池', pool),
+      b ? null : field('目标数据池', pool, ['标注批次只能进入数据池；测试集和回归集由算法工程师在其数据集页上传。',
+        '批次建立后不能更改目标数据池，请核对现场和产线。']),
       el('div', { class: 'label' }, el('span', {}, '目录'), picker),
       b ? null : el('label', {}, '批次名称', batchName),
       b ? null : field('池中目录', dir, '批次入库后在数据池中的目录名。'),
@@ -3530,6 +3598,7 @@ async function datasetNewPage(query) {
   const tree = await api.sites();
   const kinds = ['pool', 'test', 'regression', 'other'];
   const kind = el('select', { id: 'dataset-kind' }, kinds.map((k) => el('option', { value: k }, KIND_NAMES[k])));
+  if (kinds.includes(query.get('kind'))) kind.value = query.get('kind');  // e.g. a test set for a line's benchmark
   const name = el('input', { id: 'dataset-name', type: 'text', placeholder: '名称，例如 SES-TX 或 SES-TX-test' });
   const { site, line, none } = placePicker(tree, at, true);
   const note = el('input', { id: 'dataset-note', type: 'text', placeholder: '备注（选填）' });
@@ -3623,11 +3692,42 @@ export function batchesUnderWay(batches) {
   return batches.filter((b) => b.status !== 'imported' && b.status !== 'closed');
 }
 
-// The newest evaluation of each model version name: {model name: report}; reports come oldest first.
-export function lastEvalByModel(evals) {
+// The reports measured on a version of a line's benchmark test set as a whole: all its images, no folders
+// chosen (models are compared on these only).
+export function onBenchmark(evals, versionId) {
+  return evals.filter((e) => e.testset.id === versionId && !e.split && !(e.dirs || []).length);
+}
+
+const mvNumber = (e) => Number(e.model_version.ref.split('@')[1]);
+
+// Of each model, its newest version's report on the benchmark version: {model name: report}. Of two reports
+// of one version, the later.
+export function benchmarkByModel(evals, versionId) {
   const out = {};
-  for (const e of evals) out[e.model_version.ref.split('@')[0]] = e;
+  for (const e of onBenchmark(evals, versionId)) {
+    const name = e.model_version.ref.split('@')[0];
+    const was = out[name];
+    if (!was || mvNumber(e) > mvNumber(was) || (mvNumber(e) === mvNumber(was) && e.id > was.id)) out[name] = e;
+  }
   return out;
+}
+
+// Of one model, the report of each version on the benchmark version, newest version first.
+export function benchmarkByVersion(evals, versionId) {
+  const out = new Map();
+  for (const e of onBenchmark(evals, versionId)) {
+    const was = out.get(mvNumber(e));
+    if (!was || e.id > was.id) out.set(mvNumber(e), e);
+  }
+  return [...out.values()].sort((a, b) => mvNumber(b) - mvNumber(a));
+}
+
+// A metric's change from the same metric of a base report: '+0.013', '−0.004', '±0'; null when either is not
+// a number.
+export function metricDelta(value, base) {
+  if (typeof value !== 'number' || typeof base !== 'number') return null;
+  const d = Math.round((value - base) * 10000) / 10000;
+  return d === 0 ? '±0' : `${d > 0 ? '+' : '−'}${numberText(Math.abs(d))}`;
 }
 
 function lineTable(tree, at) {
@@ -3778,10 +3878,13 @@ async function overviewPage(query) {
   }
   const where = { site: at.site, line: at.line };
   const none = (e) => { if (e.status === 404) return null; throw e; };
-  const [data, models, release, batches] = await Promise.all([
+  const [data, models, release, batches, bench] = await Promise.all([
     api.datasets(where), api.models(where), api.currentRelease(at.site, at.line).catch(none),
-    can('batches.read') ? api.batches(where).then((r) => batchesUnderWay(r.batches)) : null]);
-  const evals = lastEvalByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat());
+    can('batches.read') ? api.batches(where).then((r) => batchesUnderWay(r.batches)) : null,
+    api.benchmark(at.site, at.line).catch(none)]);
+  // models are compared on the newest version of the line's benchmark test set, as a whole
+  const benchVersion = bench && bench.current ? bench.current.latest : null;
+  const evals = benchVersion ? benchmarkByModel((await Promise.all(models.map((m) => api.evals(m.name)))).flat(), benchVersion.id) : {};
   const head = (id, text, parts, link, ...more) => el('div', { class: 'section-head' }, el('h2', { id }, ...[].concat(text)),
     el('div', { class: 'links' }, ...more,
       el('a', { class: 'small', href: hrefOf(parts, { ...where, ...(parts[0] === 'batches' ? { view: 'all' } : {}) }) }, link)));
@@ -3810,9 +3913,11 @@ async function overviewPage(query) {
       const e = evals[m.name];
       const row = modelRow(m, e);
       const shown = e ? Object.fromEntries(keyMetrics(e.metrics)) : {};
-      return el('tr', { title: e ? `评估 #${e.id}：${e.model_version.ref}，测试集 ${e.testset.ref}，${when(e.created_at)}` : '该模型尚无评估' },
+      return el('tr', { title: e ? `评估 #${e.id}：${e.model_version.ref}，基准测试集 ${e.testset.ref}，${when(e.created_at)}`
+        : benchVersion ? `该模型未在 ${benchVersion.ref} 上评估` : '该产线尚未设定基准测试集' },
         el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
-        el('td', {}, row.ref ? el('a', { href: mvHref(row.ref) }, `@${row.number}`) : '-'),
+        el('td', {}, e || (!benchVersion && row.ref) ? el('a', { href: mvHref(row.ref) }, `@${row.number}`)
+          : el('span', { class: 'muted' }, benchVersion ? '未评估' : '-')),
         ...KEY_METRICS.map((k) => el('td', { class: `num${shown[k] ? '' : ' muted'}` }, shown[k] || '—')),
         el('td', { class: 'act' }, row.items.length ? moreMenu(row.ref, row.items) : null));
     })) : el('p', { class: 'muted' }, '该产线暂无模型。');
@@ -3841,9 +3946,53 @@ async function overviewPage(query) {
       line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是已登记的产线，以下为名称匹配的内容。`),
       card,
       el('div', { class: `cols${batchList ? '' : ' one'}` },
-        el('div', { class: 'col' }, head('models', '模型与最近评估', ['models'], '全部模型', can('models.write') ? el('a', { id: 'model-new', class: 'small with-icon', href: '#/model-register' }, icon('plus'), '登记模型版本') : null), modelTable,
+        el('div', { class: 'col' }, head('models', '模型与评估', ['models'], '全部模型', can('models.write') ? el('a', { id: 'model-new', class: 'small with-icon', href: '#/model-register' }, icon('plus'), '登记模型版本') : null),
+          modelTable, line ? benchmarkBar(at, bench, data, () => overviewPage(query)) : null,
           head('data', '数据池与快照', ['datasets'], '全部数据集', newData, newSnapshot), dataTable),
         batchList ? el('div', { class: 'col right' }, head('batches', ['在办的批次', info('在办批次指尚未入库且未关闭的批次。', '在办批次说明')], ['batches'], '全部批次'), batchList) : null))));
+}
+
+// The line's benchmark test set under its models (the numbers of the table are measured on it), and for those
+// who may set it a form to set or change it, with every setting before.
+function benchmarkBar(at, bench, data, again) {
+  const current = bench && bench.current;
+  const latest = current && current.latest;
+  const ref = `${at.site}/${at.line}`;
+  const box = el('div', { id: 'benchmark-form', class: 'bench-form', hidden: true });
+  const open = () => {
+    const tests = data.filter((d) => d.kind === 'test' && (!current || d.name !== current.dataset));
+    const pick = el('select', { id: 'benchmark-set' }, el('option', { value: '' }, '请选择测试集'),
+      tests.map((d) => el('option', { value: d.name }, d.latest ? `${d.name}（最新 @${d.latest.number}）` : `${d.name}（暂无版本）`)));
+    const note = el('input', { id: 'benchmark-note', type: 'text', placeholder: '备注（选填）' });
+    const msg = el('div');
+    const save = async (ev) => {
+      ev.preventDefault();
+      if (!pick.value) { msg.replaceChildren(errorBox('请选择测试集。')); return; }
+      try {
+        await api.setBenchmark(ref, pick.value, note.value.trim());
+        await again();
+        toastDone(`已将 ${pick.value} 设为 ${ref} 的基准测试集`);
+      } catch (e) { msg.replaceChildren(errorBox(e)); }
+    };
+    const history = bench && bench.history.length ? [el('h3', {}, '设定记录'), el('table', { id: 'benchmark-history' },
+      el('tr', {}, ['时间', '设定人', '测试集', '备注'].map((h) => el('th', {}, h))),
+      bench.history.map((h) => el('tr', {}, timeCell(h.created_at), el('td', {}, h.created_by),
+        el('td', {}, el('a', { href: hrefOf(['d', h.dataset]) }, h.dataset)), textCell(h.note))))] : [];
+    box.replaceChildren(msg, tests.length
+      ? el('form', { class: 'row', onsubmit: save }, pick, note, el('button', { id: 'benchmark-go', class: 'primary', type: 'submit' }, '保存'),
+        el('button', { type: 'button', onclick: () => { box.hidden = true; } }, '取消'))
+      : el('p', { class: 'muted' }, current ? '该产线没有其他测试集。' : '该产线暂无测试集。',
+        el('a', { href: hrefOf(['dataset-new'], { site: at.site, line: at.line, kind: 'test' }) }, '新建测试集')), ...history);
+    box.hidden = false;
+    if (tests.length) pick.focus();
+  };
+  return el('div', { class: 'bench' }, el('div', { id: 'benchmark', class: 'bench-line' },
+    el('span', { class: 'muted' }, '基准测试集'),
+    latest ? el('a', { href: hrefOf(['v', current.dataset, String(latest.number)]), title: `${latest.file_count} 个文件，${when(latest.created_at)}` }, latest.ref)
+      : current ? el('span', {}, `${current.dataset}（暂无版本）`) : el('span', { class: 'muted' }, '尚未设定'),
+    info(['同一产线的模型只在基准测试集最新版本的全部图片上比较，下表的指标均来自这一测试集；评估部分目录或训练集快照划分的报告不计入。',
+      '基准测试集更新出新版本后，各模型需重新评估才会显示指标。基准测试集由算法工程师设定，可更换，每次设定均留有记录。'], '基准测试集说明'),
+    can('sites.write') ? el('button', { id: 'benchmark-change', class: 'link', type: 'button', onclick: open }, current ? '更换' : '设定') : null), box);
 }
 
 // --- frame and routing ------------------------------------------------------------------------------------

@@ -7,7 +7,7 @@ import {
   shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
-  scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
+  scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -130,15 +130,28 @@ test('the site and line being browsed, from the address', () => {
   assert.deepEqual(scopeQuery({ site: '', line: '', q: '' }), {});
 });
 
-test('the overview of a line shows the numbers a report has, the batches under way and each model\'s last report', () => {
+test('the overview of a line shows the numbers a report has and the batches under way', () => {
   assert.deepEqual(keyMetrics({ mAP50: 0.8125, 'mAP50-95': 0.5, P: '0.9', images: 3, nested: { R: 1 } }), [['mAP50', '0.8125'], ['mAP50-95', '0.5']]);
   assert.deepEqual(keyMetrics(null), []);
   const b = (status) => ({ status });
   assert.deepEqual(batchesUnderWay([b('open'), b('imported'), b('review'), b('closed'), b('rejected'), b('approved')]).map((x) => x.status),
     ['open', 'review', 'rejected', 'approved']);
-  const e = (id, ref) => ({ id, model_version: { ref } });
-  const last = lastEvalByModel([e(1, 'A@1'), e(2, 'B@1'), e(3, 'A@2')]);
-  assert.deepEqual([last.A.id, last.B.id], [3, 2]);
+});
+
+test('models are compared on the whole of the benchmark version only, each by its newest version evaluated there', () => {
+  const e = (id, ref, testset = 9, more = {}) => ({ id, model_version: { ref }, testset: { id: testset }, split: '', dirs: [], ...more });
+  const reports = [e(1, 'A@1'), e(2, 'B@1'), e(3, 'A@3'), e(4, 'A@2'), e(5, 'B@2', 8),  // B@2: on another version
+    e(6, 'B@3', 9, { dirs: ['20261101'] }), e(7, 'C@1', 9, { split: 'test' }), e(8, 'A@3')];  // part of it; a split
+  assert.deepEqual(onBenchmark(reports, 9).map((x) => x.id), [1, 2, 3, 4, 8]);
+  const by = benchmarkByModel(reports, 9);
+  assert.deepEqual(Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v.id])), { A: 8, B: 2 });  // A@3, its later report
+  assert.deepEqual(benchmarkByVersion(reports.filter((x) => x.model_version.ref.startsWith('A@')), 9).map((x) => x.id), [8, 4, 1]);
+  assert.deepEqual(benchmarkByModel(reports, 7), {});
+  assert.equal(metricDelta(0.912, 0.9), '+0.012');
+  assert.equal(metricDelta(0.8, 0.8125), '−0.0125');
+  assert.equal(metricDelta(0.5, 0.5), '±0');
+  assert.equal(metricDelta(0.5, undefined), null);
+  assert.equal(metricDelta('0.5', 0.4), null);
 });
 
 test('a number in the tree of sites and lines is the number of rows choosing it lists', () => {

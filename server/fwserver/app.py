@@ -136,6 +136,12 @@ class PlaceBody(BaseModel):
     name: str = Field(default='', max_length=200)
 
 
+class BenchmarkBody(BaseModel):
+    ref: str = Field(max_length=200)   # 'SES/TX'
+    dataset: str = Field(max_length=200)
+    note: str = Field(default='', max_length=2000)
+
+
 class DatasetBody(BaseModel):
     name: str
     site: str = ''
@@ -685,6 +691,17 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def rename_site(body: PlaceBody, user: dict = Depends(site_writer)):
         with conn() as c:
             return datasets.rename_place(c, user['user_id'], body.ref, body.name)
+
+    # A line's benchmark test set: the test set its models are compared on.
+    @app.get('/api/v1/sites/benchmark')
+    def line_benchmark(site: str, line: str, user: dict = Depends(site_reader)):
+        with conn() as c:
+            return datasets.benchmark(c, site, line)
+
+    @app.post('/api/v1/sites/benchmark')
+    def set_line_benchmark(body: BenchmarkBody, user: dict = Depends(site_writer)):
+        with conn() as c:
+            return datasets.set_benchmark(c, user['user_id'], body.ref, body.dataset, body.note)
 
     @app.post('/api/v1/datasets', status_code=201)
     def create_dataset(body: DatasetBody, user: dict = Depends(data_user)):
