@@ -30,6 +30,7 @@ the reviewer who was asked and an administrator close.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,7 @@ UNFINISHED = ('open', 'review', 'rejected', 'approved')
 MAX_COMMENT = 2000
 MAX_IMAGES = 500         # images a rejection points at
 MAX_NOTE = 200           # characters of the note on one of them (0016 holds the same limit)
+CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')   # in a text: never meant (line breaks and tabs are fine)
 EXAMPLES = 200           # images a comparison lists
 MAX_LABEL_READS = 20000  # labels a comparison reads; beyond this the rest are counted but not compared
 MAX_PAIRS = 250_000      # old x new boxes of one image a comparison pairs up; beyond this only added / removed
@@ -173,6 +175,7 @@ def _notes(notes: Any, images: List[str]) -> Dict[str, str]:
             raise DatasetError(400, f'{path} 未列在问题图片中，无法为它写说明；请先把它列为问题图片')
         if len(text) > MAX_NOTE:
             raise DatasetError(400, f'{path} 的说明过长：最多 {MAX_NOTE} 字，请精简，详细内容请写在退回意见中')
+        _plain(text, f'{path} 的说明')
         out[path] = text
     return out
 
@@ -183,7 +186,14 @@ def _text(value: Any, what: str, limit: int, required: bool = False) -> str:
         raise DatasetError(400, f'请填写{what}')
     if len(text) > limit:
         raise DatasetError(400, f'{what}最多 {limit} 个字')
+    _plain(text, what)
     return text
+
+
+def _plain(text: str, what: str) -> None:
+    """Refuse control characters (a NUL cannot even be stored): text typed by a person has none."""
+    if CONTROL.search(text):
+        raise DatasetError(400, f'{what}中含有无法保存的控制字符，请删除后重试')
 
 
 def _labeler(value: Any) -> str:

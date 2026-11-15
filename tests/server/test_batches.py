@@ -173,8 +173,15 @@ def test_a_rejection_carries_a_note_on_each_problem_image(api, field, pool, day,
     assert e.value.status == 400
     with pytest.raises(ApiError, match='d.bmp 的说明过长：最多 200 字'):
         api.batch_step(name, 'reject', {'comment': '漏标', 'images': ['d.bmp'], 'notes': {'d.bmp': '长' * 201}})
+    # control characters are refused, in a note or in the comment (a NUL could not even be stored)
+    for body, said in (({'notes': {'d.bmp': '漏\x00标'}}, 'd.bmp 的说明中含有无法保存的控制字符'),
+                       ({'comment': '漏标\x00'}, '退回意见中含有无法保存的控制字符'),
+                       ({'comment': '漏标\x1b[31m'}, '退回意见中含有无法保存的控制字符')):
+        with pytest.raises(ApiError, match=said) as e:
+            api.batch_step(name, 'reject', {'comment': '漏标', 'images': ['d.bmp'], **body})
+        assert e.value.status == 400
     assert api.batch(name)['status'] == 'review'
-    b = api.batch_step(name, 'reject', {'comment': '两张都要改', 'images': ['c.bmp', 'd.bmp'], 'revision': 1,
+    b = api.batch_step(name, 'reject', {'comment': '两张都要改：\n\tc 框偏', 'images': ['c.bmp', 'd.bmp'], 'revision': 1,
                                         'notes': {'d.bmp': ' 右下角漏标一个 ng ', 'c.bmp': '  '}})
     step = b['steps'][-1]
     assert (step['step'], step['images'], step['notes']) == ('reject', ['c.bmp', 'd.bmp'], {'d.bmp': '右下角漏标一个 ng'})
