@@ -731,8 +731,8 @@ def test_class_map_drops_others_and_reads_txt_by_its_own_table(api, cache, tmp_p
     assert json.loads(tree['trainset.json'])['rule']['class_map'] == {'others': ''}
     # the notices say what the map did
     preview = api.preview_trainset(f'{name}-again', dict(body, label_classes=SES5, class_map={'others': ''}))
-    assert '映射：others 的 2 个框已去掉，作为背景' in preview['notices'], preview['notices']
-    assert any(n.startswith('1 张图片的框均被映射去掉') and 'b1/labels/b.txt' in n for n in preview['notices'])
+    assert '映射：others 的 2 个框不保留，视为背景' in preview['notices'], preview['notices']
+    assert any(n.startswith('1 张图片的框均被映射移除，作为无框的背景图收入') and 'b1/labels/b.txt' in n for n in preview['notices'])
 
 
 def test_class_map_on_json_keeps_the_rest_of_the_file(api, cache, tmp_path):
@@ -989,7 +989,7 @@ def test_command_line_class_map(service, tokens, api, tmp_path, monkeypatch, cap
     assert fw_cli.main(args) == 0
     out = capsys.readouterr().out
     assert '标注：同时有 JSON 和 txt 的图用 txt；txt 按自己的 5 类编号读' in out and '映射 others→去掉' in out, out
-    assert '注意：映射：others 的 1 个框已去掉，作为背景' in out
+    assert '注意：映射：others 的 1 个框不保留，视为背景' in out
     assert fw_cli.main(['trainset', 'show', name]) == 0
     assert '映射 others→去掉' in capsys.readouterr().out
     assert fw_cli.main(args[:-3] + ['--map', 'others', '--dry-run']) == 1

@@ -120,7 +120,7 @@ def test_remove(api, pool):
     out, echo = lines()
     v2 = ops.remove_dirs(api, name, ['20261101/'], note='拍糊了', echo=echo)
     assert set(paths(api, v2)) == {'20261102/b.bmp', '20261102/b.json'} and v2['note'] == '拍糊了'
-    assert any('去掉 20261101/：2 个文件' in x for x in out)
+    assert any('移除 20261101/：2 个文件' in x for x in out)
     assert [(o['op'], o['dir'], o['file_count'], o['removed_count'], o['content_sha256'])
             for o in api.version(name, 2)['ops']] == [('remove', '20261101', 0, 2, None)]
     assert set(paths(api, api.version(name, 1))) == set(paths(api, v1))  # the old version is as it was

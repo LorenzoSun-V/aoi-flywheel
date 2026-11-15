@@ -204,7 +204,7 @@ def expire_leases(conn) -> int:
             if r['cancel_requested']:
                 status, error = 'cancelled', None
             elif r['attempts'] >= r['max_attempts']:
-                status, error = 'failed', f'已领取 {r["attempts"]} 次，每次 worker 均在租约到期前失联（断网、死机或被停止）'
+                status, error = 'failed', f'已领取 {r["attempts"]} 次，每次 worker 均在租约到期前失联（失去连接、死机或被停止）'
             else:
                 status, error = 'queued', None
             conn.execute("UPDATE jobs SET status = %s, error = %s, worker_id = NULL, lease_sha256 = NULL, "

@@ -10,11 +10,11 @@ ROOT = Path(__file__).resolve().parents[2]
 SPOKEN = sorted(set((ROOT / 'server' / 'fwserver').glob('*.py')) - {ROOT / 'server' / 'fwserver' / 'cli.py'}) \
     + [ROOT / 'client' / 'fw' / 'contract.py']
 # a colloquial word -> how the pages say it
-INFORMAL = {
-    '还没': '尚未 / 暂无', '别人': '其他账号', '就行': '即可', '可不写': '选填', '不用': '无需', '你': '您',
-    '不了': '无法…', '读不出': '无法读取', '转不成': '无法转换', '删不掉': '无法删除', '打不开': '无法打开',
+INFORMAL = {   # a pattern of a spoken word (not the formal words it is part of) -> the formal form
+    '还没': '尚未 / 暂无', '别人': '其他账号', '就行': '即可', '可不写': '选填', '不用(?!于)': '无需', '你': '您',
+    '不了(?!解)': '无法…', '读不出': '无法读取', '转不成': '无法转换', '删不掉': '无法删除', '打不开': '无法打开',
     '对不上': '不一致', '不能用': '不允许使用 / 无效', '要写': '请填写 / 须写明', '写法不对': '格式不正确',
-    '不合格': '格式不正确', '过了': '已…', '不知道': '无法确定', '不认识': '不支持', '不像': '不是有效的',
+    '不合格': '格式不正确', '(?<!超)过了': '已…', '不知道': '无法确定', '不认识': '不支持', '不像(?!素)': '不是有效的',
     '这个': '该', '那个': '该', '跑': '运行', '里有': '中有', '里没有': '中没有', '一样': '相同 / 一致',
     '已经': '已', '要改就': '如需修改', '看有哪些': '查看', '只差': '仅…不同',
 }
@@ -31,10 +31,17 @@ def spoken_texts(path: Path):
 
 
 def test_the_server_speaks_formally():
-    found = [f'{path.relative_to(ROOT)}:{line}: 「{word}」应写为「{formal}」：{text}'
+    found = [f'{path.relative_to(ROOT)}:{line}: 「{m.group(0)}」应写为「{formal}」：{text}'
              for path in SPOKEN for line, text in spoken_texts(path)
-             for word, formal in INFORMAL.items() if word in text]
+             for word, formal in INFORMAL.items() for m in [re.search(word, text)] if m]
     assert not found, '\n'.join(found)
+
+
+def test_formal_words_that_hold_a_spoken_one_pass():
+    """不用于, 超过了, 不了解, 不像素级 are formal; the spoken words inside them are not what the guard is after."""
+    spoken = lambda text: [w for w in INFORMAL if re.search(w, text)]
+    assert spoken('该模型不用于推理，超过了上限，不了解原因，不像素级对齐') == []
+    assert spoken('不用填') and spoken('过了期限') and spoken('读不了') and spoken('不像图片')
 
 
 def test_the_scan_sees_the_texts_of_the_server():

@@ -374,9 +374,9 @@ def _read_labels(store: Store, samples: Dict[str, Sample], o: Options) -> Tuple[
         problems.append(f'映射的源类别 {_examples(unused)} 在标注中没有任何框（请检查拼写；类别名区分大小写）')
     notices = []
     for (old, new), n in sorted(moved.items()):
-        notices.append(f'映射：{old} 的 {n} 个框计为 {new}' if new else f'映射：{old} 的 {n} 个框已去掉，作为背景')
+        notices.append(f'映射：{old} 的 {n} 个框计为 {new}' if new else f'映射：{old} 的 {n} 个框不保留，视为背景')
     if emptied:
-        notices.append(f'{len(emptied)} 张图片的框均被映射去掉，已作为无框的背景图收入：{_examples(emptied, 3)}')
+        notices.append(f'{len(emptied)} 张图片的框均被映射移除，作为无框的背景图收入：{_examples(emptied, 3)}')
     if o.label_classes is not None and not txt:
         notices.append('未使用 txt 标注，--label-classes 不生效')
     if clipped:
