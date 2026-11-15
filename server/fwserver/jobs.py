@@ -19,7 +19,7 @@ import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import events
-from .datasets import NAME, DatasetError, check_digest
+from .datasets import NAME, DatasetError, check_digest, where_place
 from .store import Store, StoreError
 
 KINDS = {'check': '检查推理环境', 'eval': '评估', 'predict': '推理（预标注）'}
@@ -227,16 +227,32 @@ def get_job(conn, job_id: int) -> dict:
                                            'outcome': t['outcome']} for t in tries])
 
 
-def list_jobs(conn, status: str = '', limit: int = 50) -> List[dict]:
+def list_jobs(conn, status: str = '', limit: int = 50, before: Optional[int] = None, site: str = '',
+              line: str = '', submitted_by: Optional[int] = None) -> Tuple[List[dict], bool]:
+    """Newest first, at most limit of them, and whether there are more. before: only jobs numbered lower (the
+    next page). site, line: only the jobs of a model of that site or line (an evaluation, a pre-labelling; a
+    check of a runner belongs to no line). submitted_by: only the jobs that account (id) submitted."""
     expire_leases(conn)
     if status and status not in STATUSES:
         raise DatasetError(400, f'状态只能是 {"、".join(STATUSES)}')
     limit = max(1, min(int(limit), 1000))
+    where, args = ['true'], []
     if status:
-        rows = conn.execute(_JOB + 'WHERE j.status = %s ORDER BY j.id DESC LIMIT %s', (status, limit)).fetchall()
-    else:
-        rows = conn.execute(_JOB + 'ORDER BY j.id DESC LIMIT %s', (limit,)).fetchall()
-    return [_job(conn, r) for r in rows]
+        where.append('j.status = %s')
+        args.append(status)
+    if before is not None:
+        where.append('j.id < %s')
+        args.append(int(before))
+    if submitted_by is not None:
+        where.append('j.submitted_by = %s')
+        args.append(submitted_by)
+    if site or line:
+        place, place_args = where_place(site, line, '', 'm')
+        where.append("EXISTS (SELECT 1 FROM model_versions mv JOIN models m ON m.id = mv.model_id "
+                     f"WHERE mv.id = (j.params->'model'->>'id')::bigint AND {' AND '.join(place)})")
+        args.extend(place_args)
+    rows = conn.execute(_JOB + 'WHERE ' + ' AND '.join(where) + ' ORDER BY j.id DESC LIMIT %s', (*args, limit + 1)).fetchall()
+    return [_job(conn, r) for r in rows[:limit]], len(rows) > limit
 
 
 def runner_params(rv: dict) -> dict:

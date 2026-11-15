@@ -56,11 +56,13 @@ def _set(r: dict) -> dict:
             'created_by': r['created_by'], 'created_at': models._stamp(r['created_at'])}
 
 
-def list_sets(conn, model: str = '') -> List[dict]:
+def list_sets(conn, model: str = '', site: str = '', line: str = '') -> List[dict]:
+    """Oldest first. model: only that model's; site, line: only those of models of that site or line."""
+    where, args = datasets.where_place(site, line, '', 'm')
     if model:
-        rows = conn.execute(_SET + ' WHERE mv.model_id = %s ORDER BY p.id', (models.get_model(conn, model)['id'],))
-    else:
-        rows = conn.execute(_SET + ' ORDER BY p.id')
+        where.append('mv.model_id = %s')
+        args.append(models.get_model(conn, model)['id'])
+    rows = conn.execute(_SET + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY p.id', args)
     return [_set(r) for r in rows.fetchall()]
 
 

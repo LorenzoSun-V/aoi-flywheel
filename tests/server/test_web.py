@@ -187,6 +187,62 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
     assert seen['errors'] == []
 
 
+
+@pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
+def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens, api, gpu, snapshot, tmp_path):  # noqa: F811
+    """The jobs and prediction sets of a line are those of its models (a check of a runner is under 「全部」 only);
+    the jobs list shows the newest 100 and loads older ones on request; a click on a header sorts the rows shown,
+    a second click the other way, the order kept when more rows come in."""
+    from test_evals import add_runner, trained
+    from fw import worker
+    from helpers import quiet, register_place
+    site = f'J{os.urandom(3).hex().upper()}'
+    seed = int.from_bytes(os.urandom(2), 'big')
+    files = {f'A/img{i:03}.png': real_png(200, 100, seed + i) for i in range(2)}
+    files.update({f'A/img{i:03}.json': label('scratch') for i in range(2)})
+    data = f'{pool(api, tmp_path, files)}@1'
+    r = add_runner(gpu)
+    models, done = {}, []
+    for line, kind in (('L1', 'predict'), ('L2', 'eval')):
+        register_place(site, line)
+        name = f'{line}-{os.urandom(3).hex()}'
+        api.create_model(name, site, line, 'det', '')
+        models[line] = name
+        job = api.submit_job(kind, runner=r['runner'], params={'model': trained(api, name, snapshot, tmp_path)['ref'],
+                                                               'data': data, 'dirs': ['A']})
+        assert worker.run_worker(gpu, quiet, once=True) == 1
+        done.append(api.job(job['id']))
+        assert done[-1]['status'] == 'done', done[-1]['error']
+    set_id = done[0]['result']['prediction_set']
+    cancelled = [api.submit_job('check', runner=r['runner'])['id'] for _ in range(101)]
+    for job_id in cancelled:
+        api.cancel_job(job_id)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run(['node', str(WEB_TESTS / 'jobs.cjs'), service.url + '/', tokens['algo'], site, str(shots)],
+                         capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    predicted, evaluated = (f'任务 {j["id"]}' for j in done)
+    assert seen['line']['ids'] == [predicted] and seen['line']['here'].startswith('L1')
+    assert seen['line']['path'] == f'概览/{site}/L1/任务' and seen['line']['scope'] == f'范围：{site} / L1'
+    assert not seen['line']['search']                                  # a list of jobs has no names to search
+    assert seen['site']['ids'] == [evaluated, predicted]
+    assert f'site={site}' in seen['done']['hash'] and seen['done']['ids'] == [evaluated, predicted]
+    assert seen['predictions']['ids'] == [f'#{set_id}'] and seen['predictions']['path'] == f'概览/{site}/L1/预测集'
+    assert seen['noPredictions'] == '没有符合条件的预测集。'
+    ours = [f'任务 {i}' for i in cancelled]
+    assert seen['first'] == {'rows': 100, 'more': True}               # the newest 100: ours but the oldest
+    assert seen['up']['ids'] == ours[1:] and seen['up']['sorted'] == [['编号', 'ascending']]
+    assert seen['down']['ids'] == ours[1:][::-1] and seen['down']['sorted'] == [['编号', 'descending']]
+    shown = seen['more']['ids']
+    assert len(shown) >= 101 and shown[-101:] == ours and seen['more']['sorted'] == [['编号', 'ascending']]
+    assert shown == sorted(shown, key=lambda t: int(t.split()[-1]))           # the older rows sorted in with the rest
+    assert seen['keyboard'] == [['提交人', 'ascending']]
+    assert seen['models']['names'] == sorted(models.values(), reverse=True)
+    assert seen['models']['sorted'] == [['名称', 'descending']]
+
 def write_tree(root: Path, files: dict) -> Path:
     for rel, data in files.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)

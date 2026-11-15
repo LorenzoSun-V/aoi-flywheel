@@ -8,7 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
-  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -175,7 +175,8 @@ test('the path of a page starts at the home page and goes through the place the 
   // a list is the page itself; a thing of no place (a snapshot from several lines) hangs under the whole list
   assert.deepEqual(trailOf('models', { site: 'SES', line: '' }), [['概览', '#/'], ['SES', '#/?site=SES'], ['模型', null]]);
   assert.deepEqual(trailOf('datasets', { site: '', line: '' }, ['T']), [['概览', '#/'], ['数据集', '#/datasets'], ['T', null]]);
-  assert.deepEqual(trailOf('jobs', { site: 'SES', line: 'TX' }, ['任务 3']).map((x) => x[1]), ['#/', '#/?site=SES', '#/?site=SES&line=TX', '#/jobs', null]);
+  // the jobs of a line are a list of their own: a job of a model of TX goes back to the jobs of TX
+  assert.deepEqual(trailOf('jobs', { site: 'SES', line: 'TX' }, ['任务 3']).map((x) => x[1]), ['#/', '#/?site=SES', '#/?site=SES&line=TX', '#/jobs?site=SES&line=TX', null]);
   assert.deepEqual(trailOf(null, { site: 'SES', line: 'TX' }), [['概览', '#/'], ['SES', '#/?site=SES'], ['TX', null]]);  // the overview of a line
 });
 
@@ -365,4 +366,14 @@ test('what waits for an account: its groups in order, newest first, each batch b
     '评估：读不了 conda 环境']);
   assert.deepEqual(todoItems({}, 'zhang', now), []);
   assert.equal(todoText({ kind: 'failed', job: j(11, 'failed', 'zhang', '2026-11-15T08:00:00Z', { error: null }) }), '评估');
+});
+
+test('a column sorts numbers by value, text by its words and the numbers in it, and blank cells last both ways', () => {
+  const sort = (keys, numeric, desc) => keys.slice().sort((a, b) => compareCells(a, b, numeric, desc));
+  assert.deepEqual(sort(['10', '', '9', '1024', '-'], true, false), ['9', '10', '1024', '', '-']);
+  assert.deepEqual(sort(['10', '', '9', '1024'], true, true), ['1024', '10', '9', '']);
+  assert.deepEqual(sort(['任务 12', '任务 3', '任务 101'], false, false), ['任务 3', '任务 12', '任务 101']);
+  assert.deepEqual(sort(['SES / TX', 'ses / ax', 'ABC / L2'], false, false), ['ABC / L2', 'ses / ax', 'SES / TX']);
+  assert.deepEqual(sort(['2026-11-15T08:00:00Z', '', '2026-11-14T09:30:00Z'], false, true),
+    ['2026-11-15T08:00:00Z', '2026-11-14T09:30:00Z', '']);
 });

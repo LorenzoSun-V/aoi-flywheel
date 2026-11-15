@@ -137,10 +137,55 @@ export function listWhen(stamp, now = new Date()) {
 // Cells of a table (see style.css: a cell stays on one line): a time, a number, and a long text cut short to the
 // room left, each with its whole text on pointing.
 function timeCell(stamp) {
-  return el('td', { class: 'time', title: when(stamp) || null }, listWhen(stamp) || '-');
+  return el('td', { class: 'time', title: when(stamp) || null, 'data-sort': stamp || '' }, listWhen(stamp) || '-');
 }
-function numCell(v) {
-  return el('td', { class: 'num' }, v === null || v === undefined ? '-' : String(v));
+function numCell(v, sort = v) {  // sort: the value the column sorts by, when the text is not it
+  return el('td', { class: 'num', 'data-sort': sort === null || sort === undefined ? '' : String(sort) },
+    v === null || v === undefined ? '-' : String(v));
+}
+function sizeCell(bytes) {
+  return numCell(bytes === null || bytes === undefined ? null : sizeText(bytes), bytes);
+}
+
+// The order of two cells' sort keys: a numeric column by value, the rest as text (Chinese, and numbers inside
+// the text by value); empty cells last in either direction.
+export function compareCells(a, b, numeric, desc = false) {
+  const blank = (k) => k === '' || k === '-' || k === null || k === undefined;
+  if (blank(a) || blank(b)) return blank(a) === blank(b) ? 0 : blank(a) ? 1 : -1;
+  const order = numeric ? Number(a) - Number(b) : String(a).localeCompare(String(b), 'zh-CN', { numeric: true });
+  return desc ? -order : order;
+}
+
+// A list whose columns sort on a click (or Enter) on their header; a second click reverses. The order chosen
+// stays for the table's id while the page is drawn again (a refresh, the next page of rows). Only the rows
+// shown are sorted. Returns the table; table.resort() sorts rows added later.
+const sortOrders = new Map();
+function sortable(table) {
+  const heads = [...table.rows[0].cells];
+  const keyOf = (td) => (td.hasAttribute('data-sort') ? td.dataset.sort : td.textContent.trim());
+  const apply = () => {
+    const o = sortOrders.get(table.id);
+    heads.forEach((th, i) => { if (th.classList.contains('sortable')) th.setAttribute('aria-sort', o && o.col === i ? (o.desc ? 'descending' : 'ascending') : 'none'); });
+    if (!o || !heads[o.col]) return;
+    const numeric = heads[o.col].classList.contains('num');
+    const rows = [...table.rows].slice(1).sort((x, y) => compareCells(keyOf(x.cells[o.col]), keyOf(y.cells[o.col]), numeric, o.desc));
+    table.append(...rows);
+  };
+  heads.forEach((th, i) => {
+    if (!th.textContent.trim()) return;  // a column of actions
+    th.classList.add('sortable');
+    th.tabIndex = 0;
+    const go = () => {
+      const o = sortOrders.get(table.id);
+      sortOrders.set(table.id, { col: i, desc: o && o.col === i ? !o.desc : false });
+      apply();
+    };
+    th.addEventListener('click', go);
+    th.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } });
+  });
+  apply();
+  table.resort = apply;
+  return table;
 }
 function textCell(...children) {
   const td = el('td', { class: 'text' }, ...children);
@@ -260,11 +305,12 @@ export const api = {
   registerRelease: (body) => call('/releases', { method: 'POST', body }),
   runners: async () => (await call('/runners')).runners,
   jobs: async (status = '', limit = 100) => (await call(`/jobs?status=${encodeURIComponent(status)}&limit=${limit}`)).jobs,
+  jobPage: (query) => call(`/jobs?${new URLSearchParams(query)}`),  // {jobs, more}
   job: (id) => call(`/jobs/${Number(id)}`),
   jobLog: (id, attempt = 0, after = -1) => call(`/jobs/${Number(id)}/log?attempt=${attempt}&after=${after}`),
   cancelJob: (id) => call(`/jobs/${Number(id)}/cancel`, { method: 'POST', body: {} }),
   submitJob: (kind, runner, params) => call('/jobs', { method: 'POST', body: { kind, runner, params } }),
-  predictionSets: async (model = '') => (await call(`/predictions?model=${encodeURIComponent(model)}`)).prediction_sets,
+  predictionSets: async (model = '', where = {}) => (await call(`/predictions?${new URLSearchParams({ model, ...where })}`)).prediction_sets,
   predictionSet: (id) => call(`/predictions/${Number(id)}`),
   createDataset: (body) => call('/datasets', { method: 'POST', body }),
   addClasses: (name, classes) => call(`/datasets/${encodeURIComponent(name)}/classes`, { method: 'POST', body: { classes } }),
@@ -618,7 +664,7 @@ function tagChips(tags) {
 // --- where a page is: the path from the home page, and the way back ---------------------------------------
 const SECTIONS = { datasets: '数据集', batches: '标注批次', models: '模型', releases: '发布记录', jobs: '任务',
   predictions: '预测集', events: '操作记录', users: '账号', me: '我的凭据', places: '现场和产线' };
-const PLACED = new Set(['datasets', 'batches', 'models', 'releases']);  // the lists that are browsed by site and line
+const PLACED = new Set(['datasets', 'batches', 'models', 'releases', 'jobs', 'predictions']);  // the lists that are browsed by site and line
 
 // The path to a page as [[text, link or null], ...]: the home page (the overview), the site and line the thing
 // belongs to (each leads to the overview of that place), its list (of that place), then the page's own steps
@@ -820,9 +866,10 @@ function browse(tree, at, parts, keep, counts, hint, ...list) {
   };
   return [placeTree(tree, at, counts, (site, line) => hrefOf(parts, { ...keep, site, line, q: at.q })), el('div', { class: 'browse' },
     el('div', { class: 'list' },
-      el('form', { class: 'row', onsubmit: go }, q, el('button', { type: 'submit' }, '搜索'),
-        at.q ? el('a', { href: hrefOf(parts, { ...keep, site: at.site, line: at.line }) }, '清除') : null,
-        at.site ? el('span', { class: 'muted' }, `范围：${[at.site, at.line].filter(Boolean).join(' / ')}`) : null),
+      hint === null ? (at.site ? el('p', { class: 'muted' }, `范围：${[at.site, at.line].filter(Boolean).join(' / ')}`) : null)  // a list with no search
+        : el('form', { class: 'row', onsubmit: go }, q, el('button', { type: 'submit' }, '搜索'),
+          at.q ? el('a', { href: hrefOf(parts, { ...keep, site: at.site, line: at.line }) }, '清除') : null,
+          at.site ? el('span', { class: 'muted' }, `范围：${[at.site, at.line].filter(Boolean).join(' / ')}`) : null),
       ...list))];
 }
 
@@ -832,7 +879,7 @@ async function datasetsPage(query) {
   scope = at;
   renderNav();
   const [rows, tree] = await Promise.all([api.datasets(scopeQuery(at)), api.sites()]);
-  const table = (list, kindColumn) => el('table', {}, el('tr', {}, [['名称'], kindColumn ? ['类型'] : null, ['现场 / 产线'], ['版本数', 'num'],
+  const table = (list, kindColumn) => sortable(el('table', { id: kindColumn ? 'pool-list' : 'snapshot-list' }, el('tr', {}, [['名称'], kindColumn ? ['类型'] : null, ['现场 / 产线'], ['版本数', 'num'],
     ['最新版本'], ['文件', 'num'], ['大小', 'num'], ['最新版本时间'], ['备注']]
     .filter(Boolean).map(([h, c]) => el('th', { class: c }, h))), list.map((d) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['d', d.name]) }, d.name)),
@@ -841,9 +888,9 @@ async function datasetsPage(query) {
     numCell(d.version_count),
     el('td', {}, d.latest ? [el('a', { class: 'ref', href: hrefOf(['v', d.name, String(d.latest.number)]), title: d.latest.ref },
       `@${d.latest.number}`), labelChips(d.latest)] : '-'),  // the name is the row's first column
-    numCell(d.latest ? d.latest.file_count : null), numCell(d.latest ? sizeText(d.latest.total_bytes) : null),
+    numCell(d.latest ? d.latest.file_count : null), sizeCell(d.latest ? d.latest.total_bytes : null),
     d.latest ? timeCell(d.latest.created_at) : el('td', {}, '-'),
-    textCell(d.note))));
+    textCell(d.note)))));
   const pools = rows.filter((d) => d.kind !== 'trainset');
   const snapshots = rows.filter((d) => d.kind === 'trainset');
   const narrowed = at.site || at.q;
@@ -983,7 +1030,7 @@ async function datasetPage(name, query = new URLSearchParams(), added = null) {
         el('td', {}, labelChips(v)),
         el('td', {}, v.parent ? el('a', { class: 'ref', href: hrefOf(['v', d.name, String(v.parent.number)]), title: v.parent.ref },
           `@${v.parent.number}`) : '-'),
-        numCell(v.file_count), numCell(sizeText(v.total_bytes)),
+        numCell(v.file_count), sizeCell(v.total_bytes),
         textCell(opsText(v.ops)), sourceCell(v.source), el('td', {}, v.created_by), timeCell(v.created_at),
         textCell(v.note), el('td', { class: 'menu-cell' }, menuOf(v)))))
       : el('p', { class: 'muted' }, noClasses ? '暂无版本。请先填写类别表，再上传数据。' : '暂无版本。'),
@@ -1713,7 +1760,7 @@ function metricsTable(metrics, limit = 60) {
 function fileTable(files, names = {}) {
   return el('table', {}, el('tr', {}, [['文件'], ['sha256'], ['大小', 'num'], ['']].map(([h, c]) => el('th', { class: c }, h))),
     files.map((f) => el('tr', {}, el('td', {}, f.path), el('td', {}, hashText(f.sha256, 'sha256')),
-      numCell(sizeText(f.size)),
+      sizeCell(f.size),
       el('td', {}, el('button', { onclick: (ev) => download(f, ev.currentTarget, names[f.path]) }, '下载')))));
 }
 
@@ -1788,13 +1835,13 @@ async function modelsPage(query) {
   show(crumbs('models', at), pageHead(['模型', info('在网页上点击「登记模型版本」上传 ONNX，或使用 fw model create 和 fw model register。', '模型说明')],
     can('models.write') ? el('a', { id: 'model-register', class: 'button primary', href: '#/model-register' }, icon('plus'), '登记模型版本') : null),
     browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '按名称搜索',
-      rows.length ? el('table', {}, el('tr', {}, [['名称'], ['现场 / 产线'], ['任务'], ['版本数', 'num'], ['最新版本'], ['建立人'], ['建立时间'], ['备注']]
+      rows.length ? sortable(el('table', { id: 'model-list' }, el('tr', {}, [['名称'], ['现场 / 产线'], ['任务'], ['版本数', 'num'], ['最新版本'], ['建立人'], ['建立时间'], ['备注']]
         .map(([h, c]) => el('th', { class: c }, h))),
         rows.map((m) => el('tr', {},
           el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
           el('td', {}, `${m.site} / ${m.line}`), el('td', {}, TASK_NAMES[m.task] || m.task),
           numCell(m.version_count), el('td', {}, m.latest ? mref(m.latest, true) : '-'),
-          el('td', {}, m.created_by), timeCell(m.created_at), textCell(m.note))))
+          el('td', {}, m.created_by), timeCell(m.created_at), textCell(m.note)))))
         : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的模型。' : '暂无模型。')));
 }
 
@@ -2050,7 +2097,7 @@ async function releasesPage(query) {
   const rows = all.slice().reverse().filter((r) => !q || [r.ref, r.model_version.ref, r.deploy_commit, r.gpu, r.note]
     .some((x) => (x || '').toLowerCase().includes(q)));
   const env = (r) => [r.gpu, r.trt_version && `TensorRT ${r.trt_version}`, r.precision].filter(Boolean).join(' · ');
-  const table = rows.length ? el('table', { id: 'releases' },
+  const table = rows.length ? sortable(el('table', { id: 'releases' },
     el('tr', {}, ['发布', '模型版本', '部署时间', '部署提交号', '推理环境', '引擎', '备注'].map((h) => el('th', {}, h))),
     rows.map((r) => el('tr', { 'data-ref': r.ref, class: r.ref === picked ? 'picked' : '' },
       el('td', { class: 'ref', title: `登记：${r.created_by}，${when(r.created_at)}` }, r.ref,
@@ -2060,7 +2107,7 @@ async function releasesPage(query) {
       el('td', { title: `部署仓库：${r.deploy_repo}` }, hashText(r.deploy_commit, '提交号', 8)),
       env(r) ? textCell(env(r)) : el('td', { class: 'muted' }, '—'),
       el('td', { title: r.engine_size ? `引擎大小 ${sizeText(r.engine_size)}` : null }, r.engine_sha256 ? hashText(r.engine_sha256, '引擎哈希', 8) : el('span', { class: 'muted' }, '—')),
-      textCell(r.note))))
+      textCell(r.note)))))
     : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的发布记录。' : '暂无发布记录。');
   show(crumbs('releases', at), pageHead(['发布记录', info(['每条产线的当前发布是部署时间最晚的一次；补登以前的部署不改变当前发布。',
     '发布由现场实施账号在部署成功后登记，登记后不能修改。对应 fw release register、fw release list。'], '发布记录说明')],
@@ -2416,23 +2463,49 @@ function jobWhat(j) {
     p.data && p.data.dirs && p.data.dirs.length ? `（${p.data.dirs.join('、')}）` : '', p.data ? `，${p.data.images} 张` : ''];
 }
 
+const JOB_PAGE = 100;
+
 async function jobsPage(query) {
   const show = live();
+  const at = { ...scopeOf(query), q: '' };
+  scope = at;
+  renderNav();
   const status = query.get('status') || '';
-  const rows = await api.jobs(status);
-  const pick = el('select', { onchange: (ev) => { location.hash = hrefOf(['jobs'], { status: ev.target.value }); } },
+  const ask = (before) => api.jobPage(scopeQuery(at, { status, limit: JOB_PAGE, before }));
+  const [first, tree] = await Promise.all([ask(null), can('sites.read') ? api.sites() : null]);  // a worker account sees no places
+  const pick = el('select', { id: 'job-status', onchange: (ev) => { location.hash = hrefOf(['jobs'], { status: ev.target.value, site: at.site, line: at.line }); } },
     [['', '全部'], ['queued', '排队'], ['running', '运行中'], ['done', '完成'], ['failed', '失败'], ['cancelled', '已取消']]
       .map(([v, t]) => el('option', { value: v, selected: v === status }, t)));
-  show(crumbs('jobs'), el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, '任务',
-    info('有排队或运行中的任务时，本页每 10 秒自动刷新。', '任务列表说明')), '状态', pick),
-    rows.length ? el('table', {}, el('tr', {}, ['编号', '类型', '内容', '推理环境', '状态', '提交人', '提交时间', '开始', '结束'].map((h) => el('th', {}, h))),
-      rows.map((j) => el('tr', {},
-        el('td', {}, jobLink(j.id)), el('td', {}, j.kind_text), textCell(jobWhat(j)), el('td', {}, j.runner || '-'),
-        el('td', {}, statusText(JOB_DOT[j.status], j.status_text + (j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '')
-          + (j.cancel_requested && j.status === 'running' ? '（正在取消）' : ''))),
-        el('td', {}, j.submitted_by), timeCell(j.created_at), timeCell(j.started_at), timeCell(j.finished_at))))
-      : el('p', { class: 'muted' }, '暂无任务。'));
-  if (rows.some((j) => j.status === 'queued' || j.status === 'running')) refreshLater(() => jobsPage(query), 10000);
+  const rowOf = (j) => el('tr', {},
+    el('td', { 'data-sort': String(j.id) }, jobLink(j.id)), el('td', {}, j.kind_text), textCell(jobWhat(j)), el('td', {}, j.runner || '-'),
+    el('td', {}, statusText(JOB_DOT[j.status], j.status_text + (j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '')
+      + (j.cancel_requested && j.status === 'running' ? '（正在取消）' : ''))),
+    el('td', {}, j.submitted_by), timeCell(j.created_at), timeCell(j.started_at), timeCell(j.finished_at));
+  const table = first.jobs.length ? sortable(el('table', { id: 'jobs' },
+    el('tr', {}, [['编号'], ['类型'], ['内容'], ['推理环境'], ['状态'], ['提交人'], ['提交时间'], ['开始'], ['结束']].map(([h, c]) => el('th', { class: c }, h))),
+    first.jobs.map(rowOf))) : null;
+  let last = first.jobs.length ? first.jobs[first.jobs.length - 1].id : null;
+  let earlier = false;  // older pages shown: the page is not redrawn on its own any more, which would drop them
+  const more = el('button', { id: 'jobs-more', type: 'button', hidden: !first.more, onclick: async () => {
+    more.disabled = true;
+    try {
+      const r = await ask(last);
+      for (const j of r.jobs) table.append(rowOf(j));
+      if (r.jobs.length) last = r.jobs[r.jobs.length - 1].id;
+      earlier = true;
+      table.resort();
+      more.hidden = !r.more;
+    } catch (e) { more.after(errorBox(e)); }
+    more.disabled = false;
+  } }, '加载更早的任务');
+  const empty = at.site ? '没有符合条件的任务。' : status ? '暂无该状态的任务。' : '暂无任务。';
+  show(crumbs('jobs', at), pageHead(['任务', info(['有排队或运行中的任务时，本页每 10 秒自动刷新（加载了更早的任务后不再自动刷新）。',
+    '左侧选择现场 / 产线时，只列出该处模型的评估和推理任务；检查推理环境的任务不属于任何产线，仅在「全部」中列出。',
+    '点击列标题可按该列排序，再次点击反向排序；排序只作用于已加载的任务。'], '任务列表说明')]),
+    ((list) => (tree ? browse(tree, at, ['jobs'], { status }, null, null, list) : list))([
+      el('div', { class: 'row' }, el('label', { for: 'job-status' }, '状态'), pick),
+      table || el('p', { class: 'muted' }, empty), el('div', { class: 'row' }, more)]));
+  if (first.jobs.some((j) => j.status === 'queued' || j.status === 'running')) refreshLater(() => (earlier ? Promise.resolve() : jobsPage(query)), 10000);
 }
 
 function jobResult(j) {
@@ -2498,9 +2571,9 @@ async function jobPage(id, query) {
   await poll();
 }
 
-function predictionTable(rows, withModel) {
+function predictionTable(rows, withModel) {  // withModel: the list of all prediction sets, sortable
   if (!rows.length) return el('p', { class: 'muted' }, '暂无预测集。');
-  return el('table', {}, el('tr', {}, [['编号'], withModel ? ['模型版本'] : null, ['数据'], ['目录'], ['conf', 'num'], ['图片', 'num'], ['框', 'num'],
+  const table = el('table', { id: withModel ? 'prediction-list' : null }, el('tr', {}, [['编号'], withModel ? ['模型版本'] : null, ['数据'], ['目录'], ['conf', 'num'], ['图片', 'num'], ['框', 'num'],
     ['推理环境'], ['任务'], ['登记人'], ['时间']].filter(Boolean).map(([h, c]) => el('th', { class: c }, h))),
   rows.map((p) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['p', String(p.id)]) }, `#${p.id}`)),
@@ -2508,14 +2581,20 @@ function predictionTable(rows, withModel) {
     el('td', {}, vref(p.data.ref)), textCell(p.dirs.join('、') || '全部'), numCell(numberText(p.conf)),
     numCell(p.images), numCell(p.boxes), el('td', {}, p.runner), el('td', {}, jobLink(p.job_id)),
     el('td', {}, p.created_by), timeCell(p.created_at))));
+  return withModel ? sortable(table) : table;
 }
 
-async function predictionsPage() {
+async function predictionsPage(query) {
   const show = live();
-  const rows = await api.predictionSets();
-  show(crumbs('predictions'), el('h1', {}, '预测集', info(['预测集是模型在数据池图片上的推理结果。',
-    '下载为预标注：fw predict get <编号> <目录> --threshold 0.3。'], '预测集说明')),
-    predictionTable(rows.slice().reverse(), true));
+  const at = { ...scopeOf(query), q: '' };
+  scope = at;
+  renderNav();
+  const [rows, tree] = await Promise.all([api.predictionSets('', scopeQuery(at)), api.sites()]);
+  show(crumbs('predictions', at), pageHead(['预测集', info(['预测集是模型在数据池图片上的推理结果。',
+    '下载为预标注：fw predict get <编号> <目录> --threshold 0.3。', '左侧选择现场 / 产线时，只列出该处模型的预测集。',
+    '点击列标题可按该列排序，再次点击反向排序。'], '预测集说明')]),
+    browse(tree, at, ['predictions'], {}, null, null,
+      rows.length || !at.site ? predictionTable(rows.slice().reverse(), true) : el('p', { class: 'muted' }, '没有符合条件的预测集。')));
 }
 
 async function predictionPage(id, query) {
@@ -3262,7 +3341,7 @@ async function batchesPage(query) {
   const rows = batches.map((b) => el('tr', {},
     el('td', {}, bref(b.name)), el('td', {}, `第 ${b.revision} 版`),
     el('td', {}, statusText(BATCH_DOT[b.status], b.status_text)),
-    textCell(`${b.pool} / ${b.dir}/`), numCell(b.file_count), numCell(sizeText(b.total_bytes)),
+    textCell(`${b.pool} / ${b.dir}/`), numCell(b.file_count), sizeCell(b.total_bytes),
     el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), timeCell(b.updated_at)));
   const empty = at.site || at.q ? '没有符合条件的批次。'
     : { todo: '暂无待复核的批次。', mine: '本账号尚未上传批次。', all: '暂无批次。' }[view];
@@ -3273,8 +3352,8 @@ async function batchesPage(query) {
       icon('plus'), '上传新批次') : null),
     browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '按批次名称搜索',
       el('div', { class: 'row tabs' }, tabs),
-      rows.length ? el('table', {}, el('tr', {}, [['批次'], ['版次'], ['状态'], ['入库到'], ['文件', 'num'], ['大小', 'num'], ['上传账号'], ['标注人'], ['复核人'], ['最近变化']]
-        .map(([h, c]) => el('th', { class: c }, h))), rows) : el('p', { class: 'muted' }, empty)));
+      rows.length ? sortable(el('table', { id: 'batch-list' }, el('tr', {}, [['批次'], ['版次'], ['状态'], ['入库到'], ['文件', 'num'], ['大小', 'num'], ['上传账号'], ['标注人'], ['复核人'], ['最近变化']]
+        .map(([h, c]) => el('th', { class: c }, h))), rows)) : el('p', { class: 'muted' }, empty)));
 }
 
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)
@@ -3568,7 +3647,7 @@ async function batchPage(name, query) {
     }
     const revisions = b.revisions.slice().reverse().map((r) => el('tr', {},
       el('td', {}, el('a', { href: hrefOf(['v', b.name, String(r.number)]) }, `第 ${r.number} 版`)),
-      numCell(r.file_count), numCell(sizeText(r.total_bytes)),
+      numCell(r.file_count), sizeCell(r.total_bytes),
       el('td', {}, r.labeler + (r.by_reviewer ? '（复核人修改）' : '')), el('td', {}, r.created_by), timeCell(r.created_at),
       textCell(r.note),
       el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '与上一版比较') : '')));
@@ -3938,7 +4017,7 @@ async function todoLists() {
     may.import ? api.batches({ status: 'approved' }) : none,
     may.mine ? api.batches({ mine: true, status: 'rejected' }) : none,
     may.mine ? api.batches({ mine: true, status: 'open' }) : none,
-    may.jobs ? api.jobs('failed', 200) : []]);
+    may.jobs ? api.jobPage({ status: 'failed', mine: true, limit: 100 }).then((r) => r.jobs) : []]);
   return todoItems({ toReview: toReview.batches, approved: approved.batches, mine: [...rejected.batches, ...unsent.batches], failed }, me.name);
 }
 
@@ -4309,7 +4388,7 @@ const NAV = [
   ['#/users', '账号', 'users.manage', /^#\/users/, 'users'],
 ];
 
-const SCOPED = new Set(['#/', '#/datasets', '#/batches', '#/models', '#/releases']);
+const SCOPED = new Set(['#/', '#/datasets', '#/batches', '#/models', '#/releases', '#/jobs', '#/predictions']);
 
 function renderNav() {
   const here = location.hash || '#/';
@@ -4378,7 +4457,7 @@ async function render() {
     else if (parts[0] === 'release-new') await releaseNewPage(query);
     else if (parts[0] === 'jobs') await jobsPage(query);
     else if (parts[0] === 'job' && parts[1]) await jobPage(parts[1], query);
-    else if (parts[0] === 'predictions') await predictionsPage();
+    else if (parts[0] === 'predictions') await predictionsPage(query);
     else if (parts[0] === 'p' && parts[1]) await predictionPage(parts[1], query);
     else if (parts[0] === 'upload' && parts[1]) await uploadPage(parts[1]);
     else if (parts[0] === 'add' && parts[1]) await addPage(parts[1]);
