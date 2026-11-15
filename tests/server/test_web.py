@@ -31,6 +31,13 @@ def real_png(w: int, h: int, seed: int) -> bytes:
 WEB_TESTS = Path(__file__).resolve().parent.parent / 'web'
 
 
+def test_the_pages_never_open_the_browsers_own_boxes():
+    """Questions before a change are asked on the page itself (askFirst), never in window.confirm, prompt or alert."""
+    import re
+    code = (Path(__file__).resolve().parents[2] / 'server' / 'fwserver' / 'web' / 'app.js').read_text(encoding='utf-8')
+    assert not re.findall(r'\b(?:window\.)?(?:confirm|prompt|alert)\s*\(', code)
+
+
 def test_the_pages_are_served_with_a_strict_policy(service):
     r = httpx.get(service.url + '/')
     assert r.status_code == 200 and r.headers['content-type'].startswith('text/html')
@@ -86,6 +93,7 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert seen['canvas'] == [200, 100]
     assert seen['hashchanges'] == 1  # one arrow key, one page: not one per image page seen before
     assert '新增 1' in seen['diff'] and '修改 1' in seen['diff']
+    assert seen['diffTitle'].startswith(f'{name}@1 → {name}@2') and '删除 1' in seen['diffBack']
     assert seen['errors'] == []
 
 
@@ -226,6 +234,9 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '任务', '预测集', '操作记录', '账号']
+    assert seen['made'] == f'已新建账号 {name}' and seen['dialogs'] == []                 # asked on the page itself
+    assert '改为现场实施' in seen['asked'] and seen['cancelled'] == [0, 'algo']
+    assert seen['changed'] == f'已将 {name} 的角色改为现场实施' and seen['role'] == 'field'
     assert seen['token'].startswith('fw_') and '只显示这一次' in seen['tokens'] and '现场笔记本' in seen['tokens']
     assert '账号名只能用' in seen['refused']
     admin = tokens['admin_name']
@@ -281,9 +292,10 @@ def test_every_page_keeps_rows_on_one_line_and_forms_to_one_width(service, token
     assert seen['source'][0] == 'fw dataset import · pool' and seen['source'][1].startswith('fw dataset import ')
     assert seen['numbersRight'] == ['right', 'right']
     assert seen['labelChip'] != 'rgb(230, 244, 234)'                       # not the green of 复核通过
-    assert seen['removeButton'] == 1
     assert seen['versionRefs'] == [['@1', f'{name}@1']]  # the parent: its number, all of it on pointing
     assert seen['tables'] == {page: {'wide': [], 'narrow': []} for page in ('pool', 'events', 'datasets', 'batches', 'batch')}
+    assert seen['headActions'] == ['上传新增目录', '建立训练集快照'] and seen['more'] == ['移除目录', '上传完整版本']
+    assert seen['tree'].split()[0] == 'TX' and seen['navLine'] == '#/models?site=SES&line=TX'
     assert seen['batchState'] == ['已退回', True]
     assert seen['steps'] == ['时间', '账号', '操作', '意见'] and seen['stepsTitle'] == '流转记录'
     assert seen['formWidth'] <= 720 and seen['checkUnderFields']
@@ -544,8 +556,11 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
+    assert seen['menu'] == ['与父版本比较', '设定版本号', '复制引用'] and seen['closed'] is True
+    assert seen['form'] == f'为 {name}@1 设定版本号'
     assert seen['proposed'] == 'v0.1.0' and seen['next'] == 'v0.2.0'
-    assert seen['row'].startswith('@1') and seen['rowRef'] == f'{name}@1' and 'v0.1.0' in seen['row']
+    assert f'{name}@1' in seen['row'] and 'v0.1.0' in seen['row']
+    assert seen['toast'] == f'已设定版本号 v0.1.0（{name}@1）' and seen['stayed'] == [120, 120]
     assert f'已经用在 {name}@1 上' in seen['taken']
     assert seen['title'].startswith(f'{name}@1') and 'v0.1.0' in seen['title']
     assert api.version(name, 'v0.1.0')['number'] == 1 and api.labels(name)['labels'][0]['note'] == '冷启动'
@@ -571,10 +586,12 @@ def test_the_class_table_of_a_pool_is_set_and_grown_in_the_browser(service, toke
     assert '尚未填写类别表' in seen['none'] and seen['uploadButtons'] == [] and seen['formOpen'] is True
     assert seen['button'] == '保存类别表' and '类别表里已有' not in seen['duplicate'] and '重复' in seen['duplicate']
     assert seen['saved'] == ['scratch', 'dent'] and seen['noneAfter'] is False and seen['formOpenAfter'] is False
+    assert seen['savedToast'] == '已保存类别表'
     assert f'{name}@1 中有不符合类别表的标注（已核对其中 1 个标注文件，共 2 个；其余的将在下一次上传时核对）' in seen['check']
     assert 'Scratch' in seen['check'] and 'A/a.json' in seen['check']
     assert seen['buttonAfter'] == '添加到类别表末尾'
     assert seen['added'] == ['scratch', 'dent', 'crack'] and seen['checkAfter'] is False
+    assert seen['fieldTabs'] == ['版本1', '类别表3']
     assert seen['fieldRows'] == ['scratch', 'dent', 'crack'] and seen['fieldForm'] is False
     assert api.dataset(name)['classes'] == ['scratch', 'dent', 'crack']
 
@@ -871,6 +888,7 @@ def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_p
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert seen['target'] == '20261103'
+    assert seen['steps'] == ['2检查', '3计算哈希并预览', 2] and seen['card'] is True
     assert '新增 20261103/：4 个文件' in seen['plan'] and f'新版本 {name}@2：7 个文件' in seen['plan']
     assert '与数据池中已有图片内容相同' in seen['plan'] and '20261103/a_again.png = 20261101/a.png' in seen['plan']
     assert '图片相同但标注不同' in seen['plan'] and '（2 个目标） 和 20261101/a.png（1 个目标）' in seen['plan']
@@ -942,6 +960,38 @@ def test_an_older_folder_check_answer_is_not_used(service, tokens, api, tmp_path
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert not seen['go'] and seen['puts'] == 0
     assert '图片和标注以外的文件' in seen['shown'] and '2 个文件' in seen['shown']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_pages_ask_on_the_page_and_say_what_was_done(service, tokens, api, make_api, tmp_path):
+    """Closing a batch and revoking a token are asked on the page (no browser box), each change made says so,
+    a page that cannot be shown keeps its path and the way back, a slow page shows the bar on top."""
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    pool = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
+    ops.import_folder(api, pool, write_tree(tmp_path / 'p', {'20261101/x.png': real_png(64, 32, seed)}), echo=quiet)
+    batch = ops.upload_batch(make_api('field'), write_tree(tmp_path / 'b' / '20261104', {'a.png': real_png(64, 32, seed + 1)}),
+                             pool, '张三', echo=quiet)['name']
+    r = httpx.post(f'{service.url}/api/v1/users/{tokens["field_name"]}/tokens', json={'label': '旧笔记本'},
+                   headers={'Authorization': f'Bearer {tokens["admin"]}'})
+    assert r.status_code == 201, r.text
+    old = r.json()['id']
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'feedback.cjs'), service.url + '/', tokens['field'], batch, pool, str(shots)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == [] and seen['dialogs'] == []
+    assert '各版内容保留' in seen['closeAsk'] and seen['escaped'] == 0
+    assert seen['closeToast'] == f'已关闭 {batch}'
+    assert api.batch(batch)['status'] == 'closed' and api.batch(batch)['steps'][-1]['comment'] == '重复上传'
+    assert f'吊销凭据 {old}（旧笔记本）' in seen['revokeAsk'] and seen['kept'] == [0, 1]
+    assert seen['revokeToast'] == f'已吊销凭据 {old}'
+    assert seen['errorPath'] == ['概览', '数据集', 'no-such-pool'] and seen['errorBack'] == 1
+    assert seen['busy'] is True and seen['idle'] is True
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

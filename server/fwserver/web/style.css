@@ -380,3 +380,49 @@ table.counts td.num, table.counts th.num { text-align: right; padding-left: 28px
 #ts-form input[type=number] { width: 140px; }
 #ts-more summary { cursor: pointer; color: var(--muted); margin-bottom: 10px; }
 #ts-result h3 { margin: 18px 0 8px; font-size: 16px; }
+
+/* feedback: a thin bar on top while a page is slow to come; the outcome of a step in a card of its own */
+body::before { content: ''; position: fixed; left: 0; top: 0; z-index: 40; height: 2px; width: 100%; background: var(--accent);
+               transform-origin: left; transform: scaleX(0); opacity: 0; pointer-events: none; }
+body.busy::before { opacity: 1; animation: busy 1.6s var(--ease) infinite; }
+@keyframes busy { 0% { transform: scaleX(0); } 60% { transform: scaleX(.75); } 100% { transform: scaleX(.95); opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { body.busy::before { transform: scaleX(1); opacity: .6; } }
+.result { max-width: 720px; margin-top: 16px; padding: 16px 20px; border: 1px solid var(--line); border-radius: var(--radius);
+          background: var(--panel); }
+.forms ~ .result { max-width: 1180px; }
+.result > :first-child { margin-top: 0; }
+.result > :last-child { margin-bottom: 0; }
+.result .row:last-child { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+
+/* the steps of an upload: where one is now */
+.steps { display: flex; gap: 6px; max-width: 720px; margin: 0 0 16px; padding: 0; list-style: none; counter-reset: none; }
+.steps li { flex: 1; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 2px solid var(--line);
+            color: var(--muted); font-size: 13px; white-space: nowrap; }
+.steps .n { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%;
+            background: var(--soft); font-size: 12px; font-weight: 600; }
+.steps li.on { border-top-color: var(--accent); color: var(--text); font-weight: 600; }
+.steps li.on .n { background: var(--accent); color: #fff; }
+.steps li.done { border-top-color: var(--accent); }
+.steps li.done .n { background: var(--tint); color: var(--accent-dark); }
+
+/* asking on the page before a change that is hard to take back */
+.ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; margin: 8px 0;
+       border: 1px solid #f3c7c4; border-radius: 8px; background: #fdf3f2; white-space: normal; }
+tr.asking > td { padding: 4px 8px; white-space: normal; }
+tr.asking .ask { margin: 2px 0; }
+.ask .ask-text { color: var(--text); }
+.ask .bad:empty { display: none; }
+
+/* a dataset's tabs (versions, class table) and the ⋯ of each row */
+.page-tabs { display: flex; gap: 4px; margin: 4px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.page-tabs a { display: inline-flex; align-items: center; gap: 6px; }
+.page-tabs .count { min-width: 20px; padding: 0 6px; border-radius: 980px; background: rgba(0, 0, 0, .06); color: var(--muted);
+                    font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+th.menu-cell, td.menu-cell { padding-left: 0; padding-right: 6px; }
+td.menu-cell { text-align: right; vertical-align: middle; padding-top: 2px; padding-bottom: 2px; }
+.more.worded .more-button { display: inline-flex; align-items: center; gap: 4px; }
+.more.worded .more-button .icon { width: 14px; height: 14px; }
+.more.worded.open .more-button { background: var(--soft); }
+#label-form { margin: 14px 0 6px; }
+#label-form h3 { margin: 0 0 12px; }
+#diff-pick { margin: 4px 0 12px; }

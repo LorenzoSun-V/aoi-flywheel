@@ -46,6 +46,7 @@ const { chromium } = require('playwright');
   await page.click('#class-go');
   await page.waitForSelector('#class-table');
   seen.saved = await rows();
+  seen.savedToast = await page.textContent('#toast');
   seen.check = await page.textContent('#class-check');
   seen.noneAfter = await page.$('#class-none') !== null;
   seen.formOpenAfter = await page.$eval('#class-form', (d) => d.open);
@@ -61,6 +62,9 @@ const { chromium } = require('playwright');
   const other = await open(field);
   await other.goto(`${url}#/d/${encodeURIComponent(pool)}`);
   await other.reload();
+  await other.waitForSelector('#versions');  // a pool with its class table opens on its versions; the table is a tab
+  seen.fieldTabs = await other.$$eval('.page-tabs a', (as) => as.map((a) => a.textContent));
+  await other.click('#tab-classes');
   await other.waitForSelector('#class-table');
   seen.fieldRows = await other.$$eval('#class-table tr td:last-child', (tds) => tds.map((t) => t.textContent));
   seen.fieldForm = await other.$('#class-form') !== null;

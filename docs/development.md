@@ -64,7 +64,7 @@ deploy/              Dockerfile、docker-compose.yml、setup.sh、backup.sh、re
 tools/               bench.py（规模测速）、bench_versions.py（一个池连加几百个版本的测速）、deploy-drill.sh（部署和恢复演练）
 tests/client/        不需要服务和数据库；Windows、Python 3.8 也跑
 tests/server/        真实服务 + PostgreSQL 16 + 真实文件库
-tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、accounts.cjs、race.cjs、nav.cjs、look.cjs、admin.cjs、folders.cjs、tips.cjs、trainset.cjs、register.cjs、onnx.cjs 等（Playwright 走页面，由 test_web.py 调）
+tests/web/           网页：helpers.test.mjs（node --test，不要浏览器）、smoke.cjs、snapshot.cjs、models.cjs、upload.cjs、change.cjs、accounts.cjs、race.cjs、nav.cjs、look.cjs、admin.cjs、folders.cjs、tips.cjs、trainset.cjs、register.cjs、onnx.cjs、layout.cjs、feedback.cjs 等（Playwright 走页面，由 test_web.py 调）
 ```
 
 ### 分层（`lint-imports` 检查）
@@ -92,7 +92,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 3. 有相同图片而新标注还没上传时，客户端先传标注文件再预览一次。确认后上传服务器没有的文件。
 4. `api.create_change` → `changes.create`：再跑一次 `plan`，有冲突或拒绝的理由就不建；写出完整清单，调 `datasets.create_version`（`expect_latest_id` 是预览时的最新版本，变了就 409；`inherited` 是原样留下的父版本清单行，不用再逐个查文件库），在同一个事务里写 `version_changes`，然后冻结。
 
-`fw dataset remove`（`ops.remove_dirs`）只有第 2、4 步。网页的「上传新增目录」「去掉目录」调同样的两个接口。
+`fw dataset remove`（`ops.remove_dirs`）只有第 2、4 步。网页的「上传新增目录」「移除目录」调同样的两个接口。
 
 ## 一次取回在代码里怎么走
 
@@ -209,6 +209,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 上传页只认最后一次检查：先选的目录检查回得晚，也不会把后选的目录带着旧报告上传 | `web/app.js` 的 `uploadPage`（`round`、`lock`） | `test_an_older_folder_check_answer_is_not_used`（`tests/web/race.cjs`） |
 | 网页上不放大段说明：页面上的灰色说明行不超过 60 个字，说明、原因和对应的 `fw` 命令放在 ⓘ 里；ⓘ 指到或聚焦时显示，点击后固定，再点、Esc 或点别处关闭，不会勾上旁边的框，也不算进字段和勾选框的名称（读屏） | `web/app.js` 的 `info()`、`field()`、`checkRow()` | `test_the_details_of_a_page_sit_behind_its_info_marks`（`tests/web/tips.cjs`） |
 | 网页切到别的页后，前一页慢到的结果不再盖上来；自动刷新只属于当前页 | `web/app.js` 的 `live()`、`render()` | 同上两项 |
+| 网页不用浏览器自带的确认框和输入框（`window.confirm`、`prompt`、`alert`）：难以挽回的改动在页面上就地确认（`askFirst`），改动做完后同一页重画时停在原处并在底部提示；打不开的页面保留路径和返回 | `web/app.js` 的 `askFirst()`、`paint()`、`toastDone()`、`errorCrumbs()` | `test_the_pages_never_open_the_browsers_own_boxes`、`test_the_pages_ask_on_the_page_and_say_what_was_done`（`tests/web/feedback.cjs`）、`test_accounts_and_the_record_in_the_browser`、`test_a_version_gets_its_label_in_the_browser` |
 | 推理环境变了（包清单、源码或 onnx2engine 程序）就不评 | `worker.eval_model`、`check_runner` | `test_an_eval_in_a_changed_runner_fails`、`test_an_engine_is_built_once_per_onnx_and_machine` |
 | 平台从不加载上传的权重：评估任务只带 `model.onnx`，worker 用推理环境登记的 onnx2engine 在本机建引擎（按 ONNX、程序、环境、显卡和驱动缓存，不上传），用部署代码的推理模块跑；写了框架就要登记 onnx2engine（路径和哈希） | `evals._onnx`、`worker.build_engine`、`fw/trt_predict.py`、`jobs.register_runner`、0006 的 CHECK | `test_eval_on_folders_of_a_pool`、`test_an_engine_is_built_once_per_onnx_and_machine`、`test_a_runner_for_evaluations_names_its_onnx2engine` |
 | 数据池上评估时，JSON 标注里的类别名都要在模型的类别表里 | `evals._known_names` | `test_pool_labels_must_name_classes_of_the_model` |
