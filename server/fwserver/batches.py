@@ -46,6 +46,7 @@ STEPS = {'upload': '上传', 'submit': '提交复核', 'reject': '退回', 'appr
 UNFINISHED = ('open', 'review', 'rejected', 'approved')
 MAX_COMMENT = 2000
 MAX_IMAGES = 500         # images a rejection points at
+MAX_NOTE = 200           # characters of the note on one of them (0016 holds the same limit)
 EXAMPLES = 200           # images a comparison lists
 MAX_LABEL_READS = 20000  # labels a comparison reads; beyond this the rest are counted but not compared
 MAX_PAIRS = 250_000      # old x new boxes of one image a comparison pairs up; beyond this only added / removed
@@ -148,11 +149,32 @@ def _same_revision(b: dict, latest: dict, revision: Optional[int]) -> None:
 
 def _step(conn, batch_id: int, actor_id: int, step: str, version_id: Optional[int], comment: str = '',
           reviewer_id: Optional[int] = None, self_review: bool = False, images: Optional[List[str]] = None,
-          pool_version_id: Optional[int] = None, job_id: Optional[int] = None) -> None:
+          pool_version_id: Optional[int] = None, job_id: Optional[int] = None,
+          notes: Optional[Dict[str, str]] = None) -> None:
     conn.execute('INSERT INTO batch_steps (batch_id, actor_id, step, version_id, reviewer_id, self_review, comment, '
-                 'images, pool_version_id, job_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                 'images, notes, pool_version_id, job_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
                  (batch_id, actor_id, step, version_id, reviewer_id, self_review, comment,
-                  json.dumps(images or [], ensure_ascii=False), pool_version_id, job_id))
+                  json.dumps(images or [], ensure_ascii=False), json.dumps(notes or {}, ensure_ascii=False),
+                  pool_version_id, job_id))
+
+
+def _notes(notes: Any, images: List[str]) -> Dict[str, str]:
+    """The notes of a rejection, by image: each on an image the rejection points at, at most MAX_NOTE long."""
+    if notes is None:
+        return {}
+    if not isinstance(notes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in notes.items()):
+        raise DatasetError(400, '问题图片的说明须写成「图片路径: 说明」')
+    out = {}
+    for path in sorted(notes):
+        text = notes[path].strip()
+        if not text:
+            continue
+        if path not in images:
+            raise DatasetError(400, f'{path} 未列在问题图片中，无法为它写说明；请先把它列为问题图片')
+        if len(text) > MAX_NOTE:
+            raise DatasetError(400, f'{path} 的说明过长：最多 {MAX_NOTE} 字，请精简，详细内容请写在退回意见中')
+        out[path] = text
+    return out
 
 
 def _text(value: Any, what: str, limit: int, required: bool = False) -> str:
@@ -339,11 +361,14 @@ def _may_review(user: dict, b: dict, states: Tuple[str, ...], what: str) -> None
 
 
 def reject(conn, user: dict, name: str, comment: str, images: Optional[List[str]] = None,
-           revision: Optional[int] = None) -> dict:
+           revision: Optional[int] = None, notes: Optional[Dict[str, str]] = None) -> dict:
+    """Send the newest revision back to its owner with a comment, the images that need work and, for any of
+    them, a note of what is wrong with it (a blank note is no note)."""
     comment = _text(comment, '退回意见', MAX_COMMENT, required=True)
     images = sorted(set(images or []))
     if len(images) > MAX_IMAGES or not all(isinstance(i, str) for i in images):
         raise DatasetError(400, f'问题图片最多列 {MAX_IMAGES} 张，其余请写在意见中')
+    notes = _notes(notes, images)
     with conn.transaction():
         b = _find(conn, name, lock=True)
         _may_review(user, b, ('review', 'approved'), '退回')
@@ -357,7 +382,7 @@ def reject(conn, user: dict, name: str, comment: str, images: Optional[List[str]
                 raise DatasetError(400, f'第 {latest["number"]} 版中没有以下文件：{"、".join(unknown[:5])}'
                                         f'{" 等" if len(unknown) > 5 else ""}（请写批次目录中的相对路径）')
         conn.execute("UPDATE batches SET status = 'rejected', updated_at = now() WHERE id = %s", (b['id'],))
-        _step(conn, b['id'], user['user_id'], 'reject', latest['id'], comment=comment, images=images)
+        _step(conn, b['id'], user['user_id'], 'reject', latest['id'], comment=comment, images=images, notes=notes)
         events.record(conn, user['user_id'], 'batch.reject', f'{b["name"]}@{latest["number"]}',
                       comment=comment[:200], images=len(images))
     return get(conn, name, user)
@@ -555,11 +580,11 @@ def get(conn, name: str, user: Optional[dict] = None) -> dict:
     out['steps'] = [
         {'at': _stamp(s['at']), 'actor': s['actor'], 'step': s['step'], 'step_text': STEPS[s['step']],
          'revision': numbers.get(s['version_id']), 'reviewer': s['reviewer'], 'self_review': s['self_review'],
-         'comment': s['comment'], 'images': s['images'], 'job_id': s['job_id'],
+         'comment': s['comment'], 'images': s['images'], 'notes': s['notes'], 'job_id': s['job_id'],
          'pool_version': f'{row["pool"]}@{s["pool_number"]}' if s['pool_number'] is not None else None}
         for s in conn.execute(
             'SELECT s.at, a.name AS actor, s.step, s.version_id, r.name AS reviewer, s.self_review, s.comment, '
-            's.images, s.job_id, pv.number AS pool_number FROM batch_steps s JOIN users a ON a.id = s.actor_id '
+            's.images, s.notes, s.job_id, pv.number AS pool_number FROM batch_steps s JOIN users a ON a.id = s.actor_id '
             'LEFT JOIN users r ON r.id = s.reviewer_id LEFT JOIN versions pv ON pv.id = s.pool_version_id '
             'WHERE s.batch_id = %s ORDER BY s.id', (row['id'],))]
     return out

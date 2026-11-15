@@ -173,8 +173,9 @@ def cmd_batch_show(args, api: Api) -> None:
             state = states.get(s['job_id'])
             what += f'（任务 {s["job_id"]}' + (f'，{state["status_text"]}' if state else '') + '）'
         print(f'  {_when(s["at"])}  {s["actor"]}  {what}' + (f'：{s["comment"]}' if s['comment'] else ''))
+        notes = s.get('notes') or {}   # servers before level 15 send none
         for image in s['images']:
-            print(f'      问题图片 {image}')
+            print(f'      问题图片 {image}' + (f'：{notes[image]}' if image in notes else ''))
 
 
 def _label_made(api: Api, ref: str, label: str, model: bool) -> None:

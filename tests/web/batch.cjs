@@ -61,7 +61,15 @@ const { dropOn } = require('./drop.cjs');
   await algo.waitForSelector('main .error');
   seen.noComment = await algo.textContent('main .error');
   await algo.fill('#review-comment', 'b.png 漏标');
-  await algo.fill('#review-images', 'b.png');
+  seen.reviewStart = await algo.textContent('#review-start');   // or marked by path, after looking in LiteAnno
+  await algo.fill('#mark-path', 'zz.png');
+  await algo.click('#mark-add');
+  seen.wrongPath = await algo.textContent('.mark-add .bad');
+  await algo.fill('#mark-path', 'b.png');
+  await algo.press('#mark-path', 'Enter');
+  await algo.fill('#review-marks input', '缺少划痕框');
+  seen.marks = await algo.textContent('#review-marks-name');
+  await algo.screenshot({ path: `${out}/batch-marks.png`, fullPage: true });
   await algo.click('#reject');
   await algo.waitForFunction(() => document.querySelector('#batch-status')?.textContent === '已退回');
 

@@ -160,6 +160,45 @@ def test_review_round_trip(api, field, make_api, pool, day, tokens, cache, tmp_p
     assert [(r['number'], r['labeler'], r['created_by']) for r in b['revisions']] == [(1, '张三', f), (2, '李四', f)]
 
 
+def test_a_rejection_carries_a_note_on_each_problem_image(api, field, pool, day, tokens, sql, capsys, monkeypatch):
+    b = upload(field, pool, day, reviewer=tokens['algo_name'])
+    name = b['name']
+    # the owner cannot reject, notes or not
+    with pytest.raises(ApiError) as e:
+        field.batch_step(name, 'reject', {'comment': '漏标', 'images': ['d.bmp'], 'notes': {'d.bmp': '漏标'}})
+    assert e.value.status == 403
+    # a note is on an image the rejection points at, and short
+    with pytest.raises(ApiError, match='c.bmp 未列在问题图片中') as e:
+        api.batch_step(name, 'reject', {'comment': '漏标', 'images': ['d.bmp'], 'notes': {'c.bmp': '框偏'}})
+    assert e.value.status == 400
+    with pytest.raises(ApiError, match='d.bmp 的说明过长：最多 200 字'):
+        api.batch_step(name, 'reject', {'comment': '漏标', 'images': ['d.bmp'], 'notes': {'d.bmp': '长' * 201}})
+    assert api.batch(name)['status'] == 'review'
+    b = api.batch_step(name, 'reject', {'comment': '两张都要改', 'images': ['c.bmp', 'd.bmp'], 'revision': 1,
+                                        'notes': {'d.bmp': ' 右下角漏标一个 ng ', 'c.bmp': '  '}})
+    step = b['steps'][-1]
+    assert (step['step'], step['images'], step['notes']) == ('reject', ['c.bmp', 'd.bmp'], {'d.bmp': '右下角漏标一个 ng'})
+    assert all(s['notes'] == {} for s in b['steps'][:-1])
+    # the trail keeps them as they were, and the database refuses notes anywhere else
+    import psycopg
+    with pytest.raises(psycopg.errors.RaiseException):
+        sql.execute("UPDATE batch_steps SET notes = '{}' WHERE batch_id = %s AND step = 'reject'", (b['id'],))
+    for step, images, notes in (('close', '[]', '{"d.bmp": "x"}'), ('reject', '["d.bmp"]', '{"c.bmp": "x"}'),
+                                ('reject', '["d.bmp"]', '{"d.bmp": ""}'), ('reject', '["d.bmp"]', '{"d.bmp": 1}')):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            sql.execute("INSERT INTO batch_steps (batch_id, actor_id, step, comment, images, notes) "
+                        "SELECT %s, owner_id, %s, 'x', %s, %s FROM batches WHERE id = %s",
+                        (b['id'], step, images, notes, b['id']))
+    # fw batch show prints each note beside its image
+    from fw import cli as fw_cli
+    monkeypatch.setattr(ops, 'connect', lambda: field)
+    monkeypatch.setattr(field, 'close', lambda: None)
+    capsys.readouterr()
+    assert fw_cli.main(['batch', 'show', name]) == 0
+    out = capsys.readouterr().out
+    assert '问题图片 d.bmp：右下角漏标一个 ng' in out and '问题图片 c.bmp\n' in out
+
+
 def test_same_content_is_not_a_new_revision(field, pool, day):
     b = upload(field, pool, day)
     with pytest.raises(ApiError, match='完全相同') as e:

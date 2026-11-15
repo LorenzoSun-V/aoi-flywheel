@@ -70,6 +70,7 @@ const ICONS = {
   logout: ['M14 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4', 'M9.5 8l-4 4 4 4', 'M5.5 12H15'],
   arrow: ['M5 12h14', 'M13 6l6 6-6 6'],
   plus: ['M12 5v14', 'M5 12h14'],
+  minus: ['M5 12h14'],
   download: ['M12 4v11', 'M7.5 10.5L12 15l4.5-4.5', 'M5 19.5h14'],
   info: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 11v5.5', 'M12 7.6v.01'],
   file: ['M6.5 3h7.5l4.5 4.5V20a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z', 'M13.5 3v5h5'],
@@ -1176,7 +1177,7 @@ function colorOf(name, names) {
   return COLORS[names.indexOf(name) % COLORS.length];
 }
 
-function drawShape(g, s, color, lw, dashed) {
+function drawShape(g, s, color, lw, dashed, text = true) {
   const o = outline(s);
   g.strokeStyle = color; g.fillStyle = color; g.lineWidth = lw * 2;
   g.setLineDash(dashed ? [lw * 6, lw * 4] : []);
@@ -1195,7 +1196,7 @@ function drawShape(g, s, color, lw, dashed) {
     g.stroke();
   }
   const first = o.circle ? o.circle[0] : o.pts[0];
-  if (first) {
+  if (first && text) {
     g.font = `${lw * 12}px sans-serif`;
     const text = String(s.label) + (typeof s.score === 'number' ? ` ${s.score.toFixed(2)}` : '');
     g.fillText(text, first[0] + lw * 2, Math.max(lw * 12, first[1] - lw * 3));
@@ -1221,6 +1222,181 @@ export function predictedShapes(doc, path, threshold) {
     label: doc.classes[cls] ?? String(cls), score, shape_type: 'rectangle', points: [[x1, y1], [x2, y2]] }));
 }
 
+// --- looking at an image: zoom and pan --------------------------------------------------------------------
+// The view of an image of w × h on a stage of sw × sh: its scale and where its top left corner sits. fitView: all
+// of it, centred.
+export function fitView(w, h, sw, sh) {
+  const scale = Math.min(sw / w, sh / h);
+  return { scale, x: (sw - w * scale) / 2, y: (sh - h * scale) / 2 };
+}
+
+// The view zoomed by factor around the point (cx, cy) of the stage, which stays under the pointer; the scale
+// within [lo, hi].
+export function zoomAt(view, factor, cx, cy, lo, hi) {
+  const scale = Math.min(hi, Math.max(lo, view.scale * factor));
+  const k = scale / view.scale;
+  return { scale, x: cx - (cx - view.x) * k, y: cy - (cy - view.y) * k };
+}
+
+// --- reviewing a batch revision in the viewer ---------------------------------------------------------------
+// While a reviewer goes through a revision, the images they have seen and those they marked as problems (each
+// with a note) are kept in this browser, per account, batch and revision, until they reject or approve it: the
+// server hears of the marks only with the rejection (user's choice: no drafts on the server).
+const REVIEW_KEY = 'fw-review';
+export const reviewKey = (account, batch, revision) => `${REVIEW_KEY}:${account}:${batch}@${revision}`;
+
+export function readReview(text) {
+  let doc = null;
+  try { doc = JSON.parse(text || 'null'); } catch { /* not readable: start again */ }
+  const ok = doc !== null && typeof doc === 'object';
+  const seen = new Set(ok && Array.isArray(doc.seen) ? doc.seen.filter((p) => typeof p === 'string') : []);
+  const marks = new Map(ok && doc.marks && typeof doc.marks === 'object' && !Array.isArray(doc.marks)
+    ? Object.entries(doc.marks).filter(([, n]) => typeof n === 'string') : []);
+  return { seen, marks };
+}
+
+export const reviewText = (r) => JSON.stringify({ seen: [...r.seen], marks: Object.fromEntries(r.marks) });
+
+const unsaved = new Map();  // reviews the browser would not keep (a private window, a full storage): this tab only
+function loadReview(key) {
+  if (unsaved.has(key)) return unsaved.get(key);
+  try { return readReview(localStorage.getItem(key)); } catch { return readReview(''); }
+}
+function saveReview(key, r) {
+  try { localStorage.setItem(key, reviewText(r)); unsaved.delete(key); } catch { unsaved.set(key, r); }
+}
+function dropReview(key) {
+  unsaved.delete(key);
+  try { localStorage.removeItem(key); } catch { /* blocked: nothing was kept */ }
+}
+
+// The images of a revision that differ from the revision before: added ones, and those whose image or label
+// file is another (by content).
+export function changedImages(before, after) {
+  const keys = (files) => {
+    const labelOf = labelIndex(files);
+    return new Map(files.filter((f) => IMAGE_EXTS.has(ext(f.path))).map((f) => [f.path, `${f.sha256} ${labelOf(f)?.sha256 || ''}`]));
+  };
+  const old = keys(before);
+  return new Set([...keys(after)].filter(([p, k]) => old.get(p) !== k).map(([p]) => p));
+}
+
+// The filters of the strip of images under review.
+export const REVIEW_FILTERS = [['all', '全部'], ['changed', '有改动'], ['marked', '有问题'], ['unseen', '未看']];
+
+export function reviewMatch(filter, path, { seen, marks }, changed) {
+  if (filter === 'changed') return changed.has(path);
+  if (filter === 'marked') return marks.has(path);
+  if (filter === 'unseen') return !seen.has(path);
+  return true;
+}
+
+// The index of the next (step 1) or previous (step -1) path after index at that matches; -1: none.
+export function stepTo(paths, at, step, match) {
+  for (let i = at + step; i >= 0 && i < paths.length; i += step) if (match(paths[i])) return i;
+  return -1;
+}
+
+// The indexes the strip shows: those that match, and the image shown (at), at most span on each side of it.
+export function stripWindow(paths, at, match, span = 60) {
+  const shown = [];
+  for (let i = 0; i < paths.length; i++) if (i === at || match(paths[i])) shown.push(i);
+  const pos = Math.max(0, shown.indexOf(at));
+  return shown.slice(Math.max(0, pos - span), pos + span + 1);
+}
+
+// What a rejection sends: the marked images, and the notes that say something.
+export function rejectBody(comment, marks, revision) {
+  const images = [...marks.keys()].sort();
+  const notes = {};
+  for (const p of images) {
+    const n = marks.get(p).trim();
+    if (n) notes[p] = n;
+  }
+  return { comment: comment.trim(), images, notes, revision };
+}
+
+// A batch revision opened in the viewer: the batch and its last rejection of that revision; when the account
+// reviews that revision now, also what it has seen and marked, the images that changed since the revision
+// before, and the filter of the strip. null: the account may not see the batch.
+async function batchReviewOf(version, files, query) {
+  let b;
+  try { b = await api.batch(version.dataset); } catch { return null; }
+  const rejected = b.steps.filter((s) => s.step === 'reject' && s.revision === version.number).pop() || null;
+  if (!b.actions.includes('reject') || version.number !== b.revision) return { b, rejected, reviewing: false };
+  const key = reviewKey(me ? me.name : '', b.name, b.revision);
+  const before = b.revision > 1 ? await filesOf(await api.version(b.name, b.revision - 1)) : null;
+  const filters = REVIEW_FILTERS.map(([k]) => k).filter((k) => before || k !== 'changed');
+  return { b, rejected, reviewing: true, key, state: loadReview(key), changed: before ? changedImages(before, files) : new Set(),
+    filters, filter: filters.includes(query.get('f')) ? query.get('f') : 'all',
+    images: files.filter((f) => IMAGE_EXTS.has(ext(f.path))) };
+}
+
+// The panel of a revision under review: how far the reviewer is, marking the image shown, and rejecting or
+// approving the revision (asked on the page first).
+function reviewPanel(review, path, onMark) {
+  const { b, state, key } = review;
+  const seen = review.images.filter((f) => state.seen.has(f.path)).length;
+  const unseen = review.images.length - seen;
+  const progress = el('p', { id: 'review-progress' });
+  const counted = () => { progress.textContent = `已看 ${seen} / ${review.images.length} · 有问题 ${state.marks.size}`; };
+  counted();
+  const note = el('input', { type: 'text', id: 'mark-note', maxlength: '200', placeholder: '说明（选填）', 'aria-label': '问题说明',
+    oninput: () => { state.marks.set(path, note.value); saveReview(key, state); } });
+  note.value = state.marks.get(path) || '';
+  const mark = el('button', { type: 'button', id: 'mark' });
+  const marking = () => {
+    const on = state.marks.has(path);
+    mark.replaceChildren(on ? '取消标记' : '标为有问题');
+    mark.classList.toggle('danger', !on);
+    note.hidden = !on;
+  };
+  mark.addEventListener('click', () => {
+    if (state.marks.has(path)) state.marks.delete(path);
+    else { state.marks.set(path, note.value); note.hidden = false; }
+    saveReview(key, state);
+    marking();
+    counted();
+    onMark(state.marks.has(path));
+    if (state.marks.has(path)) note.focus();
+  });
+  marking();
+  const done = (said) => { dropReview(key); location.hash = hrefOf(['b', b.name]); toastDone(said); };
+  const acts = el('div', { class: 'row' });
+  acts.append(
+    el('button', { type: 'button', id: 'review-reject', onclick: () => askFirst(acts, {
+      text: state.marks.size ? `退回第 ${b.revision} 版，附 ${state.marks.size} 张问题图片及说明。` : `退回第 ${b.revision} 版。`,
+      reason: '退回意见（必填）', go: '确认退回',
+      run: async (why) => { await api.batchStep(b.name, 'reject', rejectBody(why, state.marks, b.revision)); done(`已退回第 ${b.revision} 版`); } }) }, '退回…'),
+    b.actions.includes('approve') ? el('button', { type: 'button', id: 'review-approve', onclick: () => askFirst(acts, {
+      text: [unseen ? `尚有 ${unseen} 张图片未查看。` : '', state.marks.size ? `已标出的 ${state.marks.size} 张问题图片将不再保留。` : '',
+        `通过第 ${b.revision} 版。`].join(''),
+      reason: '复核意见（选填）', go: '确认通过',
+      run: async (why) => { await api.batchStep(b.name, 'approve', { comment: why, revision: b.revision }); done(`已通过第 ${b.revision} 版`); } }) }, '通过…') : null);
+  return el('div', { class: 'panel review', id: 'review-panel' },
+    el('h2', {}, `复核第 ${b.revision} 版`, info(['已看和标出的问题图片仅保存在本机浏览器中，提交退回后随退回意见一并发出，通过或退回后清除。',
+      '翻页：键盘左、右方向键；图片条上方可只看有改动、有问题或未看的图片。'], '复核说明')),
+    progress, el('div', { class: 'row' }, mark), note, acts,
+    el('a', { href: hrefOf(['b', b.name]) }, '返回批次'));
+}
+
+// The strip of the images under review, with the filters above it.
+function reviewStrip(review, paths, at, match, hrefTo, hrefWith) {
+  const { state } = review;
+  const counts = { all: paths.length, changed: review.changed.size, marked: state.marks.size,
+    unseen: paths.filter((p) => !state.seen.has(p)).length };
+  const tabs = el('div', { class: 'row tabs strip-tabs' }, REVIEW_FILTERS.filter(([k]) => review.filters.includes(k)).map(([k, t]) =>
+    el('a', { href: hrefWith(k), class: k === review.filter ? 'on' : '', 'data-filter': k }, t, el('span', { class: 'count' }, String(counts[k])))));
+  const strip = el('div', { class: 'strip', id: 'review-strip' }, stripWindow(paths, at, match).map((i) => {
+    const p = paths[i];
+    const img = el('img', { alt: '' });
+    lazyThumb(img, review.images[i]);
+    return el('a', { href: hrefTo(p), title: p, class: ['shot', i === at ? 'on' : '', state.seen.has(p) ? 'seen' : '',
+      state.marks.has(p) ? 'marked' : ''].filter(Boolean).join(' ') }, img);
+  }));
+  return [tabs, strip];
+}
+
 async function imagePage(name, number, path, query) {
   const show = live();
   const version = await api.version(name, number);
@@ -1235,29 +1411,123 @@ async function imagePage(name, number, path, query) {
   const set = predId ? await api.predictionSet(predId) : null;
   const pdoc = set ? await predictionsOf(set) : null;
   const threshold = Number(query.get('thr') || 0.3);
-  // with a prediction set: page through its images; otherwise through the folder
-  const siblings = pdoc ? Object.keys(pdoc.images).sort().map((p) => files.find((f) => f.path === p)).filter(Boolean)
-    : listDir(files, dir).images;
-  const at = siblings.findIndex((f) => f.path === path);
-  const keep = set ? { pred: set.id, thr: query.get('thr') } : null;
-  const go = (f) => { location.hash = hrefOf(['img', version.dataset, String(version.number), f.path], keep); };
+  const batch = version.kind === 'batch' && !set ? await batchReviewOf(version, files, query) : null;
+  const review = batch && batch.reviewing ? batch : null;
+  // 上一张 and 下一张: through a prediction set's images, through the revision under review (those the filter
+  // keeps) or through the folder
+  let order;
+  let match = () => true;
+  if (pdoc) order = Object.keys(pdoc.images).sort().map((p) => files.find((f) => f.path === p)).filter(Boolean);
+  else if (review) {
+    order = review.images;
+    match = (p) => reviewMatch(review.filter, p, review.state, review.changed);
+  } else order = listDir(files, dir).images;
+  const paths = order.map((f) => f.path);
+  const at = paths.indexOf(path);
+  const before = stepTo(paths, at, -1, match);
+  const after = stepTo(paths, at, 1, match);
+  const keep = set ? { pred: set.id, thr: query.get('thr') } : review ? { f: review.filter === 'all' ? '' : review.filter } : null;
+  const hrefTo = (p, q = keep) => hrefOf(['img', version.dataset, String(version.number), p], q);
+  const go = (i) => { if (i >= 0) location.hash = hrefTo(paths[i]); };
+  if (review && !review.state.seen.has(path)) {
+    review.state.seen.add(path);
+    saveReview(review.key, review.state);
+  }
+
   const canvas = el('canvas');
-  const side = el('div', { class: 'panel' }, el('p', { class: 'muted' }, '加载中…'));
+  const stage = el('div', { class: 'stage', id: 'stage' }, canvas);
+  const zoomText = el('span', { class: 'muted zoom-text', id: 'zoom' });
+  let view = null;
+  let fit = null;
+  let fitted = true;  // the view is fitView: it follows the stage when the window is resized
+  const put = () => {
+    canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+    canvas.classList.toggle('sharp', view.scale >= 2);
+    zoomText.textContent = `${Math.round(view.scale * 100)}%`;
+  };
+  const fitNow = () => {
+    if (!stage.isConnected || !stage.clientWidth) return;
+    fit = fitView(canvas.width, canvas.height, stage.clientWidth, stage.clientHeight);
+    view = { ...fit };
+    fitted = true;
+    put();
+  };
+  const zoomBy = (factor, cx = stage.clientWidth / 2, cy = stage.clientHeight / 2) => {
+    if (!view) return;
+    view = zoomAt(view, factor, cx, cy, Math.min(fit.scale, 1) / 2, 32);
+    fitted = false;
+    put();
+  };
+  stage.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const r = stage.getBoundingClientRect();
+    zoomBy(Math.exp(-ev.deltaY * 0.0015), ev.clientX - r.left, ev.clientY - r.top);
+  }, { passive: false });
+  let drag = null;
+  stage.addEventListener('pointerdown', (ev) => {
+    if (!view || ev.button !== 0) return;
+    drag = { x: ev.clientX - view.x, y: ev.clientY - view.y };
+    stage.setPointerCapture(ev.pointerId);
+    stage.classList.add('dragging');
+  });
+  stage.addEventListener('pointermove', (ev) => {
+    if (!drag) return;
+    view = { ...view, x: ev.clientX - drag.x, y: ev.clientY - drag.y };
+    fitted = false;
+    put();
+  });
+  const stop = () => { drag = null; stage.classList.remove('dragging'); };
+  stage.addEventListener('pointerup', stop);
+  stage.addEventListener('pointercancel', stop);
+  stage.addEventListener('dblclick', fitNow);
+  const resized = new ResizeObserver(() => {
+    if (!stage.isConnected) resized.disconnect();
+    else if (fitted) fitNow();
+  });
+  resized.observe(stage);
+  const one = () => {  // one pixel of the image on one pixel of the screen, around the centre
+    if (!view) return;
+    zoomBy((1 / (globalThis.devicePixelRatio || 1)) / view.scale);
+  };
+  const tools = el('div', { class: 'row stage-tools' },
+    el('button', { type: 'button', class: 'tool', id: 'zoom-out', title: '缩小', 'aria-label': '缩小', onclick: () => zoomBy(1 / 1.25) }, icon('minus')),
+    zoomText,
+    el('button', { type: 'button', class: 'tool', id: 'zoom-in', title: '放大', 'aria-label': '放大', onclick: () => zoomBy(1.25) }, icon('plus')),
+    el('button', { type: 'button', id: 'zoom-fit', onclick: fitNow }, '适合窗口'),
+    el('button', { type: 'button', id: 'zoom-one', onclick: one }, '1:1'),
+    info('滚动鼠标滚轮以指针处为中心缩放，按住拖动平移，双击恢复为适合窗口。「1:1」：图片的一个像素对应屏幕的一个像素。', '看图说明'));
+
+  const facts = el('div', { class: 'panel' }, el('p', { class: 'muted' }, '加载中…'));
+  const noted = batch && batch.rejected && batch.rejected.images.includes(path)
+    ? el('div', { class: 'panel review-note', id: 'rejected-note' }, el('h2', {}, `第 ${version.number} 版退回时标为问题图片`),
+      el('p', {}, (batch.rejected.notes || {})[path] || '未写说明。'), el('p', {}, `退回意见：${batch.rejected.comment}`))
+    : null;
   const slider = set ? el('input', { type: 'range', min: String(set.conf), max: '1', step: '0.01', value: String(Math.max(threshold, set.conf)),
-    onchange: (ev) => { location.hash = hrefOf(['img', version.dataset, String(version.number), path], { pred: set.id, thr: ev.target.value }); } }) : null;
+    onchange: (ev) => { location.hash = hrefTo(path, { pred: set.id, thr: ev.target.value }); } }) : null;
   show(set ? crumbs('predictions', null, [`#${set.id}`, hrefOf(['p', String(set.id)], { thr: query.get('thr') })], path.slice(path.lastIndexOf('/') + 1))
     : crumbsFor(version, dir, place, false),
   el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, path.slice(path.lastIndexOf('/') + 1)),
     slider ? el('label', { class: 'row' }, '阈值', slider, el('span', {}, Math.max(threshold, set.conf).toFixed(2))) : null,
-    el('button', { disabled: at <= 0, onclick: () => go(siblings[at - 1]) }, '上一张'),
-    el('span', { class: 'muted' }, `${at + 1} / ${siblings.length}`),
-    el('button', { disabled: at + 1 >= siblings.length, onclick: () => go(siblings[at + 1]) }, '下一张'),
-    info('也可使用键盘的左、右方向键翻看上一张和下一张。', '翻页说明')),
-  el('div', { class: 'viewer' }, el('div', {}, canvas), side));
+    el('button', { disabled: before < 0, onclick: () => go(before) }, '上一张'),
+    el('span', { class: 'muted' }, `${at + 1} / ${paths.length}`),
+    el('button', { disabled: after < 0, onclick: () => go(after) }, '下一张'),
+    info(review ? '也可使用键盘的左、右方向键翻看上一张和下一张；只看部分图片时，在其中翻页。' : '也可使用键盘的左、右方向键翻看上一张和下一张。', '翻页说明')),
+  el('div', { class: 'viewer' },
+    el('div', { class: 'viewer-main' }, tools, stage,
+      review ? reviewStrip(review, paths, at, match, hrefTo, (f) => hrefTo(path, { f: f === 'all' ? '' : f })) : null),
+    el('div', { class: 'viewer-side' }, review ? reviewPanel(review, path, (on) => {  // the strip and its count follow
+      const shot = document.querySelector('#review-strip .shot.on');
+      if (shot) shot.classList.toggle('marked', on);
+      const n = document.querySelector('.strip-tabs a[data-filter="marked"] .count');
+      if (n) n.textContent = String(review.state.marks.size);
+    }) : null, noted, facts)));
   keyNav = (key) => {
-    if (key === 'ArrowLeft' && at > 0) go(siblings[at - 1]);
-    if (key === 'ArrowRight' && at + 1 < siblings.length) go(siblings[at + 1]);
+    if (key === 'ArrowLeft') go(before);
+    if (key === 'ArrowRight') go(after);
   };
+  const strip = document.getElementById('review-strip');
+  const on = strip && strip.querySelector('.shot.on');
+  if (on) strip.scrollLeft = on.offsetLeft - (strip.clientWidth - on.offsetWidth) / 2;
 
   const img = new Image();
   const problems = [];
@@ -1277,20 +1547,37 @@ async function imagePage(name, number, path, query) {
   if (!size && doc && doc.imageWidth > 0 && doc.imageHeight > 0) size = [doc.imageWidth, doc.imageHeight];
   [canvas.width, canvas.height] = size || [800, 600];
   const g = canvas.getContext('2d');
-  if (img.naturalWidth) g.drawImage(img, 0, 0);
   const names = [];
   const lw = Math.max(1, Math.round(Math.max(canvas.width, canvas.height) / 500));
   const shapes = doc && Array.isArray(doc.shapes) ? doc.shapes : [];
-  for (const s of shapes) drawShape(g, s, colorOf(String(s.label), names), lw, false);
   const predicted = pdoc ? predictedShapes(pdoc, path, Math.max(threshold, set.conf)) : [];
-  for (const s of predicted) drawShape(g, s, colorOf(String(s.label), names), lw, true);
+  const hidden = new Set();  // classes not drawn
+  let texts = true;  // class names drawn beside the shapes
+  const draw = () => {
+    g.clearRect(0, 0, canvas.width, canvas.height);
+    if (img.naturalWidth) g.drawImage(img, 0, 0);
+    for (const s of shapes) if (!hidden.has(String(s.label))) drawShape(g, s, colorOf(String(s.label), names), lw, false, texts);
+    for (const s of predicted) if (!hidden.has(String(s.label))) drawShape(g, s, colorOf(String(s.label), names), lw, true, texts);
+  };
+  for (const s of [...shapes, ...predicted]) colorOf(String(s.label), names);
+  draw();
+  fitNow();
+  const toggle = (n) => {
+    if (hidden.has(n)) hidden.delete(n); else hidden.add(n);
+    for (const b of facts.querySelectorAll('button.class-toggle')) {
+      if (b.dataset.name === n) { b.classList.toggle('off', hidden.has(n)); b.setAttribute('aria-pressed', String(!hidden.has(n))); }
+    }
+    draw();
+  };
   const count = (list) => {
     const m = new Map();
     for (const s of list) m.set(String(s.label), (m.get(String(s.label)) || 0) + 1);
-    return el('ul', { class: 'shapes' }, [...m.entries()].map(([n, k]) =>
-      el('li', {}, el('span', { class: 'dot on', style: `background:${colorOf(n, names)}` }), `${n} × ${k}`)));
+    return el('ul', { class: 'shapes' }, [...m.entries()].map(([n, k]) => el('li', {},
+      el('button', { type: 'button', class: 'class-toggle', 'data-name': n, 'aria-pressed': 'true', title: '点击隐藏或显示该类别',
+        onclick: () => toggle(n) }, el('span', { class: 'dot on', style: `background:${colorOf(n, names)}` }), `${n} × ${k}`))));
   };
-  side.replaceChildren(...present([
+  const textBox = el('input', { type: 'checkbox', id: 'show-names', checked: true, onchange: () => { texts = textBox.checked; draw(); } });
+  facts.replaceChildren(...present([
     el('dl', { class: 'kv' },
       el('dt', {}, '尺寸'), el('dd', {}, size ? `${size[0]} × ${size[1]}` : '-'),
       el('dt', {}, '大小'), el('dd', {}, sizeText(image.size)),
@@ -1298,9 +1585,10 @@ async function imagePage(name, number, path, query) {
       el('dt', {}, '标注'), el('dd', {}, label ? label.path.slice(label.path.lastIndexOf('/') + 1) : '无（正常图）'),
       doc ? [el('dt', {}, '确认'), el('dd', {}, doc.checked === true ? '已确认' : '未确认')] : null),
     problems.map((x) => errorBox(x)),
-    shapes.length ? [el('h2', {}, '标注（实线）'), count(shapes)] : null,
+    shapes.length ? [el('h2', {}, '标注（实线）', info('点击类别可隐藏或显示该类别的框。', '类别说明')), count(shapes)] : null,
     set ? [el('h2', {}, `预测（虚线，分数 ≥ ${Math.max(threshold, set.conf).toFixed(2)}）`),
-      predicted.length ? count(predicted) : el('p', { class: 'muted' }, '无预测框')] : null]));
+      predicted.length ? count(predicted) : el('p', { class: 'muted' }, '无预测框')] : null,
+    shapes.length || predicted.length ? checkRow(textBox, '显示类别名称') : null]));
 }
 
 async function diffPage(name, query) {
@@ -3778,18 +4066,60 @@ async function batchPage(name, query) {
         el('div', { class: 'row' }, el('button', { id: 'import-preview', onclick: preview }, '预览入库')), out));
     }
     if (has('approve') || has('reject')) {
+      // the problem images marked in the viewer (kept in this browser), which a rejection sends with their notes
+      const key = reviewKey(me ? me.name : '', b.name, b.revision);
+      const state = loadReview(key);
+      const images = (await filesOf(await api.version(b.name, b.revision))).filter((f) => IMAGE_EXTS.has(ext(f.path)));
+      const seen = images.filter((f) => state.seen.has(f.path)).length;
+      const next = images.find((f) => !state.seen.has(f.path)) || images[0];
       const comment = el('textarea', { id: 'review-comment', rows: 3, placeholder: '复核意见：退回时必填，请写明需要修改之处' });
-      const images = el('textarea', { id: 'review-images', rows: 3, class: 'mono', placeholder: '有问题的图片，每行一个（批次目录中的相对路径），选填' });
-      forms.push(el('div', { class: 'panel form' },
-        el('p', { class: 'muted' }, has('approve') ? `复核第 ${b.revision} 版：` : `已通过；入库前发现问题仍可退回第 ${b.revision} 版：`, el('a', { href: hrefOf(['v', b.name, String(b.revision)]) }, '在网页中查看图片和标注框'),
-          info(`也可使用 fw batch get ${b.name} 取回到本地，用 LiteAnno 打开。`, '命令行说明')),
-        el('label', {}, '意见', comment), el('label', {}, '问题图片', images),
+      const marks = el('div', { id: 'review-marks' });
+      const marksName = el('span', { class: 'name', id: 'review-marks-name' });
+      const listMarks = () => {
+        marksName.textContent = `问题图片（${state.marks.size}）`;
+        marks.replaceChildren(state.marks.size ? el('table', { class: 'marks' },
+          el('tr', {}, ['图片', '说明', ''].map((h) => el('th', {}, h))),
+          [...state.marks.keys()].sort().map((p) => {
+            const note = el('input', { type: 'text', maxlength: '200', placeholder: '说明（选填）', 'aria-label': `${p} 的说明`,
+              oninput: () => { state.marks.set(p, note.value); saveReview(key, state); } });
+            note.value = state.marks.get(p);
+            return el('tr', {}, el('td', { class: 'mono' }, el('a', { href: hrefOf(['img', b.name, String(b.revision), p]) }, p)), el('td', {}, note),
+              el('td', {}, el('button', { type: 'button', class: 'link', onclick: () => { state.marks.delete(p); saveReview(key, state); listMarks(); } }, '移除')));
+          })) : el('p', { class: 'muted' }, '暂无标出的问题图片。'));
+      };
+      listMarks();
+      const path = el('input', { type: 'text', id: 'mark-path', class: 'mono', placeholder: '图片在批次目录中的相对路径', 'aria-label': '问题图片的路径' });
+      const wrong = el('span', { class: 'bad' });
+      const add = () => {
+        const p = path.value.trim();
+        wrong.textContent = '';
+        if (!p) return;
+        if (!images.some((f) => f.path === p)) { wrong.textContent = `第 ${b.revision} 版中不存在图片 ${p}。`; return; }
+        if (!state.marks.has(p)) state.marks.set(p, '');
+        saveReview(key, state);
+        path.value = '';
+        listMarks();
+      };
+      path.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
+      forms.push(el('div', { class: 'panel form', id: 'review-form' },
+        el('div', { class: 'row' }, el('h3', { style: 'flex:1;margin:0' }, has('approve') ? `复核第 ${b.revision} 版` : `已通过；入库前发现问题仍可退回第 ${b.revision} 版`,
+          info(['在看图页逐张查看，标出问题图片并可为每张写一句说明；标记仅保存在本机浏览器中，退回时随意见一并发出，通过或退回后清除。',
+            `也可使用 fw batch get ${b.name} 取回到本地，用 LiteAnno 打开，再在下方按路径添加问题图片。`], '复核说明')),
+          el('span', { class: 'muted', id: 'review-seen' }, `已看 ${seen} / ${images.length}`),
+          next ? el('a', { class: 'button primary', id: 'review-start', href: hrefOf(['img', b.name, String(b.revision), next.path]) }, seen ? '继续复核' : '开始复核') : null),
+        el('label', {}, '意见', comment),
+        el('div', { class: 'label' }, marksName,
+          el('div', {}, marks, el('div', { class: 'row mark-add' }, path, el('button', { type: 'button', id: 'mark-add', onclick: add }, '添加'), wrong))),
         el('div', { class: 'row' },
-          has('approve') ? el('button', { class: 'primary', id: 'approve', onclick: act(() => api.batchStep(b.name, 'approve',
-            { comment: comment.value.trim(), revision: b.revision }), `已通过第 ${b.revision} 版`) }, '通过') : null,
+          has('approve') ? el('button', { class: 'primary', id: 'approve', onclick: act(async () => {
+            await api.batchStep(b.name, 'approve', { comment: comment.value.trim(), revision: b.revision });
+            dropReview(key);
+          }, `已通过第 ${b.revision} 版`) }, '通过') : null,
           has('approve') ? el('a', { class: 'button', href: hrefOf(['batch-up', b.name], { approve: '1' }) }, '上传修改后的目录并通过') : null,
-          el('button', { id: 'reject', onclick: act(() => api.batchStep(b.name, 'reject', { comment: comment.value.trim(),
-            images: images.value.split('\n').map((x) => x.trim()).filter(Boolean), revision: b.revision }), `已退回第 ${b.revision} 版`) }, '退回'))));
+          el('button', { id: 'reject', onclick: act(async () => {
+            await api.batchStep(b.name, 'reject', rejectBody(comment.value, state.marks, b.revision));
+            dropReview(key);
+          }, `已退回第 ${b.revision} 版`) }, '退回'))));
     }
     if (has('close')) {
       const row = el('div', { class: 'row' }, el('button', { id: 'close-batch', onclick: () => askFirst(row, {
@@ -3807,8 +4137,9 @@ async function batchPage(name, query) {
       timeCell(s.at), el('td', {}, s.actor),
       el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.job_id ? `（任务 ${s.job_id}）` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
         s.pool_version ? ['，成为 ', vref(s.pool_version)] : null),
-      el('td', { class: 'wrap' }, s.comment, s.images.length ? el('ul', { class: 'mono' }, s.images.map((i) => el('li', {},
-        el('a', { href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i)))) : null)));
+      el('td', { class: 'wrap' }, s.comment, s.images.length ? el('ul', { class: 'problems' }, s.images.map((i) => el('li', {},
+        el('a', { class: 'mono', href: hrefOf(['img', b.name, String(s.revision), ...i.split('/')]) }, i),
+        (s.notes || {})[i] ? `：${s.notes[i]}` : null))) : null)));
     show(crumbs('batches', b, b.name),
       el('h1', {}, b.name, statusText(BATCH_DOT[b.status], b.status_text, 'batch-status')),
       el('p', {}, '入库目标：', el('a', { href: hrefOf(['d', b.pool]) }, b.pool), ` / ${b.dir}/`,
