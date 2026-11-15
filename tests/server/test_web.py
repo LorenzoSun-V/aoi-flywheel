@@ -79,8 +79,8 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert '凭据无效' in seen['wrong']
     assert seen['home'] == '概览'
     assert name in seen['datasets'] and tokens['algo_name'] in seen['who']
-    assert seen['versions'] == [f'{name}@2', f'{name}@1']
-    assert [f.split()[1] for f in seen['folders']] == ['A', 'B', 'C']
+    assert seen['versions'] == ['@2', '@1']
+    assert [f.split()[0] for f in seen['folders']] == ['A', 'B', 'C']
     assert seen['tiles'] == 4 and seen['labeled'] == 3
     assert 'scratch × 1' in seen['image'] and 'dent × 1' in seen['image'] and '未确认' in seen['image']
     assert seen['canvas'] == [200, 100]
@@ -110,9 +110,9 @@ def test_a_snapshot_is_shown_in_the_folders_fw_get_makes(service, tokens, api, t
                        capture_output=True, text=True, timeout=120, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
-    assert seen['top'] == ['📁 neg_train 1', '📁 test 1', '📁 train 2', '📁 val 2']  # not images/<划分>/<现场>/…
+    assert seen['top'] == ['neg_train 1', 'test 1', 'train 2', 'val 2']  # not images/<划分>/<现场>/…
     assert 'fw get 默认取回的结构一致' in seen['note']  # behind the ⓘ of the title
-    assert seen['train'] == ['📁 images 2']
+    assert seen['train'] == ['images 2']
     assert seen['trainTiles'] == ['train0.png', 'train1.png'] and seen['trainLabeled'] == 2
     assert seen['crumbs'].endswith('/train/images') and 'scratch × 1' in seen['image'] and seen['count'] == '1 / 2'
     assert seen['negTiles'] == ['neg_train2.png'] and seen['valTiles'] == ['neg_val4.png', 'val3.png']
@@ -234,11 +234,60 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert 'from=algo' in seen['events'][1][4] and 'to=field' in seen['events'][1][4]
     assert seen['token'] not in json.dumps(seen['events'])
     # the account it made works, as a field account: it reads, and is offered nothing it may not do
-    assert seen['fieldNav'] == ['概览', '数据集', '标注批次', '模型', '预测集'] and seen['fieldWho'] == f'{name}（现场实施）'
+    assert seen['fieldNav'] == ['概览', '数据集', '标注批次', '模型', '预测集'] and seen['fieldWho'] == [name, '现场实施']
     assert seen['fieldButtons'] == [] and '现场实施账号不能管理账号' in seen['fieldUsers']
     assert '现场笔记本' in seen['mine'] and '有效' in seen['mine']
     me = make_api(token=seen['token']).me()
     assert (me['name'], me['role']) == (name, 'field')
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_every_page_keeps_rows_on_one_line_and_forms_to_one_width(service, tokens, api, make_api, tmp_path):
+    """Tables: one line per row at 1180 wide, inside their panels with a few words of every text left (a
+    version as its number in its dataset's table), a long note cut short with its whole text on pointing, times as
+    今天 HH:MM, sources by how and which folder, numbers on the right, version labels not in a state's colour;
+    a batch's state as a dot and words; forms of one width with their check boxes under the fields; files chosen
+    in a box; the sign-in page without the side bar; the account's name and role on two lines."""
+    from fw import ops
+    from helpers import quiet
+    from test_trainsets import make
+    seed = int.from_bytes(os.urandom(2), 'big')
+    name = f'W-{os.urandom(4).hex()}'
+    api.create_dataset(name, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
+    ops.import_folder(api, name, write_tree(tmp_path / 'a' / 'pool', {'20261101/x.png': real_png(64, 32, seed)}), echo=quiet)
+    note = '补充十一月夜班采集的数据，' * 12
+    ops.import_folder(api, name, write_tree(tmp_path / 'b' / 'pool', {'20261101/x.png': real_png(64, 32, seed),
+                                                                     '20261102/y.png': real_png(64, 32, seed + 1)}),
+                      note=note, echo=quiet)
+    api.add_label(name, 2, 'v0.1.0', '')
+    make(api, f'{name}-det', [f'{name}@2'], test_dirs=['20261102'])         # the model register page needs a snapshot
+    field = make_api('field')
+    batch = ops.upload_batch(field, write_tree(tmp_path / 'c' / '20261103', {'z.png': real_png(64, 32, seed + 2)}), name,
+                             '张三', echo=quiet)['name']
+    field.batch_step(batch, 'submit', {'reviewer': tokens['algo_name']})
+    api.batch_step(batch, 'reject', {'comment': '请补标', 'images': ['z.png'], 'revision': 1})
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'layout.cjs'), service.url + '/', tokens['algo'], name, batch, str(shots)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['loginSide'] == 'none' and seen['loginNav'] == 0 and 'aoi-flywheel' in seen['loginBrand']
+    assert seen['side'] != 'none' and seen['whoTwoLines']
+    assert seen['versionsOneLine'] and seen['fits'] and seen['eventsOneLine'] and seen['eventsFit']
+    assert seen['note'] == {'title': note.strip(), 'cut': True, 'overflow': 'ellipsis'}
+    assert seen['time'][0].startswith(('今天 ', '昨天 ')) and len(seen['time'][1]) == len('2026-11-14 22:09')
+    assert seen['source'][0] == 'fw dataset import · pool' and seen['source'][1].startswith('fw dataset import ')
+    assert seen['numbersRight'] == ['right', 'right']
+    assert seen['labelChip'] != 'rgb(230, 244, 234)'                       # not the green of 复核通过
+    assert seen['removeButton'] == 1
+    assert seen['versionRefs'] == [['@1', f'{name}@1']]  # the parent: its number, all of it on pointing
+    assert seen['tables'] == {page: {'wide': [], 'narrow': []} for page in ('pool', 'events', 'datasets', 'batches', 'batch')}
+    assert seen['batchState'] == ['已退回', True]
+    assert seen['steps'] == ['时间', '账号', '操作', '意见'] and seen['stepsTitle'] == '流转记录'
+    assert seen['formWidth'] <= 720 and seen['checkUnderFields']
+    assert seen['fileBoxes'] == 3 and seen['nativeHidden'] == '0' and seen['fileChosen'] == 'best.onnx · 2 B'
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
@@ -363,7 +412,7 @@ def test_one_finds_the_way_around(service, tokens, api, tmp_path):
     assert seen['browsedHidden'] == [ty]
     assert (seen['siteModels'], seen['siteModelRows']) == ('3', 3)     # TY is not shown, its two models still count
     assert seen['backFromBatch'] == '/datasets'                         # not caught between the two addresses of a batch
-    assert '没有可显示的产线' in seen['allLinesHidden'] and '选择' in seen['allLinesHidden']
+    assert '没有可显示的产线' in seen['allLinesHidden'] and '显示设置' in seen['allLinesHidden']
     # the path and the way back
     assert seen['lineCrumbs'] == ['概览', '/', site, '/', 'TX']
     assert seen['crumbs'] == [['概览', '#/'], [site, f'#/?site={site}'], ['TX', tx],
@@ -460,7 +509,7 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert seen['at1920']['main'] > 1600 and seen['at1920']['fills'] > 1500                  # no 1480 cap
     assert seen['at1180']['stacked'] and not seen['at1180']['sideBySide']
     # the ⋯: hidden until the row is pointed at or focused; the numbers do not move
-    assert seen['dotsHidden'] == '0' and seen['dotsHovered'] == ['1', '0'] and seen['numbersStay']
+    assert seen['dotsHidden'] == '0.4' and seen['dotsHovered'] == ['1', '0.4'] and seen['numbersStay']   # faint until pointed at
     assert seen['menu'] == [['查看版本', f'#/mv/{detr}/2'], ['查看评估', f'#/eval/{shown["id"]}'], ['复制版本号', None]]
     assert seen['expanded'] == 'true' and seen['closedByOutside'] and seen['menuNoEval'] == ['查看版本', '复制版本号']
     assert seen['tabToDots'] and seen['dotsFocused'] == '1'
@@ -496,7 +545,7 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert seen['proposed'] == 'v0.1.0' and seen['next'] == 'v0.2.0'
-    assert f'{name}@1' in seen['row'] and 'v0.1.0' in seen['row']
+    assert seen['row'].startswith('@1') and seen['rowRef'] == f'{name}@1' and 'v0.1.0' in seen['row']
     assert f'已经用在 {name}@1 上' in seen['taken']
     assert seen['title'].startswith(f'{name}@1') and 'v0.1.0' in seen['title']
     assert api.version(name, 'v0.1.0')['number'] == 1 and api.labels(name)['labels'][0]['note'] == '冷启动'
@@ -632,20 +681,22 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
         first[f'A/img{i}.json'] = label('scratch' if i % 2 else 'dent')
     first['A/neg0.png'] = real_png(200, 100, seed + 20)
     first['A/neg1.png'] = real_png(200, 100, seed + 21)
-    older = pool(api, tmp_path / 'older', {'A/old.png': real_png(200, 100, seed + 40)}, name=f'0{os.urandom(3).hex()}')
-    name = pool(api, tmp_path, first)  # the line's newest pool, though not the first by name
+    line = f'R{os.urandom(3).hex()}'  # a line of its own: no pool of another test is the line's newest
+    older = pool(api, tmp_path / 'older', {'A/old.png': real_png(200, 100, seed + 40)}, site='WEB', line=line,
+                 name=f'0{os.urandom(3).hex()}')
+    name = pool(api, tmp_path, first, site='WEB', line=line)  # the line's newest pool, though not the first by name
     both = dict(first, **{f'B/b{i}.png': real_png(200, 100, seed + 30 + i) for i in range(3)},
                 **{f'B/b{i}.json': label('scratch') for i in range(3)})
     add_version(api, tmp_path, name, both)
     shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
     shots.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(['node', str(WEB_TESTS / 'trainset.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, str(shots)],
-                       capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    r = subprocess.run(['node', str(WEB_TESTS / 'trainset.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, str(shots),
+                        'WEB', line], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     snap = f'{name}-det'
-    assert seen['overview'] == '#/trainset-new?site=SES&line=TX'
+    assert seen['overview'] == f'#/trainset-new?site=WEB&line={line}'
     assert seen['first'] == {'name': snap, 'mode': f'将建立 {snap}@1', 'sources': [f'{name}@1'], 'classes': '',
                              'val': '0.2', 'test': '0.1', 'newTo': None}
     assert "'dent' 不在类别表里" in seen['missing']['error'] and seen['missing']['create'] == 0  # refused, nothing to make
@@ -712,7 +763,8 @@ def test_a_model_version_is_registered_from_the_browser(service, tokens, api, tm
     assert 'external data' in seen['external'] and seen['afterRefusal'] == name
     assert (seen['kept']['trainset'], seen['kept']['model'], seen['kept']['newShown']) == (f'{other}@1', name, False)
     assert seen['sent'] is None and seen['page']['hash'] == f'#/mv/{name}/1' and seen['page']['title'].startswith(f'{name}@1')
-    assert f'{snap}@1' in seen['page']['info'] and 'scratch、dent' in seen['page']['info'] and 'a' * 40 in seen['page']['info']
+    assert f'{snap}@1' in seen['page']['info'] and 'scratch、dent' in seen['page']['info'] and 'a' * 12 in seen['page']['info']
+    assert 'a' * 40 in seen['page']['hashes']                              # the whole commit on pointing and on 复制
     assert {'model.onnx', 'metrics.json', 'weights/best.pt', 'classes.txt'} <= set(seen['page']['files'])
     m = api.model(name)
     assert (m['site'], m['line'], m['task']) == ('WEB', line, 'det')
@@ -824,9 +876,9 @@ def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_p
     assert '图片相同但标注不同' in seen['plan'] and '（2 个目标） 和 20261101/a.png（1 个目标）' in seen['plan']
     assert seen['added'] == f'/v/{name}/2'
     assert '池里已有 20261103/' in seen['again'] and seen['offered'] == 0
-    assert '去掉 20261101/：2 个文件' in seen['removal'] and f'新版本 {name}@3：5 个文件' in seen['removal']
+    assert '移除 20261101/：2 个文件' in seen['removal'] and f'新版本 {name}@3：5 个文件' in seen['removal']
     assert seen['removed'] == f'/v/{name}/3'
-    assert '新增 20261103/' in seen['versions'] and '去掉 20261101/' in seen['versions'] and '整份导入' in seen['versions']
+    assert '新增 20261103/' in seen['versions'] and '移除 20261101/' in seen['versions'] and '整份导入' in seen['versions']
     v2, v3 = api.version(name, 2), api.version(name, 3)
     assert v2['parent']['id'] == v1['id'] and v2['note'] == '第三天' and v2['source'] == '网页上传新增目录 20261103'
     assert [o['op'] for o in v2['ops']] == ['add'] and [o['op'] for o in v3['ops']] == ['remove']

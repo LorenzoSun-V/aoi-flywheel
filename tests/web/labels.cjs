@@ -24,6 +24,7 @@ const { chromium } = require('playwright');
   await page.click('#label-go');
   await page.waitForSelector('table .tag.ver');
   seen.row = await page.textContent('table tr:last-child');
+  seen.rowRef = await page.getAttribute('table tr:last-child td:first-child a', 'title');
   seen.next = await page.textContent('#label-minor');
   await page.selectOption('#label-version', '2');
   await page.fill('#label-text', 'v0.1.0');
