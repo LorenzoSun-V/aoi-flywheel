@@ -2011,6 +2011,106 @@ function tagButtons(mv, asking, again) {
   return [candidate, deprecated];
 }
 
+// A version of a dataset chosen from lists, not typed: the dataset (those of the given line first), one of its
+// versions (the newest first) and, for anything but a snapshot's split, the top folders to take (none ticked: all
+// the images). splits: [value, text] choices before the datasets (a training snapshot's test or val); chosen: the
+// choice to start with (a split's value, or a dataset's name). value() is { data, dirs } as a job takes them.
+export function dataChoices(datasets, place = {}) {
+  const same = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
+  const here = (d) => (same(d.site, place.site) && same(d.line, place.line) ? 1 : 0);
+  const shown = datasets.filter((d) => d.latest && d.kind !== 'trainset' && d.kind !== 'batch')
+    .sort((a, b) => here(b) - here(a) || a.name.localeCompare(b.name));
+  return [['test', '测试集'], ['regression', '回归集'], ['pool', '数据池'], ['other', '其他']]
+    .map(([kind, label]) => [label, shown.filter((d) => d.kind === kind)]).filter(([, list]) => list.length);
+}
+
+function dataPicker(prefix, datasets, { splits = [], place = {}, chosen = '' } = {}) {
+  const what = el('select', { id: `${prefix}-data` },
+    splits.length ? el('optgroup', { label: '训练集快照' }, splits.map(([v, t]) => el('option', { value: v }, t))) : null,
+    dataChoices(datasets, place).map(([label, list]) => el('optgroup', { label },
+      list.map((d) => el('option', { value: `@${d.name}` }, d.site ? `${d.name}（${d.site} / ${d.line}）` : d.name)))));
+  const version = el('select', { id: `${prefix}-version`, 'aria-label': '版本' });
+  // the folders are read from the version's file list only when asked for: a large pool's list is many MB
+  const dirs = el('div', { class: 'checks dir-picks', id: `${prefix}-dirs` });
+  const said = el('span', {}, '全部图片');
+  const box = el('details', { class: 'dir-box', id: `${prefix}-dirs-box` }, summaryOf(said), dirs);
+  const told = () => {
+    const n = dirs.querySelectorAll('input:checked').length;
+    said.textContent = n ? `已选 ${n} 个目录` : '全部图片';
+  };
+  dirs.addEventListener('change', told);
+  const rows = [field('版本', version), el('div', { class: 'label' }, el('span', { class: 'name' }, '目录',
+    info('默认使用该版本的全部图片；展开后可勾选目录，只使用所选目录中的图片。', '目录的说明')), box)];
+  let round = 0;
+  let ready = Promise.resolve();
+  let listed = null;  // the version whose folders are listed (or being listed)
+  const versions = new Map();
+  const chosenVersion = () => (versions.get(what.value.slice(1)) || Promise.resolve([]))
+    .then((list) => list.find((v) => String(v.number) === version.value));
+  const listDirs = () => {
+    const mine = round;
+    listed = `${what.value}@${version.value}`;
+    dirs.replaceChildren(el('p', { class: 'muted' }, '正在读取目录…'));
+    ready = chosenVersion().then(async (v) => {
+      const counts = new Map();
+      for (const f of v ? await filesOf(v) : []) {
+        const slash = f.path.indexOf('/');
+        if (slash > 0 && IMAGE_EXTS.has(ext(f.path))) counts.set(f.path.slice(0, slash), (counts.get(f.path.slice(0, slash)) || 0) + 1);
+      }
+      if (mine !== round) return;
+      dirs.replaceChildren(...(counts.size ? [...counts.entries()].sort((x, y) => x[0].localeCompare(y[0], 'zh-CN', { numeric: true }))
+        .map(([dir, n]) => el('label', { class: 'check' }, el('input', { type: 'checkbox', value: dir }), `${dir}/（${n} 张图片）`))
+        : [el('p', { class: 'muted' }, `${v ? v.ref : ''} 的图片均位于顶层。`)]));
+      told();
+    }).catch((e) => { if (mine === round) { listed = null; dirs.replaceChildren(errorBox(e)); } });
+    return ready;
+  };
+  const versionChanged = () => {
+    round += 1;
+    listed = null;
+    dirs.replaceChildren();
+    told();
+    if (box.open) listDirs();
+  };
+  box.addEventListener('toggle', () => { if (box.open && listed !== `${what.value}@${version.value}`) listDirs(); });
+  const pick = () => {
+    round += 1;
+    const mine = round;
+    const split = !what.value.startsWith('@');
+    rows.forEach((r) => { r.hidden = split; });
+    version.replaceChildren();
+    listed = null;
+    dirs.replaceChildren();
+    told();
+    if (split) { ready = Promise.resolve(); return ready; }
+    const name = what.value.slice(1);
+    if (!versions.has(name)) versions.set(name, api.versions(name));
+    ready = versions.get(name).then((list) => {
+      if (mine !== round) return;
+      const newest = list.slice().reverse();
+      version.replaceChildren(...newest.map((v, i) => el('option', { value: String(v.number) },
+        v.ref + ((v.labels || []).length ? `（${v.labels.join('、')}）` : '') + (i ? '' : '（最新）'))));
+      if (box.open) return listDirs();
+      return undefined;
+    });
+    return ready;
+  };
+  version.addEventListener('change', versionChanged);
+  what.addEventListener('change', () => { pick().catch((e) => dirs.replaceChildren(errorBox(e))); });
+  if (chosen) what.value = splits.some(([v]) => v === chosen) ? chosen : `@${chosen}`;
+  if (!what.value && what.options.length) what.selectedIndex = 0;
+  pick().catch((e) => dirs.replaceChildren(errorBox(e)));
+  return {
+    rows: [what, ...rows],
+    value: async () => {
+      await ready;
+      if (!what.value) throw new Error('暂无可选的数据，请先建立数据集。');
+      if (!what.value.startsWith('@')) return { data: what.value, dirs: [] };
+      return { data: `${what.value.slice(1)}@${version.value}`, dirs: [...dirs.querySelectorAll('input:checked')].map((b) => b.value) };
+    },
+  };
+}
+
 // Forms for an evaluation or a prediction job of this model version on a GPU runner.
 async function submitForms(mv) {
   const runners = (await api.runners()).filter((r) => r.framework);
@@ -2027,7 +2127,7 @@ async function submitForms(mv) {
       const button = ev.target.querySelector('button');
       button.disabled = true;
       try {
-        const job = await api.submitJob(kind, runner.value, params());
+        const job = await api.submitJob(kind, runner.value, await params());
         location.hash = hrefOf(['job', String(job.id)], job.reused ? { reused: '1' } : null);
         if (!job.reused) toastDone(`已提交任务 ${job.id}`);
       } catch (e) {
@@ -2039,20 +2139,28 @@ async function submitForms(mv) {
       el('label', {}, '推理环境', runner), ...fields,
       el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, el('button', { class: 'primary', type: 'submit' }, '提交'))));
   };
-  const dirsOf = (input) => input.value.split(/[,，\n]/).map((d) => d.trim()).filter(Boolean);
-  const evalData = el('input', { type: 'text', placeholder: `例如 ${mv.trainset.ref}:test 或 数据池名称@3` });
-  evalData.value = `${mv.trainset.ref}:test`;
-  const evalDirs = el('input', { type: 'text', placeholder: '数据池版本中的目录，以逗号分隔；留空表示全部' });
-  const predData = el('input', { type: 'text', placeholder: '数据池版本，例如 SES-TX@5' });
-  const predDirs = el('input', { type: 'text', placeholder: '目录，以逗号分隔；留空表示全部图片' });
+  const place = { site: mv.site, line: mv.line };
+  const [all, bench] = await Promise.all([api.datasets(), api.benchmark(mv.site, mv.line).catch(() => null)]);
+  const splits = mv.trainset ? [[`${mv.trainset.ref}:test`, `${mv.trainset.ref} 的 test 划分`], [`${mv.trainset.ref}:val`, `${mv.trainset.ref} 的 val 划分`]] : [];
+  const benchmark = bench && bench.current && bench.current.latest ? bench.current.dataset : '';  // the line's, compared on the overview
+  const evalData = dataPicker('eval', all, { splits, place, chosen: benchmark || (splits[0] || [])[0] });
+  const predData = dataPicker('predict', all.filter((d) => d.kind === 'pool'), { place });
   const predConf = el('input', { type: 'text', class: 'short', value: '0.1' });
+  const [evalWhat, ...evalRows] = evalData.rows;
+  const [predWhat, ...predRows] = predData.rows;
+  const conf = () => {
+    const c = Number(predConf.value);
+    if (!(c > 0 && c < 1)) throw new Error('最低分数 conf 须在 0 和 1 之间，例如 0.1。');
+    return c;
+  };
   return [el('h2', {}, '提交任务'), el('div', { class: 'forms' },
-    form('评估', 'eval', [el('label', {}, '测试数据', evalData), el('label', {}, '目录', evalDirs)],
-      () => ({ model: mv.ref, data: evalData.value.trim(), dirs: dirsOf(evalDirs) }),
-      ['在 GPU 机上使用 TensorRT 运行该模型，并用 aoi-deteval 计算指标，结果登记为评估报告。',
-        '测试数据为训练集快照时，须写明划分（如 :test）；为数据池版本时，可指定目录。']),
-    form('预标注（推理）', 'predict', [el('label', {}, '数据', predData), el('label', {}, '目录', predDirs), el('label', {}, '最低分数 conf', predConf)],
-      () => ({ model: mv.ref, data: predData.value.trim(), dirs: dirsOf(predDirs), conf: Number(predConf.value) }),
+    form('评估', 'eval', [field('测试数据', evalWhat, ['默认为该产线的基准测试集（概览上比较模型所用）；未设定时为训练集快照的 test 划分。',
+      '只有对基准测试集最新版本的整份评估会出现在产线概览的模型比较中。对应 fw eval run --data。']), ...evalRows],
+      async () => ({ model: mv.ref, ...(await evalData.value()) }),
+      ['在 GPU 机上使用 TensorRT 运行该模型，并用 aoi-deteval 计算指标，结果登记为评估报告。']),
+    form('预标注（推理）', 'predict', [field('数据池', predWhat, '该模型所在产线的数据池列在前面。对应 fw predict run --data。'), ...predRows,
+      el('label', {}, '最低分数 conf', predConf)],
+      async () => ({ model: mv.ref, ...(await predData.value()), conf: conf() }),
       ['对数据池版本中的图片进行推理，结果保存为预测集。',
         '若相同的模型版本、推理环境、图片和 conf 已有结果，将直接复用，不再重复运行。']))];
 }
@@ -3557,8 +3665,47 @@ function compareTable(c, limit = 200) {
     c.uncompared ? el('p', { class: 'muted' }, `另有 ${c.uncompared} 张图片因标注过多，未比较。`) : null);
 }
 
+// Every model version, with the site and line of its model.
+async function allModelVersions() {
+  const models = await api.models();
+  const lists = await Promise.all(models.map((m) => api.modelVersions(m.name)
+    .then((list) => list.map((v) => ({ ...v, site: m.site, line: m.line })))));
+  return lists.flat();
+}
+
+// The model versions a batch can be pre-labelled with: the line's released one first, then the versions of the
+// line, of the other lines of its site and of the other sites, the latest registered first, the deprecated ones
+// left out. Without a release nothing is chosen until one is picked.
+export function prelabelChoices(versions, { model, site, line } = {}) {
+  const same = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
+  const released = model ? model.ref : '';
+  const offered = versions.filter((v) => v.ref !== released && !(v.tags || []).includes('deprecated')).sort((a, b) => b.id - a.id);
+  const groups = [
+    ['本产线', offered.filter((v) => same(v.site, site) && same(v.line, line))],
+    ['同一现场的其他产线', offered.filter((v) => same(v.site, site) && !same(v.line, line))],
+    ['其他现场', offered.filter((v) => !same(v.site, site))],
+  ].filter(([, list]) => list.length);
+  return { released, groups };
+}
+
+function prelabelModels(versions, d) {
+  const { released, groups } = prelabelChoices(versions, d);
+  const text = (v, here) => v.ref + ((v.labels || []).length ? `（${v.labels.join('、')}）` : '') + (here ? '' : ` · ${v.site}/${v.line}`);
+  const shown = versions.find((v) => v.ref === released);
+  const here = (v) => (v.site || '').toLowerCase() === (d.site || '').toLowerCase() && (v.line || '').toLowerCase() === (d.line || '').toLowerCase();
+  const select = el('select', { id: 'prelabel-model', 'aria-label': '模型版本' },
+    released ? el('optgroup', { label: '当前发布' }, el('option', { value: released },
+      `${shown ? text(shown, here(shown)) : released} · 当前发布`))
+      : el('option', { value: '' }, groups.length ? '请选择模型版本' : '暂无可选的模型版本'),
+    groups.map(([label, list]) => el('optgroup', { label }, list.map((v) => el('option', { value: v.ref }, text(v, label === '本产线'))))));
+  select.value = released;
+  select.disabled = !released && !groups.length;
+  return select;
+}
+
 async function batchPage(name, query) {
   const show = live();
+  let modelVersions = null;  // every model version, read once per visit: the page redraws while a pre-label runs
   const msg = el('div');
   const say = (e) => msg.replaceChildren(errorBox(e));
   const draw = async () => {
@@ -3583,22 +3730,24 @@ async function batchPage(name, query) {
     }
     if (has('prelabel')) {
       const d = pre.defaults;
-      const model = el('input', { type: 'text', id: 'prelabel-model', value: d.model ? d.model.ref : '',
-        placeholder: '模型版本，例如 det-ses@3' });
+      if (!modelVersions) modelVersions = allModelVersions().catch((e) => { modelVersions = null; throw e; });
+      const versions = await modelVersions;
+      const model = prelabelModels(versions, d);
       const runner = el('select', { id: 'prelabel-runner' }, d.runners.map((r) => el('option', { value: r }, r)));
       const conf = el('input', { type: 'text', id: 'prelabel-conf', class: 'short', placeholder: '0.1' });
       forms.push(el('div', { class: 'panel form', id: 'prelabel-form' },
         el('h3', {}, '预标注', info([`由模型为第 ${b.revision} 版的图片预先画框，任务在 GPU 机上排队运行；完成后，使用 fw batch get ${b.name} --prelabel 取回到本地修改。`,
           d.model ? `默认使用 ${d.site}/${d.line} 当前发布的模型（${d.model.release}）。` : '',
           '预标注结果不会自动写入批次，修改后需重新上传。'], '预标注说明')),
-        d.model ? null : el('p', { class: 'muted' }, `${d.site}/${d.line} 尚未登记发布，请填写模型版本。`),
+        d.model ? null : el('p', { class: 'muted' }, d.site ? `${d.site}/${d.line} 尚未登记发布，请选择模型版本。` : '请选择模型版本。'),
         el('label', {}, '模型版本', model),
         d.runners.length ? el('label', {}, '推理环境', runner) : el('p', { class: 'bad' }, '暂无可用的推理环境，请联系算法工程师在 GPU 机上登记。'),
         el('label', {}, '最低分数', conf),
-        el('div', { class: 'row' }, el('button', { id: 'prelabel-go', disabled: !d.runners.length, onclick: act(async () => {
+        el('div', { class: 'row' }, el('button', { id: 'prelabel-go', disabled: !d.runners.length || model.disabled, onclick: act(async () => {
+          if (!model.value) throw new Error('请选择模型版本。');
           const c = conf.value.trim();
           if (c && !(Number(c) > 0 && Number(c) < 1)) throw new Error('最低分数须在 0 和 1 之间。');
-          return api.prelabelBatch(b.name, { model: model.value.trim() || null, runner: runner.value || null,
+          return api.prelabelBatch(b.name, { model: model.value, runner: runner.value || null,
             conf: c ? Number(c) : null, revision: b.revision });
         }, '已提交预标注任务') }, '运行预标注'))));
     }

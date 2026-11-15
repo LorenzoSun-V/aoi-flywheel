@@ -177,7 +177,11 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
     assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
-    assert 'nope' in seen['refused']
+    assert seen['refused'] == '最低分数 conf 须在 0 和 1 之间，例如 0.1。'
+    assert seen['evalData']['value'] == f'{snapshot["ref"]}:test' and not seen['evalData']['versionShown']
+    assert seen['evalData']['groups'][0] == '训练集快照' and '数据池' in seen['evalData']['groups']  # other tests' sets too
+    assert seen['poolOffered'] and seen['dirs'] == ['A/（3 张图片）', 'B/（1 张图片）']   # picked, not typed
+    assert seen['version'] == ['1', [f'{data}（最新）']]
     job_id = int(seen['job'].split('/')[-1])
     assert seen['job'] == f'/job/{job_id}' and '排队' in seen['jobText'] and data in seen['jobText'] and seen['cancel']
     job = api.job(job_id)
@@ -255,6 +259,71 @@ def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens
     assert seen['models']['names'] == sorted(models.values(), reverse=True)
     assert seen['models']['sorted'] == [['名称', 'descending']]
     assert seen['modelsBack']['sorted'] == [] and seen['modelsBack']['names'] == sorted(models.values())  # the server's order again
+
+
+@pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
+def test_evaluations_start_on_the_benchmark_and_data_is_picked_not_typed(service, tokens, api, make_api, gpu, snapshot, tmp_path):  # noqa: F811
+    """The evaluation form of a model version starts on its line's benchmark test set (the one the overview compares
+    on), with its versions to pick, and reads the folders of a version only when they are asked for. A batch's
+    pre-labelling form offers its line's release first, even of another line's model, then the model versions of
+    every line, the deprecated ones left out; with no release it chooses nothing until one is picked."""
+    from test_evals import add_runner, trained
+    from test_models import release
+    from test_trainsets import add_version
+    from fw import ops
+    from helpers import quiet, register_place, write
+    site = f'K{os.urandom(3).hex().upper()}'
+    for line in ('L1', 'L2', 'L3'):
+        register_place(site, line)
+    seed = int.from_bytes(os.urandom(2), 'big')
+    bench = f'{site}-test'
+    api.create_dataset(bench, site, 'L1', 'test', '')
+    add_version(api, tmp_path, bench, {f'D{d}/img{i}.{x}': (real_png(64, 32, seed + 10 * d + i) if x == 'png' else label('scratch'))
+                                       for d in (1, 2) for i in range(d) for x in ('png', 'json')})
+    api.set_benchmark(f'{site}/L1', bench)
+    name, own = f'{site}-det', f'{site}-L3det'
+    api.create_model(name, site, 'L1', 'det', '')
+    api.create_model(own, site, 'L3', 'det', '')
+    old, mv = trained(api, name, snapshot, tmp_path), trained(api, name, snapshot, tmp_path)
+    mv3 = trained(api, own, snapshot, tmp_path)
+    api.set_tag(name, old['number'], 'deprecated', True, '漏检较多')
+    for line in ('L2', 'L3'):  # the lines deploy the model of L1
+        release(make_api('field'), mv['ref'], '2026-11-01T10:00:00+08:00', site=site, line=line)
+    r = add_runner(gpu)
+    batches = []
+    for i, line in enumerate(('L1', 'L2', 'L3')):
+        pool_name = pool(api, tmp_path / f'p{i}', {'20261101/a.png': real_png(64, 32, seed + 100 + i)}, site=site, line=line)
+        folder = tmp_path / f'f{i}' / '20261102'
+        write(folder, 'x.png', real_png(64, 32, seed + 200 + i))
+        batches.append(ops.upload_batch(make_api('field'), folder, pool_name, '张三', echo=quiet)['name'])
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run(['node', str(WEB_TESTS / 'picks.cjs'), service.url + '/', tokens['algo'], tokens['field'], mv['ref'], bench,
+                          r['ref'], ','.join(batches), str(shots)], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['before'] == {'manifests': 0, 'dirs': 0, 'said': '全部图片'}   # nothing read until asked
+    assert seen['eval']['data'] == f'@{bench}' and seen['eval']['versions'] == [f'{bench}@1（最新）']
+    assert seen['eval']['dirs'] == ['D1/（1 张图片）', 'D2/（2 张图片）'] and seen['eval']['typed'] == ['short']
+    assert seen['said'] == '已选 1 个目录'
+    job = api.job(seen['job'])
+    assert job['kind'] == 'eval' and job['params']['data']['ref'] == f'{bench}@1' and job['params']['data']['dirs'] == ['D2']
+    assert job['params']['data']['images'] == 2 and job['params']['model']['ref'] == mv['ref']
+    assert seen['split'] == [True, True]
+    api.cancel_job(seen['job'])
+
+    groups = lambda form: dict(form['groups'])  # noqa: E731
+    l1, l2, l3 = seen['prelabel']
+    # no release: the line's versions are offered, nothing chosen, and a click asks for one
+    assert l1['value'] == '' and l1['first'] == '请选择模型版本' and l1['hint'] == f'{site}/L1 尚未登记发布，请选择模型版本。'
+    assert groups(l1)['本产线'] == [mv['ref']] and mv3['ref'] in groups(l1)['同一现场的其他产线']   # old is deprecated
+    assert '当前发布' not in groups(l1) and l1['refused'] == '请选择模型版本。'
+    # a release of another line's model: chosen, first, said
+    assert l2['value'] == mv['ref'] and l2['chosen'].endswith(' · 当前发布') and l2['hint'] is None and not l2['go']
+    assert l2['groups'][0] == ['当前发布', [mv['ref']]] and '本产线' not in groups(l2) and 'refused' not in l2
+    assert l3['value'] == mv['ref'] and groups(l3)['本产线'] == [mv3['ref']] and not l3['go']
+    assert all(old['ref'] not in refs for form in (l1, l2, l3) for _, refs in form['groups'])
 
 def write_tree(root: Path, files: dict) -> Path:
     for rel, data in files.items():
