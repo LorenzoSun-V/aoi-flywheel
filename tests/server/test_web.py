@@ -89,6 +89,9 @@ def test_a_walk_through_the_pages(service, tokens, api, tmp_path):
     assert seen['versions'] == ['@2', '@1']
     assert [f.split()[0] for f in seen['folders']] == ['A', 'B', 'C']
     assert seen['tiles'] == 4 and seen['labeled'] == 3
+    # the tiles show thumbnails made by the server, not the images themselves (a field BMP is a few MB)
+    assert seen['tileFetches'].count('thumb') == 4 and 'object' not in seen['tileFetches'][1:]
+    assert seen['tileSizes'] == [[200, 100]] * 4  # never enlarged
     assert 'scratch × 1' in seen['image'] and 'dent × 1' in seen['image'] and '未确认' in seen['image']
     assert seen['canvas'] == [200, 100]
     assert seen['hashchanges'] == 1  # one arrow key, one page: not one per image page seen before
