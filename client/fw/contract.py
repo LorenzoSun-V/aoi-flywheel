@@ -272,8 +272,9 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
 #      POST /datasets/<name>/classes; versions and batches of a pool are refused if they do not fit it
 #  11  latest_check of POST /datasets/<name>/classes says how far it looked: checked, total, complete
 #  12  a line's benchmark test set (GET and POST /sites/benchmark); labelling batches go into data pools only
+#  13  thumbnails of image objects (GET /objects/<sha256>/thumb?size=)
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 12
+API_LEVEL = 13
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 

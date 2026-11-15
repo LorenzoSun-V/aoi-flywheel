@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -17,7 +17,7 @@ from fw.contract import (API_HEADER, API_LEVEL, MIN_CLIENT_LEVEL, peer_level)
 from fw.contract import (BATCH_OBJECT_MAX, JUNK_NAMES, MAX_PATH_BYTES, OBJECTS_MAGIC, OBJECTS_TYPE, ContractError,
                          FrameParser, ObjectTooLarge, blocking_reasons, classify_paths, frame_header)
 
-from . import __version__, auth, batches, changes, datasets, db, evals, events, jobs, models, predictions, trainsets
+from . import __version__, auth, batches, changes, datasets, db, evals, events, jobs, models, predictions, thumbs, trainsets
 from .datasets import DatasetError, check_digest
 from .settings import Settings
 from .store import BadContent, Store, StoreError
@@ -659,6 +659,19 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
                 yield bytes(out)
 
         return StreamingResponse(stream(), media_type=OBJECTS_TYPE, headers={'Content-Length': str(length)})
+
+    @app.get('/api/v1/objects/{digest}/thumb')
+    def get_thumbnail(digest: str, size: int = 256, user: dict = Depends(downloader)):
+        """A JPEG preview of an image object, its longer side at most size (see thumbs)."""
+        check_digest(digest)
+        try:
+            path, data = thumbs.thumbnail(store, digest, size)
+        except thumbs.ThumbError as e:
+            raise HTTPException(e.status, e.message)
+        headers = {'Cache-Control': 'private, max-age=31536000, immutable'}
+        if path is not None:
+            return FileResponse(path, media_type='image/jpeg', headers=headers)
+        return Response(data, media_type='image/jpeg', headers=headers)
 
     @app.get('/api/v1/objects/{digest}')
     def get_object(digest: str, user: dict = Depends(downloader)):

@@ -247,6 +247,7 @@ export const api = {
   addModelLabel: (name, number, label, note) => call(`/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(number)}/labels`, { method: 'POST', body: { label, note } }),
   diff: (oldId, newId) => call(`/diff?old=${oldId}&new=${newId}`),
   object: (digest) => call(`/objects/${digest}`, { raw: true }),
+  thumb: (digest, size) => call(`/objects/${digest}/thumb?size=${size}`, { raw: true }),
   models: (query = {}) => call(`/models?${new URLSearchParams(query)}`),
   model: (name) => call(`/models/${encodeURIComponent(name)}`),
   modelVersions: (name) => call(`/models/${encodeURIComponent(name)}/versions`),
@@ -377,7 +378,28 @@ async function blobUrl(digest) {
   return got;
 }
 
-// Chrome and Firefox show no TIFF; such images get a note instead of a broken picture.
+// Object URLs of thumbnails (a few kB each, made by the server), kept the same way, more of them. The size
+// fits a tile of the grid on the screen at hand.
+const THUMBS = 1000;
+const thumbs = new Map();
+const thumbSize = () => ((globalThis.devicePixelRatio || 1) > 1.25 ? 512 : 256);
+
+async function thumbUrl(digest) {
+  let got = thumbs.get(digest);
+  if (got) thumbs.delete(digest);
+  else got = api.thumb(digest, thumbSize()).then((r) => r.blob()).then((b) => URL.createObjectURL(b));
+  thumbs.set(digest, got);
+  while (thumbs.size > THUMBS) {
+    const [old, url] = thumbs.entries().next().value;
+    thumbs.delete(old);
+    url.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  }
+  got.catch(() => thumbs.delete(digest));
+  return got;
+}
+
+// Chrome and Firefox show no TIFF; such images get a note instead of a broken picture (their thumbnails, made
+// by the server, show).
 export const shownByBrowsers = (path) => !['.tif', '.tiff'].includes(ext(path));
 const NO_TIFF = '浏览器无法显示 TIFF 图片，请下载后使用 LiteAnno 查看。';
 
@@ -1016,13 +1038,14 @@ export function listDir(files, dir) {
   return { folders: [...folders.entries()].sort((x, y) => x[0].localeCompare(y[0])), images };
 }
 
+// The thumbnail of an image file, fetched once the tile comes into view; on a refusal (not an image, too
+// large) the tile says so and its whole reason shows on pointing.
 function lazyThumb(img, file) {
-  if (!shownByBrowsers(file.path)) { img.alt = 'TIFF（浏览器无法显示）'; return; }
   const digest = file.sha256;
   const io = new IntersectionObserver((seen) => {
     if (seen.some((s) => s.isIntersecting)) {
       io.disconnect();
-      blobUrl(digest).then((u) => { img.src = u; }).catch(() => { img.alt = '无法读取'; });
+      thumbUrl(digest).then((u) => { img.src = u; }).catch((e) => { img.alt = '无法生成缩略图'; img.title = e.message || ''; });
     }
   });
   io.observe(img);
