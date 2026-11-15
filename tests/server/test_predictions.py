@@ -4,12 +4,14 @@ The GPU machine is the fake one of test_evals (fake conda, onnx2engine, nvidia-s
 image gets a box of class 0 at (1, 2)-(30, 40) scoring 0.9 and one of a class beyond the model's (left out)."""
 import json
 import os
+import uuid
 
 import pytest
 
-from helpers import quiet
+from helpers import quiet, register_place
 from fw import cli as fw_cli
 from fw import ops, worker
+from fw.api import ApiError
 from fw.cache import Cache
 
 from test_evals import add_runner, gpu, trained  # noqa: F401  (fixtures)
@@ -355,3 +357,52 @@ def test_pre_label_defaults(api, make_api, gpu, setup, tmp_path):  # noqa: F811
     job = field.prelabel_batch(b['name'], {'runner': r['runner']})
     assert job['params']['model']['ref'] == d['model']['ref'] and job['params']['data']['ref'] == f'{b["name"]}@1'
     api.cancel_job(job['id'])
+
+
+def test_jobs_and_prediction_sets_are_listed_by_site_and_line(api, make_api, gpu, setup, snapshot, tmp_path):  # noqa: F811
+    _, data, r, _ = setup
+    site = f'Q{uuid.uuid4().hex[:6].upper()}'
+    made = {}
+    for line in ('L1', 'L2'):
+        register_place(site, line)
+        name = f'M-{uuid.uuid4().hex[:8]}'
+        api.create_model(name, site, line, 'det', '')
+        made[line] = trained(api, name, snapshot, tmp_path)
+    predict = api.submit_job('predict', runner=r['runner'], params={'model': made['L1']['ref'], 'data': data, 'dirs': ['A']})
+    set_id = run_job(api, gpu, predict)['result']['prediction_set']
+    evaluation = make_api('admin').submit_job('eval', runner=r['runner'],
+                                              params={'model': made['L2']['ref'], 'data': data, 'dirs': ['A']})
+    check = api.submit_job('check', runner=r['runner'])
+
+    def jobs(**q):
+        return [j['id'] for j in api.get('/jobs', **q)['jobs']]
+    assert jobs(site=site) == [evaluation['id'], predict['id']]       # newest first; a check belongs to no line
+    assert jobs(site=site, line='L1') == [predict['id']] and jobs(site=site.lower(), line='l2') == [evaluation['id']]
+    assert jobs()[:3] == [check['id'], evaluation['id'], predict['id']]
+    assert jobs(site=site, status='done') == [predict['id']] and jobs(site=site, mine=True) == [predict['id']]
+    assert jobs(site='SES', line='TX', limit=1000).count(predict['id']) == 0
+    page = api.get('/jobs', site=site, limit=1)                      # older pages: before = the last id shown
+    assert [j['id'] for j in page['jobs']] == [evaluation['id']] and page['more'] is True
+    page = api.get('/jobs', site=site, limit=1, before=evaluation['id'])
+    assert [j['id'] for j in page['jobs']] == [predict['id']] and page['more'] is False
+
+    def sets(**q):
+        return [s['id'] for s in api.get('/predictions', **q)['prediction_sets']]
+    assert sets(site=site) == [set_id] and sets(site=site, line='L1', model=made['L1']['model']) == [set_id]
+    assert sets(site=site, line='L2') == [] and set_id not in sets(site='SES', line='TX')
+
+
+def test_the_lists_of_jobs_and_prediction_sets_say_what_they_cannot_answer(api, make_api, setup):
+    for role in ('field', 'deploy'):                                 # the jobs list is for who runs jobs
+        with pytest.raises(ApiError) as e:
+            make_api(role).get('/jobs', site='SES', mine=True)
+        assert e.value.status == 403
+    with pytest.raises(ApiError) as e:
+        api.get('/jobs', status='lost')
+    assert e.value.status == 400 and '状态只能是' in str(e.value)
+    with pytest.raises(ApiError) as e:
+        api.get('/jobs', before='latest')
+    assert e.value.status == 422
+    with pytest.raises(ApiError) as e:
+        api.get('/predictions', model='no-such-model', site='SES')
+    assert e.value.status == 404

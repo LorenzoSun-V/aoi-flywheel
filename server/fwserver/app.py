@@ -998,9 +998,9 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             return models.get_eval(c, eval_id)
 
     @app.get('/api/v1/predictions')
-    def list_prediction_sets(model: str = '', user: dict = Depends(data_reader)):
+    def list_prediction_sets(model: str = '', site: str = '', line: str = '', user: dict = Depends(data_reader)):
         with conn() as c:
-            return {'prediction_sets': predictions.list_sets(c, model)}
+            return {'prediction_sets': predictions.list_sets(c, model, site, line)}
 
     @app.get('/api/v1/predictions/{set_id}')
     def get_prediction_set(set_id: int, user: dict = Depends(data_reader)):
@@ -1060,9 +1060,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
             return {'versions': jobs.runner_versions(c, name)}
 
     @app.get('/api/v1/jobs')
-    def list_jobs(status: str = '', limit: int = 50, user: dict = Depends(job_reader)):
+    def list_jobs(status: str = '', limit: int = 50, before: Optional[int] = None, site: str = '', line: str = '',
+                  mine: bool = False, user: dict = Depends(job_reader)):
+        """Newest first; more: there are older ones (ask again with before = the last id). mine: the account's own."""
         with conn() as c:
-            return {'jobs': jobs.list_jobs(c, status, limit)}
+            rows, more = jobs.list_jobs(c, status, limit, before, site, line, user['user_id'] if mine else None)
+            return {'jobs': rows, 'more': more}
 
     @app.post('/api/v1/jobs', status_code=201)
     def submit_job(body: JobBody, user: dict = Depends(job_writer)):
