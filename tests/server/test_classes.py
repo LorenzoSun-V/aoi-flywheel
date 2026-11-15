@@ -76,10 +76,10 @@ def test_a_pool_without_a_class_table_takes_no_upload(api, make_api, tmp_path):
     api.create_dataset(name, 'SES', 'TX', 'pool', '')  # as an fw from before the tables still can
     assert api.dataset(name)['classes'] == []
     root = folder(tmp_path, {'a.png': image(), 'a.json': label('scratch')})
-    with pytest.raises(ApiError, match=f'数据池 {name} 还没有类别表；请先在网页的数据池页面填写类别表') as e:
+    with pytest.raises(ApiError, match=f'数据池 {name} 尚无类别表；请先在网页的数据池页面填写类别表') as e:
         ops.import_folder(api, name, root, echo=quiet)
     assert e.value.status == 400
-    with pytest.raises(ApiError, match='还没有类别表'):
+    with pytest.raises(ApiError, match='尚无类别表'):
         ops.upload_batch(make_api('field'), root, name, '张三', name=f'B-{uuid.uuid4().hex[:8]}', echo=quiet)
     api.add_classes(name, CLASSES)
     assert ops.import_folder(api, name, root, echo=quiet)['number'] == 1
@@ -154,7 +154,7 @@ def test_classes_are_only_added_at_the_end_of_the_table(api, make_api, tokens):
     out = api.add_classes(name, ['crack', '异物'])
     assert out['added'] == ['crack', '异物'] and out['latest_check'] is None
     assert out['dataset']['classes'] == api.dataset(name)['classes'] == ['scratch', 'dent', 'crack', '异物']
-    for names, message in ((['Crack'], '类别表里已有 crack，不能再加 Crack'), (['a', 'A'], 'a 和 A 重复'),
+    for names, message in ((['Crack'], '类别表中已有 crack，不能再添加 Crack'), (['a', 'A'], 'a 和 A 重复'),
                            ([], '请填写类别'), ([' a'], '首尾空格'), (['a\tb'], '制表符'), (['x' * 129], '最多 128'),
                            ([1], '类别名不能为空'), ([f'c{i}' for i in range(997)], '最多 1000 个')):
         with pytest.raises(ApiError, match=message) as e:

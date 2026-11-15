@@ -40,7 +40,7 @@ def _onnx(conn, mv: dict) -> List[list]:
     files = models.fileset_files(conn, mv['fileset_id'])
     onnx = [f for f in files if f['path'] == 'model.onnx']
     if not onnx:
-        raise DatasetError(400, f'{mv["ref"]} 没有 model.onnx，评不了')
+        raise DatasetError(400, f'{mv["ref"]} 没有 model.onnx，无法评估')
     return [['model.onnx', onnx[0]['sha256'], onnx[0]['size']]]
 
 
@@ -54,8 +54,8 @@ def _overlap(conn, mv: dict, images: List[tuple]) -> Optional[str]:
     if not seen:
         return None
     splits = sorted({s for _, s in seen})
-    return (f'选的图里有 {len(seen)} 张和训练集快照 {mv["trainset"]["ref"]} 的 {"、".join(splits)} 里的图内容相同'
-            f'（例如 {seen[0][0]}），这些图的结果会偏好')
+    return (f'所选图片中有 {len(seen)} 张与训练集快照 {mv["trainset"]["ref"]} 的 {"、".join(splits)} 中的图片内容相同'
+            f'（例如 {seen[0][0]}），这些图片的评估结果会偏高')
 
 
 def _same_classes(conn, version: dict, mv: dict) -> None:
@@ -64,8 +64,8 @@ def _same_classes(conn, version: dict, mv: dict) -> None:
     theirs = list(trainsets.info(conn, version['id'])['trainset']['classes'] or [])
     ours = list(mv['classes'] or [])
     if theirs != ours:
-        raise DatasetError(400, f'{version["ref"]} 的类别表（{"、".join(theirs)}）和模型 {mv["ref"]} 的（{"、".join(ours)}）'
-                                '不一样（顺序也要一样），快照里 txt 的类别编号会对错类别；用和模型相同的类别表建快照再评')
+        raise DatasetError(400, f'{version["ref"]} 的类别表（{"、".join(theirs)}）和模型 {mv["ref"]} 的类别表（{"、".join(ours)}）'
+                                '不一致（顺序也须一致），快照中 txt 的类别编号将对应到错误的类别；请用与模型相同的类别表建立快照后再评估')
 
 
 def _known_names(store: Store, files: List[tuple], mv: dict) -> None:
@@ -81,7 +81,7 @@ def _known_names(store: Store, files: List[tuple], mv: dict) -> None:
         seen.add(digest)
         data = store.read(digest)
         if data is None:
-            raise DatasetError(503, f'服务器上没有 {path} 的内容，先运行 fw-server verify')
+            raise DatasetError(503, f'服务器上缺少 {path} 的内容，请先运行 fw-server verify')
         try:
             parsed = formats.parse_json(data.decode('utf-8-sig'))
         except UnicodeDecodeError:
@@ -94,12 +94,12 @@ def _known_names(store: Store, files: List[tuple], mv: dict) -> None:
                 unknown.setdefault(box.name, path)
     problems = []
     if bad:
-        problems.append(f'{len(bad)} 个标注读不了：{"；".join(bad[:3])}')
+        problems.append(f'{len(bad)} 个标注无法读取：{"；".join(bad[:3])}')
     if unknown:
-        problems.append(f'标注里有模型 {mv["ref"]} 类别表（{"、".join(mv["classes"] or [])}）里没有的类别：'
+        problems.append(f'标注中有模型 {mv["ref"]} 类别表（{"、".join(mv["classes"] or [])}）中没有的类别：'
                         + '、'.join(f'{n}（例如 {p}）' for n, p in list(unknown.items())[:5]))
     if problems:
-        raise DatasetError(400, '评不了：' + '；'.join(problems))
+        raise DatasetError(400, '无法评估：' + '；'.join(problems))
 
 
 def submit(conn, store: Store, user: dict, runner: Optional[str], params: Optional[dict]) -> dict:
@@ -108,26 +108,26 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     params = dict(params or {})
     unknown = sorted(set(params) - {'model', 'data', 'dirs'})
     if unknown:
-        raise DatasetError(400, f'评估任务不认识这些参数：{"、".join(unknown)}')
-    mv = models.get_model_version(conn, *_ref(params.get('model'), '评哪个模型版本'))
+        raise DatasetError(400, f'评估任务不支持以下参数：{"、".join(unknown)}')
+    mv = models.get_model_version(conn, *_ref(params.get('model'), '评估的模型版本'))
     data_ref, _, split = str(params.get('data') or '').partition(':')
-    version = datasets.get_version(conn, *_ref(data_ref, '在哪个数据集版本上评'))
+    version = datasets.get_version(conn, *_ref(data_ref, '评估所用的数据集版本'))
     if version['kind'] == 'batch':
-        raise DatasetError(400, f'{version["ref"]} 是还没入库的标注批次，不能当测试集')
+        raise DatasetError(400, f'{version["ref"]} 是尚未入库的标注批次，不能作为测试集')
     snapshot = version['kind'] == 'trainset'
     dirs = params.get('dirs') or []
     if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):
-        raise DatasetError(400, '目录写成一个文本列表')
+        raise DatasetError(400, '目录应为文本列表')
     if snapshot and not split:
-        raise DatasetError(400, f'{version["ref"]} 是训练集快照，要写评哪个划分，例如 {version["ref"]}:test')
+        raise DatasetError(400, f'{version["ref"]} 是训练集快照，须写明评估的划分，例如 {version["ref"]}:test')
     if snapshot and dirs:
-        raise DatasetError(400, '训练集快照按划分评，不选目录')
+        raise DatasetError(400, '训练集快照按划分评估，不能选择目录')
     if not snapshot and split:
-        raise DatasetError(400, f'{version["ref"]} 不是训练集快照，不用写划分；要评其中几个目录就用 --dirs')
+        raise DatasetError(400, f'{version["ref"]} 不是训练集快照，无需写划分；如需只评估其中几个目录，请用 --dirs')
     rv = jobs.find_runner(conn, runner, '评估')
     if not rv['framework']:
-        raise DatasetError(400, f'推理环境 {rv["ref"]} 登记时没写框架和 onnx2engine，评不了；'
-                                '在 GPU 机上带 --framework rfdetr --onnx2engine <程序> 再登记一次')
+        raise DatasetError(400, f'推理环境 {rv["ref"]} 登记时未填写框架和 onnx2engine，无法评估；'
+                                '请在 GPU 机上带 --framework rfdetr --onnx2engine <程序> 重新登记')
     onnx = _onnx(conn, mv)
     try:
         files, images, problems = eval_selection(datasets.version_files(conn, version['id']), snapshot, split, dirs)
@@ -135,9 +135,9 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     except ContractError as e:
         raise DatasetError(400, str(e)) from None
     if problems:
-        raise DatasetError(400, '评不了：' + '；'.join(problems))
+        raise DatasetError(400, '无法评估：' + '；'.join(problems))
     if not images:
-        raise DatasetError(400, f'{version["ref"]}{":" + split if split else ""} 里没有图片')
+        raise DatasetError(400, f'{version["ref"]}{":" + split if split else ""} 中没有图片')
     if snapshot:
         _same_classes(conn, version, mv)
     else:
@@ -159,7 +159,7 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
 
 
 def _note(p: dict, job_id: int) -> str:
-    return '；'.join([f'评估任务 {job_id}（{TOOL}，在推理环境 {p["runner"]["conda_env"]} 里）'] + p['warnings'])
+    return '；'.join([f'评估任务 {job_id}（{TOOL}，在推理环境 {p["runner"]["conda_env"]} 中）'] + p['warnings'])
 
 
 def finish(conn, store: Store, job_id: int, token: str, outcome: str, result: Any = None, error: str = '') -> dict:
@@ -175,7 +175,7 @@ def finish(conn, store: Store, job_id: int, token: str, outcome: str, result: An
             return jobs.finish(conn, job_id, token, 'cancelled')  # the accepted cancel stands: nothing registered
         if row['kind'] == 'eval' and outcome == 'done':
             if not isinstance(result, dict) or not isinstance(result.get('files'), list):
-                raise DatasetError(400, '评估结果里要有文件清单')
+                raise DatasetError(400, '评估结果中须包含文件清单')
             p = row['params']
             tool_version = result.get('tool_version') or ''
             e = models.register_eval(

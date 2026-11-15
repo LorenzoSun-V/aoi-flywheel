@@ -115,7 +115,7 @@ def _bad_name(name) -> bool:
 
 def _check_table(names: List[str], what: str) -> None:
     if not names:
-        raise DatasetError(400, f'{what}是空的')
+        raise DatasetError(400, f'{what}为空')
     if len(names) > MAX_CLASSES:
         raise DatasetError(400, f'{what}不能超过 {MAX_CLASSES} 个类别')
     for name in names:
@@ -123,12 +123,12 @@ def _check_table(names: List[str], what: str) -> None:
             raise DatasetError(400, f'类别名不能为空、不能有首尾空格、制表符或换行：{name!r}')
     dup = [n for n, c in Counter(names).items() if c > 1]
     if dup:
-        raise DatasetError(400, f'{what}里有重复的名称：{_examples(dup)}')
+        raise DatasetError(400, f'{what}中有重复的名称：{_examples(dup)}')
 
 
 def check_options(o: Options) -> None:
     if not o.sources:
-        raise DatasetError(400, '至少要一个来源版本（--from）')
+        raise DatasetError(400, '请至少指定一个来源版本（--from）')
     _check_table(o.classes, '类别表')
     if o.label_classes is not None:
         _check_table(o.label_classes, 'txt 标注的类别表（--label-classes）')
@@ -139,29 +139,29 @@ def check_options(o: Options) -> None:
             if _bad_name(old):
                 raise DatasetError(400, f'映射的源类别名不能为空、不能有首尾空格、制表符或换行：{old!r}')
             if new == old:
-                raise DatasetError(400, f'映射 {old}={new} 的源和目标一样，不用写')
+                raise DatasetError(400, f'映射 {old}={new} 的源和目标相同，无需填写')
             if new and new not in o.classes:
-                raise DatasetError(400, f'映射 {old}={new} 的目标 {new!r} 不在类别表里（要去掉这类框就写 {old}=）')
+                raise DatasetError(400, f'映射 {old}={new} 的目标 {new!r} 不在类别表中（如需去掉这类框，请写 {old}=）')
     if not 0 <= o.val < 1 or math.isnan(o.val):
         raise DatasetError(400, 'val 比例应在 0 到 1 之间（不含 1）')
     if not 0 <= o.test < 1 or math.isnan(o.test):
         raise DatasetError(400, 'test 比例应在 0 到 1 之间（不含 1）')
     if o.val + o.test >= 1:
-        raise DatasetError(400, 'val 和 test 的比例加起来要小于 1，不然 train 是空的')
+        raise DatasetError(400, 'val 和 test 的比例之和须小于 1，否则 train 为空')
     if o.test and o.merge_test:
-        raise DatasetError(400, '--merge-test 是把上一版的 test 分回 train/val，不能和 --test 比例一起用')
+        raise DatasetError(400, '--merge-test 将上一版的 test 分回 train/val，不能与 --test 比例同时使用')
     if o.test and o.split is not None:
-        raise DatasetError(400, '用了划分清单，就不能再用 --test 比例')
+        raise DatasetError(400, '使用划分清单时，不能再使用 --test 比例')
     if o.new_to not in NEW_TO:
         raise DatasetError(400, f'新样本的去向只能是 {"、".join(NEW_TO)}')
     if o.label_source is not None and o.label_source not in LABEL_SOURCES:
         raise DatasetError(400, f'标注来源只能是 {"、".join(LABEL_SOURCES)}，不是 {o.label_source!r}')
     if o.split is not None and (o.test_dirs or o.merge_test):
-        raise DatasetError(400, '用了划分清单，就不能再用 --test-dirs 或 --merge-test')
+        raise DatasetError(400, '使用划分清单时，不能再使用 --test-dirs 或 --merge-test')
     if o.split is not None:
         bad = sorted({s for s in o.split.values() if s not in SPLITS})
         if bad:
-            raise DatasetError(400, f'划分清单里只能写 {"、".join(SPLITS)}，有 {_examples(bad)}')
+            raise DatasetError(400, f'划分清单中只能写 {"、".join(SPLITS)}，有 {_examples(bad)}')
 
 
 # --- sources and samples ---------------------------------------------------------------------------
@@ -172,16 +172,16 @@ def _sources(conn, refs: List[str]) -> List[Tuple[dict, dict]]:
         version = datasets.get_version(conn, name, number)
         dataset = datasets.get_dataset(conn, name)
         if dataset['kind'] == 'trainset':
-            raise DatasetError(400, f'{version["ref"]} 是训练集快照，来源要用数据池版本')
+            raise DatasetError(400, f'{version["ref"]} 是训练集快照，来源须为数据池版本')
         if dataset['kind'] == 'batch':
-            raise DatasetError(400, f'{version["ref"]} 是还没入库的标注批次，来源要用数据池版本；批次复核通过并入库后再用')
+            raise DatasetError(400, f'{version["ref"]} 是尚未入库的标注批次，来源须为数据池版本；请在批次复核通过并入库后再使用')
         if not dataset['site'] or not dataset['line']:
-            raise DatasetError(400, f'{dataset["name"]} 没有填现场或产线，取出时的目录 <现场>/<产线>/ 定不下来；'
-                                    f'换一个填了现场和产线的数据集')
+            raise DatasetError(400, f'{dataset["name"]} 未填写现场或产线，无法确定取回时的目录 <现场>/<产线>/；'
+                                    f'请选择已填写现场和产线的数据集')
         out.append((version, dataset))
     seen = Counter(v['id'] for v, _ in out)
     if any(c > 1 for c in seen.values()):
-        raise DatasetError(400, '同一个来源版本写了两次')
+        raise DatasetError(400, '同一个来源版本重复出现')
     return out
 
 
@@ -225,14 +225,14 @@ def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[st
         orphans = sorted(f[0] for group in labels.values() for f in group if f[0] not in claimed)
         shared = sorted(path for path, n in claimed.items() if n > 1)
         if shared:  # e.g. labels/a.txt is next to an image labels/a.png and where YOLO looks for images/a.png
-            problems.append(f'{version["ref"]} 有 {len(shared)} 个标注同时配到了两张图（一张同目录同名、一张是 '
-                            f'images/ 下的），不知道是哪张的：{_examples(shared)}')
+            problems.append(f'{version["ref"]} 有 {len(shared)} 个标注同时对应两张图片（一张为同目录同名、一张为 '
+                            f'images/ 下的），无法确定属于哪一张：{_examples(shared)}')
         if orphans:
             problems.append(f'{version["ref"]} 有 {len(orphans)} 个标注没有对应的图片（同目录同名，或 YOLO 的 '
                             f'images/ 对应 labels/）：{_examples(orphans)}')
         twins = sorted(s for s, v in images.items() if len(v) > 1)
         if twins:
-            problems.append(f'{version["ref"]} 有 {len(twins)} 组同名不同扩展名的图片，标注对不上：{_examples(twins)}')
+            problems.append(f'{version["ref"]} 有 {len(twins)} 组同名不同扩展名的图片，无法对应标注：{_examples(twins)}')
         mixed, double = [], []
         chosen: Dict[str, Optional[File]] = {}
         for stem, found in candidates.items():
@@ -250,22 +250,22 @@ def _samples(conn, sources, label_source: Optional[str] = None) -> Tuple[Dict[st
                 pick = [f for f in found if f[0].lower().endswith('.' + label_source)]
             chosen[stem] = pick[0] if pick else None
         if mixed:
-            problems.append(f'{version["ref"]} 有 {len(mixed)} 张图同时有 JSON 和 txt 标注，不知道用哪个；'
-                            f'用 --label-source json 或 --label-source txt 选一种：{_examples(mixed)}')
+            problems.append(f'{version["ref"]} 有 {len(mixed)} 张图片同时有 JSON 和 txt 标注，无法确定使用哪一个；'
+                            f'请用 --label-source json 或 --label-source txt 选择一种：{_examples(mixed)}')
         if double:
-            problems.append(f'{version["ref"]} 有 {len(double)} 张图有两个同一种的标注（例如同目录一个 txt、'
-                            f'labels/ 下又一个），不知道用哪个：{_examples(double)}')
+            problems.append(f'{version["ref"]} 有 {len(double)} 张图片有两个同类型的标注（例如同目录一个 txt、'
+                            f'labels/ 下另有一个），无法确定使用哪一个：{_examples(double)}')
         for stem, imgs in images.items():
             if len(imgs) > 1 or stem not in chosen:
                 continue
             image = imgs[0]
             key = f'{site}/{line}/{image[0]}'
             if key in samples:
-                problems.append(f'两个来源都有 {key}（同一现场和产线的两个数据集里有同一路径）')
+                problems.append(f'两个来源都有 {key}（同一现场和产线的两个数据集中有相同路径）')
                 continue
             twin = stems.setdefault(f'{site}/{line}/{stem}', key)
             if twin != key:
-                problems.append(f'两个来源有同名不同扩展名的图片 {twin} 和 {key}，YOLO 标注会是同一个文件')
+                problems.append(f'两个来源有同名不同扩展名的图片 {twin} 和 {key}，其 YOLO 标注将是同一个文件')
                 continue
             samples[key] = Sample(key, site, line, image, chosen[stem])
     return samples, problems
@@ -283,7 +283,7 @@ def _parse(store: Store, label: File, o: Options):
     """A label with o.class_map applied and, for a .txt, numbered by o.classes; or why it cannot be used."""
     data = store.read(label[1])
     if data is None:
-        return '服务器上没有这个文件，先运行 fw-server verify'
+        return '服务器上缺少该文件，请先运行 fw-server verify'
     try:
         text = data.decode('utf-8-sig')
     except UnicodeDecodeError:
@@ -358,32 +358,32 @@ def _read_labels(store: Store, samples: Dict[str, Sample], o: Options) -> Tuple[
                 unknown[n].append(where)
     problems = []
     if unreadable:
-        problems.append(f'有 {len(unreadable)} 个标注读不了：{_examples(unreadable, 3)}')
+        problems.append(f'有 {len(unreadable)} 个标注无法读取：{_examples(unreadable, 3)}')
     if no_size:
-        problems.append(f'有 {len(no_size)} 个标注没有 imageWidth / imageHeight，图片尺寸也读不出来，'
-                        f'转不成 YOLO：{_examples(no_size, 3)}')
+        problems.append(f'有 {len(no_size)} 个标注没有 imageWidth / imageHeight，图片尺寸也无法读取，'
+                        f'无法转换为 YOLO：{_examples(no_size, 3)}')
     for name, where in sorted(unknown.items()):
-        problems.append(f'类别 {name!r} 不在类别表里，{len(where)} 个标注用到，例如 {_examples(where, 3)}')
+        problems.append(f'类别 {name!r} 不在类别表中，{len(where)} 个标注使用了该类别，例如 {_examples(where, 3)}')
     for kind, where in sorted(refused.items()):
-        problems.append(f'{len(where)} 个标注里有 {kind} 形状，不能当检测框（只收 rectangle、polygon、rotation），'
+        problems.append(f'{len(where)} 个标注中有 {kind} 形状，不能作为检测框（仅接受 rectangle、polygon、rotation），'
                         f'例如 {_examples(where, 3)}')
     if outside:
-        problems.append(f'{len(outside)} 个标注里有框完全在图片外面：{_examples(outside, 3)}')
+        problems.append(f'{len(outside)} 个标注中有框完全位于图片之外：{_examples(outside, 3)}')
     unused = sorted(set(o.class_map or ()) - {old for old, _ in moved})
     if unused:
-        problems.append(f'映射的源类别 {_examples(unused)} 在标注里一个框也没有（写错了？类别名区分大小写）')
+        problems.append(f'映射的源类别 {_examples(unused)} 在标注中没有任何框（请检查拼写；类别名区分大小写）')
     notices = []
     for (old, new), n in sorted(moved.items()):
-        notices.append(f'映射：{old} 的 {n} 个框算作 {new}' if new else f'映射：{old} 的 {n} 个框去掉，当背景')
+        notices.append(f'映射：{old} 的 {n} 个框计为 {new}' if new else f'映射：{old} 的 {n} 个框不保留，视为背景')
     if emptied:
-        notices.append(f'{len(emptied)} 张图的框全被映射去掉了，当没有框的背景图收进来：{_examples(emptied, 3)}')
+        notices.append(f'{len(emptied)} 张图片的框均被映射移除，作为无框的背景图收入：{_examples(emptied, 3)}')
     if o.label_classes is not None and not txt:
-        notices.append('没有用到 txt 标注，--label-classes 不起作用')
+        notices.append('未使用 txt 标注，--label-classes 不生效')
     if clipped:
-        notices.append(f'{clipped} 个框超出图片边界，已裁到图片内')
+        notices.append(f'{clipped} 个框超出图片边界，已裁剪到图片内')
     if as_box:
         kinds = '、'.join(f'{k} {n} 个' for k, n in sorted(as_box.items()))
-        notices.append(f'这些形状按外接矩形当检测框：{kinds}')
+        notices.append(f'以下形状按外接矩形作为检测框：{kinds}')
     return problems, notices
 
 
@@ -397,10 +397,10 @@ def _formats(store: Store, samples: Dict[str, Sample]) -> Dict[str, Optional[str
                 unsized.append(s.key)
     out: Dict[str, Optional[str]] = {'yolo': None, 'coco': None, 'json': None}
     if unsized:
-        out['coco'] = f'{len(unsized)} 张图读不出尺寸（只认 PNG、JPEG、BMP、GIF、TIFF、WebP 的文件头）：{_examples(unsized, 3)}'
+        out['coco'] = f'{len(unsized)} 张图片无法读取尺寸（仅识别 PNG、JPEG、BMP、GIF、TIFF、WebP 的文件头）：{_examples(unsized, 3)}'
     txt = [k for k in unsized if samples[k].parsed is not None and samples[k].parsed.kind == 'txt']
     if txt:  # their JSON is made from the YOLO boxes, which needs the image size
-        out['json'] = f'{len(txt)} 张图的标注是 YOLO txt，图片尺寸又读不出来，生成不了 LiteAnno JSON：{_examples(txt, 3)}'
+        out['json'] = f'{len(txt)} 张图片的标注为 YOLO txt，且图片尺寸无法读取，无法生成 LiteAnno JSON：{_examples(txt, 3)}'
     return out
 
 
@@ -410,7 +410,7 @@ def _latest_trainset(conn, name: str) -> Optional[dict]:
     if row is None:
         return None
     if row['kind'] != 'trainset':
-        raise DatasetError(409, f'{name} 已经是一个数据集的名称（数据集和训练集快照共用名称），换一个名称')
+        raise DatasetError(409, f'{name} 已是一个数据集的名称（数据集和训练集快照共用名称），请更换名称')
     latest = conn.execute('SELECT id FROM versions WHERE dataset_id = %s ORDER BY number DESC LIMIT 1',
                           (row['id'],)).fetchone()
     return datasets.get_version_by_id(conn, latest['id']) if latest else None
@@ -467,9 +467,9 @@ def _assign(samples: Dict[str, Sample], o: Options, previous: Optional[Dict[str,
         missing = sorted(k for k in samples if k not in o.split)
         extra = sorted(k for k in o.split if k not in samples)
         if missing:
-            problems.append(f'划分清单漏了 {len(missing)} 个样本：{_examples(missing, 3)}')
+            problems.append(f'划分清单遗漏了 {len(missing)} 个样本：{_examples(missing, 3)}')
         if extra:
-            problems.append(f'划分清单里有 {len(extra)} 个路径不在来源版本里：{_examples(extra, 3)}')
+            problems.append(f'划分清单中有 {len(extra)} 个路径不在来源版本中：{_examples(extra, 3)}')
         for k, s in samples.items():
             s.split = o.split.get(k, '')
         return {'mode': 'split-file', 'split_count': len(o.split)}, problems
@@ -494,7 +494,7 @@ def _assign(samples: Dict[str, Sample], o: Options, previous: Optional[Dict[str,
             samples[k].split = split
     unused = [d for d, n in used.items() if n == 0]
     if unused:
-        problems.append(f'--test-dirs 里的 {_examples(unused)} 没有任何样本（写错了？）')
+        problems.append(f'--test-dirs 里的 {_examples(unused)} 没有任何样本（请检查拼写）')
     rule = {'mode': 'continue' if previous is not None else 'fresh', 'val': o.val, 'test': o.test, 'seed': o.seed,
             'stratify': STRATIFY, 'test_dirs': dirs, 'merge_test': o.merge_test}
     if previous is not None:
@@ -600,7 +600,7 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         problems += collisions(e[0] for e in trainset_layout(entries, fmt))
         short_layout = [e[0] for e in trainset_layout(entries, fmt, short=True)]
         twins = sorted(p for p, n in Counter(short_layout).items() if n > 1)
-        problems += [f'取回时路径去掉现场/产线和 images 这层目录后重名（{fmt} 格式）：{p}'
+        problems += [f'取回时路径去掉现场/产线和 images 这一层目录后重名（{fmt} 格式）：{p}'
                      for p in twins + collisions(short_layout)]
     problems += _shared_labels(entries)
     return entries, blobs, sorted(set(problems))
@@ -616,7 +616,7 @@ def _shared_labels(entries: List[File]) -> List[str]:
         by_label = defaultdict(list)
         for path, _, _ in trainset_layout(images, fmt, short=True):
             by_label[fold(_stem(path))].append(path)
-        problems += [f'取回时路径去掉现场/产线和 images 这层目录后，同名不同扩展名的图片会共用一份标注（{fmt} 格式）：'
+        problems += [f'取回时路径去掉现场/产线和 images 这一层目录后，同名不同扩展名的图片将共用一份标注（{fmt} 格式）：'
                      f'{"、".join(group)}' for group in by_label.values() if len(group) > 1]
     return problems
 
@@ -672,21 +672,21 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     if o.class_map:
         rule['class_map'] = o.class_map
     if not samples:
-        problems.append('来源版本里没有图片')
+        problems.append('来源版本中没有图片')
     if o.require_labels:
         bare = sorted(k for k, s in samples.items() if s.label is None)
         if bare:
-            problems.append(f'要求每张图都有标注（--require-labels），有 {len(bare)} 张没有：{_examples(bare, 3)}')
+            problems.append(f'要求每张图片都有标注（--require-labels），有 {len(bare)} 张没有标注：{_examples(bare, 3)}')
     counts = _counts(samples, o.classes)
     available = _formats(store, samples)  # also gives the txt-labelled images their size
     _outputs(samples, o.classes, available['json'] is None)
     p = Plan(name, sources, latest, previous, samples, rule, counts, _changes(samples, prev_splits), problems,
              notices)
     if previous is not None and _previous_classes(conn, previous) != o.classes:
-        p.notices.append(f'类别表和 {previous["ref"]} 不一样，类别编号可能变了')
+        p.notices.append(f'类别表和 {previous["ref"]} 不同，类别编号可能已变化')
     empty = [split for split in ('train', 'val') if samples and not counts[split]['samples']]
     if empty:
-        p.notices.append(f'没有 {"、".join(empty)} 样本：只能当测试集用，不能直接训练（ultralytics 要 train 和 val）')
+        p.notices.append(f'没有 {"、".join(empty)} 样本：只能作为测试集使用，不能直接用于训练（ultralytics 需要 train 和 val）')
     if problems:
         return p
     p.formats = available
@@ -700,11 +700,11 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
     p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
     flat = trainset_flat(p.entries)[1]
     if flat:
-        p.notices.append(f'有 {len(flat)} 处文件名在平铺后会重名，这个快照取回时不能用默认的平铺目录（--format yolo），'
-                         f'只能用 --format yolo-tree 保留原目录；要平铺就先给文件改名：{_examples(flat, 3)}')
+        p.notices.append(f'有 {len(flat)} 处文件名在平铺后会重名，该快照取回时不能使用默认的平铺目录（--format yolo），'
+                         f'只能使用 --format yolo-tree 保留原目录；如需平铺，请先为文件改名：{_examples(flat, 3)}')
     if latest is not None and not p.problems and _same_content(conn, latest, p.entries) and \
             (_previous_rule(conn, latest) or {}).get('paths') == rule.get('paths'):  # a new layout is a change
-        p.problems.append(f'和 {latest["ref"]} 完全一样（样本、划分、标注和类别表都没变），不用建新快照')
+        p.problems.append(f'和 {latest["ref"]} 完全相同（样本、划分、标注和类别表均未变化），无需建立新快照')
     return p
 
 
@@ -731,13 +731,13 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
     this name the person saw in the preview: if another one was made meanwhile, nothing is created (409)."""
     loose = [ref for ref in o.sources if _parse_ref(ref)[1] == 'latest']  # a number or a label: one version for good
     if loose:
-        raise DatasetError(400, f'建快照时来源要写成具体版本（预览时定下的那个），例如 名称@3：{_examples(loose)}')
+        raise DatasetError(400, f'建立快照时，来源须写为具体版本（即预览时确定的版本），例如 名称@3：{_examples(loose)}')
     p = plan(conn, store, name, o)
     if (p.latest['id'] if p.latest else None) != expect_latest_id:  # the preview was based on another snapshot
-        now = p.latest['ref'] if p.latest else '没有版本'
-        raise DatasetError(409, f'{name} 在这期间有了变化（最新是 {now}）；请重新运行 fw trainset create')
+        now = p.latest['ref'] if p.latest else '无版本'
+        raise DatasetError(409, f'{name} 在此期间发生了变化（最新为 {now}）；请重新运行 fw trainset create')
     if p.problems:
-        raise DatasetError(400, '没有建训练集快照：\n  ' + '\n  '.join(p.problems))
+        raise DatasetError(400, '未建立训练集快照：\n  ' + '\n  '.join(p.problems))
     for data in p.blobs.values():
         store.put_bytes(data)
     manifest = manifest_bytes(p.entries)
@@ -772,7 +772,7 @@ def info(conn, version_id: int) -> dict:
     row = conn.execute('SELECT based_on_id, task, classes, rule, counts, formats FROM trainset_versions '
                        'WHERE version_id = %s', (version_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, '这个版本不是训练集快照')
+        raise DatasetError(404, '该版本不是训练集快照')
     sources = [datasets.get_version_by_id(conn, r['source_id'])['ref'] for r in conn.execute(
         'SELECT source_id FROM trainset_sources WHERE version_id = %s ORDER BY position', (version_id,))]
     based_on = datasets.get_version_by_id(conn, row['based_on_id'])['ref'] if row['based_on_id'] else None

@@ -327,7 +327,7 @@ def _show_change(echo: Echo, preview: dict, limit: int = 5) -> None:
             echo(f'  替换 {o["dir"]}/：原有 {o["removed_count"]} 个文件换成这 {o["file_count"]} 个，'
                  f'{size_text(o["total_bytes"])}')
         else:
-            echo(f'  去掉 {o["dir"]}/：{o["removed_count"]} 个文件')
+            echo(f'  移除 {o["dir"]}/：{o["removed_count"]} 个文件')
     checks = preview['checks']
 
     def found(key: str, title: str, fmt=str) -> None:
@@ -557,7 +557,7 @@ def show_batch_compare(echo: Echo, c: dict, limit: int = 10) -> None:
     f, i, x = c['files'], c['images'], c['boxes']
     echo(f'{c["new"]} 相比 {c["old"]}：文件新增 {f["added"]["count"]}、修改 {f["modified"]["count"]}、'
          f'删除 {f["deleted"]["count"]}、改名 {f["renamed"]["count"]}；图片 {i["old"]} → {i["new"]} 张'
-         f'（新增 {i["added"]}，去掉 {i["removed"]}）')
+         f'（新增 {i["added"]}，移除 {i["removed"]}）')
     echo(f'  标注有变化的图片 {i["changed"]} 张：加框 {x["added"]}、删框 {x["removed"]}、挪动 {x["moved"]}、'
          f'改类别 {x["relabeled"]}')
     for row in i['examples'][:limit]:

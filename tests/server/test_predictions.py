@@ -344,7 +344,7 @@ def test_pre_label_defaults(api, make_api, gpu, setup, tmp_path):  # noqa: F811
     b = ops.upload_batch(field, raw_folder(tmp_path, 'x1'), lonely, '张三', name=f'B-{os.urandom(4).hex()}', echo=quiet)
     d = field.batch_prelabels(b['name'])['defaults']
     assert d['model'] is None and r['runner'] in d['runners']
-    with pytest.raises(Exception, match='还没有登记过发布'):
+    with pytest.raises(Exception, match='尚未登记发布'):
         field.prelabel_batch(b['name'], {'runner': r['runner']})
     # with a release on the pool's line, that model version is the default
     from test_models import release

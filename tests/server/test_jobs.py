@@ -282,7 +282,7 @@ def test_tried_too_often_fails(api, make_service, make_worker, fake_conda):
         time.sleep(1.3)
     assert w.claim() is None
     j = algo.job(job['id'])
-    assert j['status'] == 'failed' and '领取了 3 次' in j['error'] and j['attempts'] == 3
+    assert j['status'] == 'failed' and '已领取 3 次' in j['error'] and j['attempts'] == 3
     algo.close()
 
 
@@ -371,7 +371,7 @@ def test_finish_is_safe_to_repeat_and_final(api, make_worker, fake_conda, sql):
     result = {'env_sha256': '1' * 64, 'same_env': False, 'same_src': True}
     with pytest.raises(ApiError, match='哈希'):
         w.finish(job['id'], c['token'], 'done', {'same_env': True})
-    with pytest.raises(ApiError, match='要写原因'):
+    with pytest.raises(ApiError, match='须写明原因'):
         w.finish(job['id'], c['token'], 'failed')
     assert w.add_log(job['id'], c['token'], 0, 'a\n')['stored']
     assert not w.add_log(job['id'], c['token'], 0, 'a\n')['stored']  # a retried piece is kept once
@@ -380,7 +380,7 @@ def test_finish_is_safe_to_repeat_and_final(api, make_worker, fake_conda, sql):
     with pytest.raises(ApiError) as e:
         w.finish(job['id'], c['token'], 'failed', error='x')
     assert e.value.status == 409
-    with pytest.raises(ApiError, match='已经完成，不能取消') as e:
+    with pytest.raises(ApiError, match='已完成，不能取消') as e:
         api.cancel_job(job['id'])
     assert e.value.status == 409
     with pytest.raises(psycopg.errors.RaiseException, match='finished'):

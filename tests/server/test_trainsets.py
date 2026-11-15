@@ -256,7 +256,7 @@ def test_first_snapshot_layout_and_formats(api, cache, tmp_path):
     # the same inputs again would make the same snapshot: refused as unchanged
     preview = api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES, 'val': 0.25,
                                           'test_dirs': ['2026-10'], 'fresh': True})
-    assert any('完全一样' in p for p in preview['problems'])
+    assert any('完全相同' in p for p in preview['problems'])
     assert preview['counts'] == counts
 
 
@@ -291,9 +291,9 @@ def test_shapes_sizes_and_clipping(api, cache, tmp_path):
 
 @pytest.mark.parametrize('files, message', [
     ({'a.png': png('1'), 'a.json': label(shapes=[{'label': 'scratch', 'shape_type': 'point', 'points': [[1, 1]]}])},
-     '有 point 形状，不能当检测框'),
+     '有 point 形状，不能作为检测框'),
     ({'a.png': png('1'), 'a.json': label(shapes=[{'label': 'scratch', 'shape_type': 'rectangle',
-                                                  'points': [[300, 10], [320, 20]]}])}, '完全在图片外面'),
+                                                  'points': [[300, 10], [320, 20]]}])}, '完全位于图片之外'),
     ({'a.png': b'not an image', 'a.json': label('scratch', size=None)}, '没有 imageWidth'),
     ({'a.png': png('1'), 'a.txt': b'0 0.5 0.5 0.1\n'}, '5 个数'),
     ({'a.png': png('1'), 'a.txt': b'0 0.5 0.5 0.1 1.2\n'}, '不在 0 到 1 之间'),
@@ -324,7 +324,7 @@ def test_coco_needs_every_image_size(api, cache, tmp_path):
     src = pool(api, tmp_path, {'a.png': png('a'), 'a.json': label('dent'), 'b.png': b'raw bytes'})
     v = make(api, f'T-{uuid.uuid4().hex[:8]}', [f'{src}@1'])
     assert v['trainset']['formats'] == ['yolo', 'json']
-    assert '读不出尺寸' in v['summary']['missing_formats']['coco']
+    assert '无法读取尺寸' in v['summary']['missing_formats']['coco']
     with pytest.raises(ops.FwError, match='没有 coco 格式'):
         fetch(api, cache, v['ref'], tmp_path / 'c', fmt='coco')
 
@@ -378,7 +378,7 @@ def test_split_file(api, cache, tmp_path):
     split = ops.read_split_file(split_file)
     with pytest.raises(ops.FwError, match='漏了'):
         make(api, name, [f'{src}@1'], split={k: split[k] for k in keys[:3]})
-    with pytest.raises(ops.FwError, match='不在来源版本里'):
+    with pytest.raises(ops.FwError, match='不在来源版本中'):
         make(api, name, [f'{src}@1'], split=dict(split, **{'SES/TX/b.png': 'val'}))
     with pytest.raises(ApiError, match='划分清单'):
         make(api, name, [f'{src}@1'], split=split, merge_test=True)
@@ -393,7 +393,7 @@ def test_split_file(api, cache, tmp_path):
 
 
 @pytest.mark.parametrize('files, message', [
-    ({'a.png': b'1', 'a.json': label('crack')}, "类别 'crack' 不在类别表里"),
+    ({'a.png': b'1', 'a.json': label('crack')}, "类别 'crack' 不在类别表中"),
     ({'a.png': b'1', 'a.json': label('scratch')[:-1] + b', "imageWidth": true}'}, '没有 imageWidth'),
     ({'a.png': b'1', 'a.txt': b'5 0.5 0.5 0.1 0.1\n'}, '超出类别表'),
     ({'a.png': b'1', 'a.txt': b'x 0.5 0.5 0.1 0.1\n'}, '不是整数'),
@@ -423,8 +423,8 @@ def test_bad_sources_and_names(api, tmp_path):
     no_site = pool(api, tmp_path, {'a.png': b'1'}, site='', line='')
     name = f'T-{uuid.uuid4().hex[:8]}'
     assert make(api, name, [f'{ok}@1'])['number'] == 1
-    for sources, message in (([f'{no_site}@1'], '没有填现场或产线'), ([f'{name}@1'], '训练集快照'),
-                             ([f'{ok}@1', f'{ok}@1'], '写了两次'), ([f'{ok}@9'], None)):
+    for sources, message in (([f'{no_site}@1'], '未填写现场或产线'), ([f'{name}@1'], '训练集快照'),
+                             ([f'{ok}@1', f'{ok}@1'], '重复出现'), ([f'{ok}@9'], None)):
         with pytest.raises(ApiError, match=message):
             make(api, f'T-{uuid.uuid4().hex[:8]}', sources)
     with pytest.raises(ApiError, match='共用名称') as e:
@@ -469,7 +469,7 @@ def test_someone_else_made_one_meanwhile(api, tmp_path):
         make(api, name, [f'{src}@1'], seed=1)
         return True
 
-    with pytest.raises(ApiError, match='在这期间有了变化') as e:
+    with pytest.raises(ApiError, match='在此期间发生了变化') as e:
         ops.create_trainset(api, name, [f'{src}@1'], CLASSES, confirm=other_person_first, echo=quiet)
     assert e.value.status == 409
     assert [v['number'] for v in api.versions(name)] == [1]
@@ -651,7 +651,7 @@ def test_an_old_layout_snapshot_can_be_made_again_with_short_paths(api, tmp_path
     new = make(api, name, [f'{src}@1'])
     assert new['number'] == 2 and new['trainset']['rule']['paths'] == 'short'
     preview = api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES})
-    assert any('完全一样' in p for p in preview['problems'])  # the same layout again is unchanged
+    assert any('完全相同' in p for p in preview['problems'])  # the same layout again is unchanged
 
 
 def test_one_label_is_never_given_to_two_images(api, tmp_path):
@@ -661,7 +661,7 @@ def test_one_label_is_never_given_to_two_images(api, tmp_path):
              'b/labels/c.txt': yolo_line(1).encode()}
     src = pool(api, tmp_path, files)
     preview = api.preview_trainset(f'T-{uuid.uuid4().hex[:8]}', {'sources': [f'{src}@1'], 'classes': CLASSES})
-    shared = [p for p in preview['problems'] if '同时配到了两张图' in p]
+    shared = [p for p in preview['problems'] if '同时对应两张图片' in p]
     assert len(shared) == 1 and 'b/labels/a.txt' in shared[0] and 'c.txt' not in shared[0], preview['problems']
 
 
@@ -685,13 +685,13 @@ def test_label_source_picks_json_or_txt(api, cache, tmp_path):
     two = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.txt': yolo_line(0).encode(),
                                'b/labels/a.txt': yolo_line(1).encode()})
     preview = api.preview_trainset(name, {'sources': [f'{two}@1'], 'classes': CLASSES, 'label_source': 'txt'})
-    assert any('两个同一种的标注' in p for p in preview['problems']), preview['problems']
+    assert any('两个同类型的标注' in p for p in preview['problems']), preview['problems']
     # review of #10: picking json must not hide two txt labels of one image (one next to it, one in labels/)
     three = pool(api, tmp_path, {'b/images/a.png': png(uuid.uuid4().hex), 'b/images/a.json': label('scratch'),
                                  'b/images/a.txt': yolo_line(0).encode(), 'b/labels/a.txt': yolo_line(1).encode()})
     for source in ('json', 'txt'):
         preview = api.preview_trainset(name, {'sources': [f'{three}@1'], 'classes': CLASSES, 'label_source': source})
-        assert any('两个同一种的标注' in p for p in preview['problems']), (source, preview['problems'])
+        assert any('两个同类型的标注' in p for p in preview['problems']), (source, preview['problems'])
     assert status_of(lambda: api.preview_trainset(name, {'sources': [f'{src}@1'], 'classes': CLASSES,
                                                          'label_source': 'xml'})) == 400
 
@@ -712,7 +712,7 @@ def test_class_map_drops_others_and_reads_txt_by_its_own_table(api, cache, tmp_p
     preview = api.preview_trainset(name, body)  # without --label-classes, id 4 is past the 4-class table
     assert any('超出类别表' in p for p in preview['problems']), preview['problems']
     preview = api.preview_trainset(name, dict(body, label_classes=SES5))
-    assert any("'others' 不在类别表里" in p for p in preview['problems']), preview['problems']
+    assert any("'others' 不在类别表中" in p for p in preview['problems']), preview['problems']
     v = make(api, name, [f'{src}@1'], SES4, val=0, label_classes=SES5, class_map={'others': ''})
     ts = v['trainset']
     assert ts['counts']['train']['boxes'] == {'Dirty': 0, 'Scratch': 1, 'Crack': 0, 'Solder': 1}
@@ -731,8 +731,8 @@ def test_class_map_drops_others_and_reads_txt_by_its_own_table(api, cache, tmp_p
     assert json.loads(tree['trainset.json'])['rule']['class_map'] == {'others': ''}
     # the notices say what the map did
     preview = api.preview_trainset(f'{name}-again', dict(body, label_classes=SES5, class_map={'others': ''}))
-    assert '映射：others 的 2 个框去掉，当背景' in preview['notices'], preview['notices']
-    assert any(n.startswith('1 张图的框全被映射去掉了') and 'b1/labels/b.txt' in n for n in preview['notices'])
+    assert '映射：others 的 2 个框不保留，视为背景' in preview['notices'], preview['notices']
+    assert any(n.startswith('1 张图片的框均被映射移除，作为无框的背景图收入') and 'b1/labels/b.txt' in n for n in preview['notices'])
 
 
 def test_class_map_on_json_keeps_the_rest_of_the_file(api, cache, tmp_path):
@@ -856,7 +856,7 @@ def test_class_map_options_are_checked(api, tmp_path):
                   {'label_classes': []}, {'label_classes': ['a', 'a']}, {'label_classes': ['a\tb']}):
         assert status_of(lambda: api.preview_trainset(name, dict(body, **extra))) == 400, extra
     preview = api.preview_trainset(name, dict(body, label_classes=['x']))  # only JSON labels: has no effect
-    assert '没有用到 txt 标注，--label-classes 不起作用' in preview['notices']
+    assert '未使用 txt 标注，--label-classes 不生效' in preview['notices']
     assert ops.parse_class_map(['others=', 'DL1 = DL']) == {'others': '', 'DL1': 'DL'}
     assert ops.parse_class_map([]) is None
     for bad in (['others'], ['=DL'], ['a=', 'a=b']):
@@ -989,7 +989,7 @@ def test_command_line_class_map(service, tokens, api, tmp_path, monkeypatch, cap
     assert fw_cli.main(args) == 0
     out = capsys.readouterr().out
     assert '标注：同时有 JSON 和 txt 的图用 txt；txt 按自己的 5 类编号读' in out and '映射 others→去掉' in out, out
-    assert '注意：映射：others 的 1 个框去掉，当背景' in out
+    assert '注意：映射：others 的 1 个框不保留，视为背景' in out
     assert fw_cli.main(['trainset', 'show', name]) == 0
     assert '映射 others→去掉' in capsys.readouterr().out
     assert fw_cli.main(args[:-3] + ['--map', 'others', '--dry-run']) == 1
@@ -1014,7 +1014,7 @@ def test_command_line_and_get_trainset(service, tokens, api, tmp_path, monkeypat
     out = capsys.readouterr().out
     assert f'已冻结 {name}@1' in out and 'test 2 张' in out
     assert fw_cli.main(args + ['--yes']) == 1  # unchanged
-    assert '完全一样' in capsys.readouterr().err
+    assert '完全相同' in capsys.readouterr().err
     assert fw_cli.main(['trainset', 'list']) == 0
     assert name in capsys.readouterr().out
     assert fw_cli.main(['trainset', 'show', name]) == 0
@@ -1181,12 +1181,12 @@ def test_names_that_collide_flat_are_told_in_the_preview_and_refused_by_fw_get(a
     assert len(told) == 1 and 'images/train/SES/TX/a/1.png、images/train/SES/TX/b/1.png' in told[0]
     with pytest.raises(ops.FwError, match='yolo-tree') as e:
         ops.get(api, cache, v['ref'], tmp_path / 'g', echo=quiet)
-    assert 'images/train/SES/TX/a/1.png、images/train/SES/TX/b/1.png 平铺后是同一个文件' in str(e.value)
+    assert 'images/train/SES/TX/a/1.png、images/train/SES/TX/b/1.png 平铺后为同一个文件' in str(e.value)
     assert not (tmp_path / 'g').exists()
     tree = fetch(api, cache, v['ref'], tmp_path / 't', fmt='yolo-tree')
     assert 'images/train/a/1.png' in tree and 'images/train/b/1.png' in tree
     rows = api.get(f'/trainsets/{name}/versions/1/layout')
-    assert rows['files'] == [] and rows['problem_count'] == 1 and '平铺后是同一个文件' in rows['problems'][0]
+    assert rows['files'] == [] and rows['problem_count'] == 1 and '平铺后为同一个文件' in rows['problems'][0]
 
 
 def test_a_three_way_split_gives_every_split_its_share_of_negatives(service, tokens, api, tmp_path, monkeypatch):
@@ -1209,7 +1209,7 @@ def test_a_three_way_split_gives_every_split_its_share_of_negatives(service, tok
                         str(write(tmp_path, 'classes.txt', b'scratch\ndent\n')), '--val', '0.2', '--test', '0.1',
                         '--seed', '3', '--yes']) == 0
     assert api.trainset(f'{name}-b')['trainset']['counts'] == c
-    for bad, why in (({'val': 0.5, 'test': 0.5}, '加起来要小于 1'), ({'test': 1.0}, '0 到 1 之间'),
+    for bad, why in (({'val': 0.5, 'test': 0.5}, '之和须小于 1'), ({'test': 1.0}, '0 到 1 之间'),
                      ({'test': -0.1}, '0 到 1 之间'), ({'test': 0.1, 'merge_test': True}, '--merge-test'),
                      ({'test': 0.1, 'split': {}}, '划分清单')):
         with pytest.raises(ApiError, match=why) as e:

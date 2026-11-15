@@ -394,7 +394,7 @@ def test_an_eval_that_missed_images_registers_nothing(api, gpu, model, snapshot,
     job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
     worker.run_worker(gpu, quiet, once=True)
     j = api.job(job['id'])
-    assert j['status'] == 'failed' and '有图没评到' in j['error'] and api.evals(model) == []
+    assert j['status'] == 'failed' and '有图片未评估' in j['error'] and api.evals(model) == []
     (gpu.listings / 'SKIP').unlink()
     (gpu.listings / 'FAIL').write_text('')
     job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})

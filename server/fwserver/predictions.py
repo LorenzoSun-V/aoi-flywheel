@@ -69,7 +69,7 @@ def list_sets(conn, model: str = '', site: str = '', line: str = '') -> List[dic
 def get_set(conn, set_id: int) -> dict:
     row = conn.execute(_SET + ' WHERE p.id = %s', (set_id,)).fetchone()
     if row is None:
-        raise DatasetError(404, f'没有预测集 #{set_id}')
+        raise DatasetError(404, f'预测集 #{set_id} 不存在')
     out = _set(row)
     out['files'] = models.fileset_files(conn, out['fileset_id'])
     return out
@@ -79,7 +79,7 @@ def _conf(value: Any) -> float:
     if value is None:
         return DEFAULT_CONF
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < 1:
-        raise DatasetError(400, f'最低分数 conf 要在 0 和 1 之间（不含 0 和 1）：{value!r}')
+        raise DatasetError(400, f'最低分数 conf 须在 0 和 1 之间（不含 0 和 1）：{value!r}')
     return float(value)
 
 
@@ -96,32 +96,32 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     params = dict(params or {})
     unknown = sorted(set(params) - {'model', 'data', 'dirs', 'conf'})
     if unknown:
-        raise DatasetError(400, f'推理任务不认识这些参数：{"、".join(unknown)}')
-    mv = models.get_model_version(conn, *_ref_of(params.get('model'), '用哪个模型版本'))
-    version = datasets.get_version(conn, *_ref_of(params.get('data'), '在哪个数据集版本上推理'))
+        raise DatasetError(400, f'推理任务不支持以下参数：{"、".join(unknown)}')
+    mv = models.get_model_version(conn, *_ref_of(params.get('model'), '推理所用的模型版本'))
+    version = datasets.get_version(conn, *_ref_of(params.get('data'), '推理所用的数据集版本'))
     if version['kind'] == 'trainset':
-        raise DatasetError(400, f'{version["ref"]} 是训练集快照；预标注选数据池版本里的目录（--dirs）')
+        raise DatasetError(400, f'{version["ref"]} 是训练集快照；预标注请选择数据池版本中的目录（--dirs）')
     dirs = params.get('dirs') or []
     if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):
-        raise DatasetError(400, '目录写成一个文本列表')
+        raise DatasetError(400, '目录应为文本列表')
     conf = _conf(params.get('conf'))
     rv = jobs.find_runner(conn, runner, '推理')
     if not rv['framework']:
-        raise DatasetError(400, f'推理环境 {rv["ref"]} 登记时没写框架和 onnx2engine，推理不了；'
-                                '在 GPU 机上带 --framework rfdetr --onnx2engine <程序> 再登记一次')
+        raise DatasetError(400, f'推理环境 {rv["ref"]} 登记时未填写框架和 onnx2engine，无法推理；'
+                                '请在 GPU 机上带 --framework rfdetr --onnx2engine <程序> 重新登记')
     onnx = models.fileset_files(conn, mv['fileset_id'])
     onnx = [['model.onnx', f['sha256'], f['size']] for f in onnx if f['path'] == 'model.onnx']
     if not onnx:
-        raise DatasetError(400, f'{mv["ref"]} 没有 model.onnx，推理不了')
+        raise DatasetError(400, f'{mv["ref"]} 没有 model.onnx，无法推理')
     try:
         images, problems = predict_selection(datasets.version_files(conn, version['id']), dirs)
         dirs = eval_dirs(dirs)
     except ContractError as e:
         raise DatasetError(400, str(e)) from None
     if problems:
-        raise DatasetError(400, '推理不了：' + '；'.join(problems))
+        raise DatasetError(400, '无法推理：' + '；'.join(problems))
     if not images:
-        raise DatasetError(400, f'{version["ref"]} 里没有图片')
+        raise DatasetError(400, f'{version["ref"]} 中没有图片')
     inputs, _ = store.put_bytes(manifest_bytes(images))
     try:
         store.flush()
@@ -173,13 +173,13 @@ def submit_for_batch(conn, store: Store, user: dict, name: str, model: Optional[
     defaults = batch_defaults(conn, name)
     if not model:
         if defaults['model'] is None:
-            raise DatasetError(400, f'{defaults["site"]}/{defaults["line"]} 还没有登记过发布，不知道用哪个模型；'
-                                    f'写明模型版本（--model 名称@序号）')
+            raise DatasetError(400, f'{defaults["site"]}/{defaults["line"]} 尚未登记发布，无法确定使用的模型；'
+                                    f'请写明模型版本（--model 名称@序号）')
         model = defaults['model']['ref']
     if not runner:
         if len(defaults['runners']) != 1:
-            raise DatasetError(400, '要写用哪个推理环境（--runner）：' + (
-                f'有 {"、".join(defaults["runners"])}' if defaults['runners'] else '还没有能推理的推理环境，请算法工程师在 GPU 机上登记'))
+            raise DatasetError(400, '请指定推理环境（--runner）：' + (
+                f'可选 {"、".join(defaults["runners"])}' if defaults['runners'] else '暂无可用于推理的推理环境，请联系算法工程师在 GPU 机上登记'))
         runner = defaults['runners'][0]
     params = {'model': model, 'data': b['ref']}
     if conf is not None:
@@ -190,7 +190,7 @@ def submit_for_batch(conn, store: Store, user: dict, name: str, model: Optional[
                 if conn.execute("SELECT 1 FROM jobs WHERE id = %s AND status IN ('queued', 'running')", (j,)).fetchone()]
         job = submit(conn, store, user, runner, params)
         if busy and job['id'] not in busy:  # raising takes the new job back
-            raise DatasetError(409, f'{b["name"]} 的预标注任务 {busy[0]} 还没跑完；等它跑完再换模型或分数重跑')
+            raise DatasetError(409, f'{b["name"]} 的预标注任务 {busy[0]} 尚未完成；请在其完成后再更换模型或分数重新运行')
         batches.note_prelabel(conn, user, now, job['id'],
                               f'{job["params"]["model"]["ref"]}，推理环境 {job["runner"]}，最低分数 {job["params"]["conf"]:g}')
     return job
@@ -208,7 +208,7 @@ def for_batch(conn, name: str, detail: bool = True) -> List[dict]:
                     'queued_ahead': j['queued_ahead'], 'model': j['params']['model']['ref'], 'runner': j['runner'],
                     'conf': j['params']['conf'], 'images': j['params']['data']['images'],
                     'prediction_set': result.get('prediction_set'), 'boxes': result.get('boxes'),
-                    'error': j['error'] if detail or not j['error'] else '失败原因请算法工程师在任务页看',
+                    'error': j['error'] if detail or not j['error'] else '失败原因请联系算法工程师在任务页查看',
                     'submitted_by': j['submitted_by'], 'created_at': j['created_at'],
                     'finished_at': j['finished_at']})
     return out
@@ -238,7 +238,7 @@ def check_predictions(store: Store, digest: str, size: int, p: dict) -> int:
     data = store.read(digest)
     raw = store.read(p['data']['inputs_sha256'])
     if data is None or raw is None:
-        raise DatasetError(400, 'predictions.json 或输入清单还没有上传')
+        raise DatasetError(400, 'predictions.json 或输入清单尚未上传')
     try:
         doc = json.loads(data.decode('utf-8'), parse_constant=models._reject_constant)
     except (UnicodeDecodeError, ValueError) as e:
@@ -246,13 +246,13 @@ def check_predictions(store: Store, digest: str, size: int, p: dict) -> int:
     wanted = {e[0] for e in parse_manifest(raw)}
     rows: Dict[str, Any] = doc.get('images') if isinstance(doc, dict) else None
     if doc.get('schema_version') != 1 or not isinstance(rows, dict):
-        raise DatasetError(400, 'predictions.json 要有 schema_version 1 和 images')
+        raise DatasetError(400, 'predictions.json 须包含 schema_version 1 和 images')
     missing = sorted(wanted - set(rows))
     extra = sorted(set(rows) - wanted)
     if missing or extra:
-        raise DatasetError(400, f'predictions.json 和输入清单对不上：少了 {len(missing)} 张'
-                                f'{"（例如 " + missing[0] + "）" if missing else ""}，多了 {len(extra)} 张'
-                                f'{"（例如 " + extra[0] + "）" if extra else ""}；没有登记')
+        raise DatasetError(400, f'predictions.json 与输入清单不一致：缺少 {len(missing)} 张'
+                                f'{"（例如 " + missing[0] + "）" if missing else ""}，多出 {len(extra)} 张'
+                                f'{"（例如 " + extra[0] + "）" if extra else ""}；未登记')
     nc = len(p['model']['classes'] or [])
     boxes = 0
     for path, row in rows.items():
@@ -260,8 +260,8 @@ def check_predictions(store: Store, digest: str, size: int, p: dict) -> int:
             and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in row['size']) \
             and isinstance(row.get('boxes'), list)
         if not ok or not all(_box(b, nc, p['conf'], row['size']) for b in row['boxes']):
-            raise DatasetError(400, f'predictions.json 里 {path} 的内容不对（要有 size [宽, 高] 和 boxes '
-                                    '[[x1, y1, x2, y2, 分数, 类别], ...]，类别在模型类别表里，分数不低于 conf）')
+            raise DatasetError(400, f'predictions.json 中 {path} 的内容不正确（须包含 size [宽, 高] 和 boxes '
+                                    '[[x1, y1, x2, y2, 分数, 类别], ...]，类别须在模型类别表中，分数不低于 conf）')
         boxes += len(row['boxes'])
     return boxes
 
@@ -269,7 +269,7 @@ def check_predictions(store: Store, digest: str, size: int, p: dict) -> int:
 def register(conn, store: Store, row: dict, result: Any) -> dict:
     """The prediction set of a done prediction job, while the job row is held (evals.finish)."""
     if not isinstance(result, dict) or not isinstance(result.get('files'), list):
-        raise DatasetError(400, '推理结果里要有文件清单')
+        raise DatasetError(400, '推理结果中须包含文件清单')
     p = row['params']
     entries = models._entries(result['files'], PREDICTIONS, (PREDICTIONS, ENGINE))
     models._check_stored(store, entries)

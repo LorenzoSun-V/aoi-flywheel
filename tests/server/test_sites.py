@@ -221,7 +221,7 @@ def test_a_line_has_one_benchmark_test_set_and_keeps_every_setting(api, make_api
     # refused, and nothing is set
     assert status_of(lambda: field.set_benchmark(f'{site}/TX', first)) == 403
     for dataset, status, said in ((second, 409, '已是'), (elsewhere, 400, '不属于'), (loose, 400, '不属于任何产线'),
-                                  (pool_name, 400, '是数据池'), (regression, 400, '是回归集'), ('no-such-set', 404, '没有数据集'),
+                                  (pool_name, 400, '是数据池'), (regression, 400, '是回归集'), ('no-such-set', 404, '数据集 no-such-set 不存在'),
                                   ('', 400, '请选择')):
         with pytest.raises(ops.ApiError, match=said) as e:
             api.set_benchmark(f'{site}/TX', dataset)

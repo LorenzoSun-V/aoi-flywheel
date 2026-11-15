@@ -82,7 +82,7 @@ def test_field_uploads_a_batch_that_stays_out_of_the_pool(api, field, pool, day,
 def test_upload_needs_labeler_a_pool_and_images(api, field, pool, day, tmp_path):
     with pytest.raises(ops.FwError, match='标注人'):
         ops.upload_batch(field, day, pool, '  ', echo=quiet)
-    with pytest.raises(ApiError, match='没有数据集'):
+    with pytest.raises(ApiError, match='数据集 .* 不存在'):
         ops.upload_batch(field, day, 'no-such-pool', '张三', echo=quiet)
     write(tmp_path / 'empty', 'readme.txt', b'x')
     with pytest.raises(ops.FwError):
@@ -98,7 +98,7 @@ def test_upload_needs_labeler_a_pool_and_images(api, field, pool, day, tmp_path)
 
 def test_two_unfinished_batches_cannot_aim_at_one_folder(field, pool, day):
     b = upload(field, pool, day)
-    with pytest.raises(ApiError, match='还没有结束') as e:
+    with pytest.raises(ApiError, match='尚未结束') as e:
         upload(field, pool, day, to='20261104')
     assert e.value.status == 409
     field.batch_step(b['name'], 'close', {'comment': '重拍'})
@@ -106,7 +106,7 @@ def test_two_unfinished_batches_cannot_aim_at_one_folder(field, pool, day):
 
 
 def test_batch_names_share_the_dataset_namespace(api, field, pool, day):
-    with pytest.raises(ApiError, match='被别人建了|已经存在') as e:
+    with pytest.raises(ApiError, match='已被其他账号建立|已存在') as e:
         upload(field, pool, day, name=pool)
     assert e.value.status == 409
 
@@ -120,9 +120,9 @@ def test_review_round_trip(api, field, make_api, pool, day, tokens, cache, tmp_p
     b = upload(field, pool, day)
     name = b['name']
     # only an account that may review can be asked
-    with pytest.raises(ApiError, match='不能当复核人'):
+    with pytest.raises(ApiError, match='不能担任复核人'):
         field.batch_step(name, 'submit', {'reviewer': tokens['deploy_name']})
-    with pytest.raises(ApiError, match='要写复核人'):
+    with pytest.raises(ApiError, match='请指定复核人'):
         field.batch_step(name, 'submit', {})
     b = field.batch_step(name, 'submit', {'reviewer': tokens['algo_name']})
     assert b['status'] == 'review' and b['reviewer'] == tokens['algo_name'] and b['actions'] == ['close']
@@ -138,12 +138,12 @@ def test_review_round_trip(api, field, make_api, pool, day, tokens, cache, tmp_p
     # reject: a comment is required, images must exist in the revision
     with pytest.raises(ApiError, match='退回意见'):
         api.batch_step(name, 'reject', {'comment': ' '})
-    with pytest.raises(ApiError, match='没有这些文件'):
+    with pytest.raises(ApiError, match='中没有以下文件'):
         api.batch_step(name, 'reject', {'comment': '漏标', 'images': ['zz.bmp']})
     b = api.batch_step(name, 'reject', {'comment': 'd.bmp 漏标', 'images': ['d.bmp'], 'revision': 1})
     assert b['status'] == 'rejected'
     # a rejected batch is not submitted again as it is
-    with pytest.raises(ApiError, match='先上传改好的一版'):
+    with pytest.raises(ApiError, match='请先上传修改后的一版'):
         field.batch_step(name, 'submit', {})
     out, echo = lines()
     b = ops.update_batch(field, name, day, '李四', reviewer='-', note='补了 d', echo=echo)
@@ -162,7 +162,7 @@ def test_review_round_trip(api, field, make_api, pool, day, tokens, cache, tmp_p
 
 def test_same_content_is_not_a_new_revision(field, pool, day):
     b = upload(field, pool, day)
-    with pytest.raises(ApiError, match='完全一样') as e:
+    with pytest.raises(ApiError, match='完全相同') as e:
         ops.update_batch(field, b['name'], day, '张三', echo=quiet)
     assert e.value.status == 409
     assert field.batch(b['name'])['revision'] == 1
@@ -176,7 +176,7 @@ def test_only_owner_and_asked_reviewer_act(api, field, make_api, pool, day, toke
     write(day, 'd.json', label(('ng', 7, 7)))
     with pytest.raises(ops.FwError, match='不是你的批次'):
         ops.update_batch(other_field, name, day, '王五', echo=quiet)
-    with pytest.raises(ApiError, match='不是你的批次') as e:
+    with pytest.raises(ApiError, match='不是您上传的批次') as e:
         other_field.batch_step(name, 'submit', {'reviewer': tokens['algo_name']})
     assert e.value.status == 403
     with pytest.raises(ApiError) as e:
@@ -191,7 +191,7 @@ def test_only_owner_and_asked_reviewer_act(api, field, make_api, pool, day, toke
         assert e.value.status == 403
     field.batch_step(name, 'submit', {'reviewer': tokens['admin_name']})
     # an algo account that was not asked cannot answer; the administrator who was asked can
-    with pytest.raises(ApiError, match='复核人不是你') as e:
+    with pytest.raises(ApiError, match='复核人不是您') as e:
         api.batch_step(name, 'approve', {})
     assert e.value.status == 403
     assert status_of_close(api, name) == 403 and 'close' not in api.batch(name)['actions']
@@ -206,7 +206,7 @@ def test_only_owner_and_asked_reviewer_act(api, field, make_api, pool, day, toke
 def test_stale_revision_is_refused(api, field, pool, day, tokens):
     b = upload(field, pool, day, reviewer=tokens['algo_name'])
     assert b['status'] == 'review'
-    with pytest.raises(ApiError, match='最新是第 1 版') as e:
+    with pytest.raises(ApiError, match='最新版次为第 1 版') as e:
         api.batch_step(b['name'], 'approve', {'revision': 2})
     assert e.value.status == 409
 
@@ -243,7 +243,7 @@ def test_reviewer_approves_with_own_changes(api, field, pool, day, tokens, tmp_p
 def test_import_adds_the_folder_to_the_pool(api, field, pool, day, tokens, cache, tmp_path):
     b = upload(field, pool, day, reviewer=tokens['algo_name'])
     name = b['name']
-    with pytest.raises(ApiError, match='复核通过以后才能入库') as e:
+    with pytest.raises(ApiError, match='复核通过后才能入库') as e:
         api.batch_step(name, 'import/preview', {})
     assert e.value.status == 409
     api.batch_step(name, 'approve', {})
@@ -270,7 +270,7 @@ def test_import_adds_the_folder_to_the_pool(api, field, pool, day, tokens, cache
 def test_import_refuses_an_existing_folder_unless_replaced(api, field, pool, day, tokens):
     b = upload(field, pool, day, to='20261101', reviewer=tokens['algo_name'])
     api.batch_step(b['name'], 'approve', {})
-    with pytest.raises(ops.FwError, match='池里已有 20261101/'):
+    with pytest.raises(ops.FwError, match='数据池中已有 20261101/'):
         ops.import_batch(api, b['name'], echo=quiet)
     assert api.batch(b['name'])['status'] == 'approved'
     v = ops.import_batch(api, b['name'], replace=True, echo=quiet)
@@ -297,7 +297,7 @@ def test_approved_batch_can_still_be_rejected(api, field, pool, day, tokens):
     b = upload(field, pool, day, reviewer=tokens['algo_name'])
     api.batch_step(b['name'], 'approve', {})
     assert api.batch_step(b['name'], 'reject', {'comment': '再看发现错标'})['status'] == 'rejected'
-    with pytest.raises(ApiError, match='复核通过以后才能入库'):
+    with pytest.raises(ApiError, match='复核通过后才能入库'):
         api.batch_step(b['name'], 'import/preview', {})
 
 

@@ -349,7 +349,7 @@ def test_the_folder_check_is_the_one_of_fw_dataset_import(service, tokens, tmp_p
     assert r['reasons'] == local.blocking(False, False) and len(r['reasons']) == 3
     allowed = httpx.post(service.url + '/api/v1/folder-check', headers={'Authorization': f'Bearer {tokens["algo"]}'},
                          json={'paths': sorted(files), 'allow_other_files': True, 'force': True}).json()
-    assert allowed['reasons'] == local.blocking(True, True) == ['有只差大小写、或同名的文件和目录，在 Windows 上会互相覆盖，先改名']
+    assert allowed['reasons'] == local.blocking(True, True) == ['有仅大小写不同、或同名的文件和目录，在 Windows 上会互相覆盖，请先改名']
 
     def post(paths):
         return httpx.post(service.url + '/api/v1/folder-check', json={'paths': paths}, timeout=60,
@@ -921,7 +921,7 @@ def test_a_version_gets_its_label_in_the_browser(service, tokens, api, tmp_path)
     assert seen['proposed'] == 'v0.1.0' and seen['next'] == 'v0.2.0'
     assert f'{name}@1' in seen['row'] and 'v0.1.0' in seen['row']
     assert seen['toast'] == f'已设定版本号 v0.1.0（{name}@1）' and seen['stayed'] == [120, 120]
-    assert f'已经用在 {name}@1 上' in seen['taken']
+    assert f'已用于 {name}@1' in seen['taken']
     assert seen['title'].startswith(f'{name}@1') and 'v0.1.0' in seen['title']
     assert api.version(name, 'v0.1.0')['number'] == 1 and api.labels(name)['labels'][0]['note'] == '冷启动'
 
@@ -986,7 +986,7 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
     assert seen['poolNoneOff'] and seen['poolAt'] == ['SES', 'TX'] and seen['noLine']
     made = api.dataset(f'T-{site}')
     assert made['kind'] == 'test' and made['site'] == '' and made['line'] == ''
-    assert '已经存在' in seen['taken']
+    assert '已存在' in seen['taken']
     assert seen['badCode'].strip() and f'{site}/L1' not in json.dumps(api.sites())
     lines = {(s['code'], x['code']): x['name'] for s in api.sites()['sites'] for x in s['lines']}
     assert lines[(site, 'L1')] == '一号线' and 'L1 一号线' in seen['tree']
@@ -1076,7 +1076,7 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
     assert seen['overview'] == f'#/trainset-new?site=WEB&line={line}'
     assert seen['first'] == {'name': snap, 'mode': f'将建立 {snap}@1', 'sources': [f'{name}@1'], 'classes': '',
                              'val': '0.2', 'test': '0.1', 'newTo': None}
-    assert "'dent' 不在类别表里" in seen['missing']['error'] and seen['missing']['create'] == 0  # refused, nothing to make
+    assert "'dent' 不在类别表中" in seen['missing']['error'] and seen['missing']['create'] == 0  # refused, nothing to make
     assert seen['cleared'] == 0
     counts = {row[0]: row[1:] for row in seen['preview']['counts'][1:]}
     assert [sum(map(int, counts['图片'])), sum(map(int, counts['其中无标注框']))] == [12, 2]
@@ -1103,8 +1103,8 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
     assert seen['line']['sources'] == [f'{name}@latest'] and seen['line']['name'] == snap and older < name
     # previewed as the next version of the name typed, on its classes: the same as its @2, so nothing to build
     assert seen['typed']['mode'] == f'将接着 {snap}@2 的划分建立 {snap}@3' and seen['typed']['classes'] == 'scratch\ndent'
-    assert f'和 {snap}@2 完全一样' in seen['typed']['error'] and seen['typed']['create'] == ''
-    assert '已经是一个数据集的名称' in seen['taken']
+    assert f'和 {snap}@2 完全相同' in seen['typed']['error'] and seen['typed']['create'] == ''
+    assert '已是一个数据集的名称' in seen['taken']
     assert seen['fieldButtons'] == 0 and '不能建立训练集快照' in seen['fieldPage']
 
 
@@ -1253,7 +1253,7 @@ def test_a_folder_added_and_removed_from_the_browser(service, tokens, api, tmp_p
     assert '与数据池中已有图片内容相同' in seen['plan'] and '20261103/a_again.png = 20261101/a.png' in seen['plan']
     assert '图片相同但标注不同' in seen['plan'] and '（2 个目标） 和 20261101/a.png（1 个目标）' in seen['plan']
     assert seen['added'] == f'/v/{name}/2'
-    assert '池里已有 20261103/' in seen['again'] and seen['offered'] == 0
+    assert '数据池中已有 20261103/' in seen['again'] and seen['offered'] == 0
     assert '移除 20261101/：2 个文件' in seen['removal'] and f'新版本 {name}@3：5 个文件' in seen['removal']
     assert seen['removed'] == f'/v/{name}/3'
     assert '新增 20261103/' in seen['versions'] and '移除 20261101/' in seen['versions'] and '整份导入' in seen['versions']

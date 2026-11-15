@@ -142,13 +142,13 @@ def test_what_a_model_version_must_be(api, model, snapshot, tmp_path):
     # what the request says
     digest, size = sha256_file(run / 'best.onnx')
     body = {'trainset_id': snapshot['id'], 'code_commit': COMMIT}
-    with pytest.raises(ApiError, match='还没有'):
+    with pytest.raises(ApiError, match='缺失'):
         api.register_model_version(model, dict(body, files=[['model.onnx', 'f' * 64, 10]]))
     api.put_file(digest, run / 'best.onnx')
     for files, message in (([['weight/x.pt', digest, size], ['model.onnx', digest, size]], 'files/'),
                            ([['classes.txt', digest, size], ['model.onnx', digest, size]], 'files/'),
-                           ([['files/a', digest, size]], '缺 model.onnx'),
-                           ([['model.onnx', digest, size], ['model.onnx', digest, size]], '两次'),
+                           ([['files/a', digest, size]], '缺少 model.onnx'),
+                           ([['model.onnx', digest, size], ['model.onnx', digest, size]], '重复出现'),
                            ([['model.onnx', digest, size], ['files/A', digest, size], ['files/a', digest, size]],
                             '大小写')):
         with pytest.raises(ApiError, match=message):
@@ -241,7 +241,7 @@ def test_empty_weights_are_refused(api, model, snapshot, tmp_path):
     with pytest.raises(ops.FwError, match='是空的'):
         ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=empty, echo=quiet)
     rows = ops._send_files(api, [('model.onnx', run / 'best.onnx'), ('weights/best.pt', empty)], 2, quiet)
-    with pytest.raises(ApiError, match='是空的'):
+    with pytest.raises(ApiError, match='为空'):
         api.register_model_version(model, {'trainset_id': snapshot['id'], 'files': rows})
     assert api.model_versions(model) == []
     mv = ops.register_model(api, model, run / 'best.onnx', snapshot['ref'], weights=run / 'best.pt', echo=quiet)
@@ -283,7 +283,7 @@ def test_the_server_checks_weights_and_code(api, model, snapshot, tmp_path):
         with pytest.raises(ApiError, match=match):
             api.register_model_version(model, dict(base, files=files))
     for body in ({'code_repo': 'https://g/x.git'}, {'code_dirty': True}):
-        with pytest.raises(ApiError, match='就要写训练代码的提交号'):
+        with pytest.raises(ApiError, match='须同时填写训练代码的提交号'):
             api.register_model_version(model, dict(base, files=[rows[0]], **body))
 
 
@@ -362,7 +362,7 @@ def test_eval_reports(api, model, snapshot, tmp_path):
     metrics = write(tmp_path, 'm.json', b'{"recall": 0.9}')
     e3 = ops.register_eval(api, f'{model}@1', f'{test_pool}@1', metrics=metrics, tool='other', echo=quiet)
     assert e3['testset']['ref'] == f'{test_pool}@1' and e3['metrics'] == {'recall': 0.9}
-    with pytest.raises(ApiError, match='不用写划分'):
+    with pytest.raises(ApiError, match='无需写划分'):
         ops.register_eval(api, f'{model}@1', f'{test_pool}@1:test', metrics=metrics, echo=quiet)
     with pytest.raises(ops.FwError, match='只写一个'):
         ops.register_eval(api, f'{model}@1', f'{test_pool}@1', echo=quiet)
@@ -665,7 +665,7 @@ def test_releases_and_the_current_model(api, make_api, model, snapshot, tmp_path
     assert (r3['site'], r3['line']) == ('SES', 'TX')
 
     future = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()
-    for kw, message in ((dict(when=future), '还晚'), (dict(commit='v1.2'), '提交号'),
+    for kw, message in ((dict(when=future), '晚于服务器当前时间'), (dict(commit='v1.2'), '提交号'),
                         (dict(when='2026-10-20T10:30', precision='int8'), '精度')):
         when = kw.pop('when', '2026-10-20T10:30+08:00')
         with pytest.raises(ApiError, match=message):

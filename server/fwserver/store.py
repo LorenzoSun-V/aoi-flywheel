@@ -166,7 +166,7 @@ class Store:
         """Store one object received whole (batch uploads). The hash is checked before anything is written;
         returns True if the object is new or repaired. The caller checks check_writable() once per batch."""
         if hashlib.sha256(data).hexdigest() != digest:
-            raise BadContent(f'上传的内容和哈希 {digest[:12]} 对不上（文件在传输中损坏，或上传期间被改过）')
+            raise BadContent(f'上传的内容与哈希 {digest[:12]} 不一致（文件在传输中损坏，或在上传期间被修改）')
         fd, tmp = tempfile.mkstemp(dir=self.tmp, prefix=digest[:16] + '.')
         try:
             with os.fdopen(fd, 'wb') as f:
@@ -256,7 +256,7 @@ class Store:
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
-            raise StoreError(f'文件库记不下 {UNSYNCED}（{e}），不能写入') from None
+            raise StoreError(f'文件库无法记录 {UNSYNCED}（{e}），不能写入') from None
         self._make_durable(raw)
 
     def _make_durable(self, raw: str) -> None:
@@ -273,7 +273,7 @@ class Store:
         self._durable = raw
 
     def _lost_writes(self) -> str:
-        return (f'机器上次断电或死机时，文件库里还有没落盘的写入（{UNSYNCED}），那时写进来的文件可能已经坏了')
+        return (f'机器上次断电或死机时，文件库中还有未落盘的写入（{UNSYNCED}），当时写入的文件可能已损坏')
 
     def _clear_unsynced(self, any_boot: bool = False) -> None:
         """After a syncfs that succeeded: nothing written so far can be lost any more. Under the exclusive lock
@@ -359,24 +359,24 @@ class Store:
             if self._failed is not None:
                 message, seen = self._failed
                 if seen is _UNREADABLE:
-                    return f'文件库写盘出过错（{message}），连 {MARKER} 都读不了也删不掉；verify --rehash 通过后还要重启服务'
+                    return f'文件库写盘曾出错（{message}），且无法读取或删除 {MARKER}；verify --rehash 通过后还须重启服务'
                 if marker is None or marker == seen:
-                    return f'文件库写盘出过错（{message}）'
+                    return f'文件库写盘曾出错（{message}）'
                 self._failed = None  # verify --rehash passed after the error: it wrote a new WRITE-OK
         flag = self.flag_text()
         if flag is not None:
-            return f'文件库写盘出过错（{flag or "原因没能写下来"}）'
+            return f'文件库写盘曾出错（{flag or "原因未能记录"}）'
         seen = self._unsynced()
         if seen is not None and self._boot is not None and seen != self._boot:
             return self._lost_writes()
         if marker is None:
-            return f'文件库缺少 {MARKER} 标记（写盘出过错，或者文件库是从别处拷来的，还没核对过）'
+            return f'文件库缺少 {MARKER} 标记（写盘曾出错，或文件库是从其他位置复制来的，尚未核对）'
         return None
 
     def check_writable(self) -> None:
         problem = self.problem()
         if problem is not None:
-            raise StoreError(f'{problem}；先检查磁盘，再在服务器上运行 fw-server verify --rehash，通过后才能继续写入')
+            raise StoreError(f'{problem}；请先检查磁盘，再在服务器上运行 fw-server verify --rehash，通过后才能继续写入')
 
     def sync(self) -> None:
         """Make every object written so far durable (data and directory entries), or refuse writes from now
@@ -401,7 +401,7 @@ class Store:
         else:
             raise StoreError('文件库只支持 Linux')
         self._mark_failed(message)
-        raise StoreError(f'文件库写盘出错（{message}），没有提交；已标记为异常')
+        raise StoreError(f'文件库写盘出错（{message}），未提交；已标记为异常')
 
     def flush(self) -> None:
         """The barrier before anything that relies on the objects written so far (a version commit)."""
@@ -421,12 +421,12 @@ class Store:
                 pass
             os.fsync(self._fd)
         except OSError as e:
-            raise StoreError(f'核对通过了，但没能解除写入阻断（{e}）；检查文件库所在的盘') from None
+            raise StoreError(f'核对已通过，但未能解除写入阻断（{e}）；请检查文件库所在的磁盘') from None
         with self._lock:
             self._failed = None
         problem = self.problem()
         if problem is not None:  # whatever the reason, verify must not report a block as lifted that still holds
-            raise StoreError(f'核对通过了，但没能解除写入阻断（{problem}）；检查文件库所在的盘')
+            raise StoreError(f'核对已通过，但未能解除写入阻断（{problem}）；请检查文件库所在的磁盘')
 
     def flag_text(self) -> Optional[str]:
         try:
@@ -434,7 +434,7 @@ class Store:
         except FileNotFoundError:
             return None
         except (OSError, UnicodeDecodeError) as e:
-            return f'{FLAG} 读不了：{e}'
+            return f'无法读取 {FLAG}：{e}'
 
     # --- maintenance ---------------------------------------------------------------------------
     def clean_tmp(self, older_than: float = 86400) -> int:
@@ -495,7 +495,7 @@ class Store:
             with os.scandir(path) as it:
                 return list(it)
         except OSError as e:
-            raise StoreError(f'读不了文件库目录 {path}（{e.strerror or e}），核对没有完成') from None
+            raise StoreError(f'无法读取文件库目录 {path}（{e.strerror or e}），核对未完成') from None
 
     def _subdirs(self, path) -> List[os.DirEntry]:
         out = []
@@ -506,7 +506,7 @@ class Store:
                 if e.is_dir():  # follows a link: whatever is behind it is served, so it is checked too
                     out.append(e)
             except OSError as err:
-                raise StoreError(f'读不了文件库目录 {e.path}（{err.strerror or err}），核对没有完成') from None
+                raise StoreError(f'无法读取文件库目录 {e.path}（{err.strerror or err}），核对未完成') from None
         return out
 
 
@@ -531,7 +531,7 @@ class ObjectWriter:
         try:
             self.file.close()
             if self.hash.hexdigest() != self.digest:
-                raise BadContent(f'上传的内容和哈希 {self.digest[:12]} 对不上（文件在传输中损坏，或上传期间被改过）')
+                raise BadContent(f'上传的内容与哈希 {self.digest[:12]} 不一致（文件在传输中损坏，或在上传期间被修改）')
             return self.store.install(self.digest, self.tmp)
         finally:
             self.abort()

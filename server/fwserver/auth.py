@@ -25,16 +25,16 @@ CAPS = {
     'objects.download': (('admin', 'algo', 'field', 'worker'), '下载文件'),
     'batches.read': (('admin', 'algo', 'field'), '查看标注批次'),
     'batches.write': (('admin', 'algo', 'field'), '上传标注批次、提交复核'),
-    'batches.review': (('admin', 'algo'), '复核标注批次；复核由算法工程师账号做'),
+    'batches.review': (('admin', 'algo'), '复核标注批次；复核由算法工程师账号进行'),
     'models.read': (('admin', 'algo', 'field'), '查看模型、评估和发布'),
     'models.write': (('admin', 'algo'), '登记模型和评估'),
     'releases.write': (('admin', 'field'), '登记发布；发布由现场实施账号在部署成功后登记'),
     'jobs.read': (('admin', 'algo', 'worker'), '查看任务'),
     'jobs.write': (('admin', 'algo'), '提交或取消任务'),
-    'jobs.run': (('worker',), '登记推理环境、领取和交回任务；只有 worker 账号（GPU 机）能做'),
-    'sites.read': (('admin', 'algo', 'field'), '查看登记的现场和产线'),
+    'jobs.run': (('worker',), '登记推理环境、领取和交回任务；仅限 worker 账号（GPU 机）'),
+    'sites.read': (('admin', 'algo', 'field'), '查看已登记的现场和产线'),
     'sites.write': (('admin', 'algo'), '登记现场和产线'),
-    'labels.retire': (('admin',), '撤销版本号；只有管理员能做'),
+    'labels.retire': (('admin',), '撤销版本号；仅限管理员'),
     'events.read': (('admin', 'algo'), '查看操作记录'),
     'users.manage': (('admin',), '管理账号'),
 }
@@ -65,7 +65,7 @@ def _user(conn, name: str, lock: bool = False, update: bool = False) -> dict:
     row = conn.execute('SELECT id, name, role, disabled_at FROM users WHERE lower(name) = lower(%s)'
                        + (' FOR UPDATE' if update else ' FOR SHARE' if lock else ''), (name,)).fetchone()
     if row is None:
-        raise AuthError(f'没有账号 {name}')
+        raise AuthError(f'账号 {name} 不存在')
     return row
 
 
@@ -80,7 +80,7 @@ def add_user(conn, name: str, role: str, actor_id: Optional[int] = None) -> dict
         raise AuthError(f'角色只能是 {"、".join(ROLES)}')
     with conn.transaction():
         if conn.execute('SELECT 1 FROM users WHERE lower(name) = lower(%s)', (name,)).fetchone():
-            raise AuthError(f'账号 {name} 已经存在')
+            raise AuthError(f'账号 {name} 已存在')
         user = conn.execute('INSERT INTO users (name, role) VALUES (%s, %s) RETURNING id, name, role',
                             (name, role)).fetchone()
         events.record(conn, actor_id, 'user.create', user['name'], role=role)
@@ -96,7 +96,7 @@ def _keep_an_admin(conn, user: dict) -> None:
     others = conn.execute("SELECT count(*) AS n FROM users WHERE role = 'admin' AND disabled_at IS NULL "
                           'AND id <> %s', (user['id'],)).fetchone()['n']
     if not others:
-        raise AuthError(f'{user["name"]} 是唯一在用的管理员账号，先建好另一个管理员')
+        raise AuthError(f'{user["name"]} 是唯一在用的管理员账号，请先建立另一个管理员账号')
 
 
 def set_role(conn, name: str, role: str, actor_id: Optional[int] = None) -> dict:
@@ -109,7 +109,7 @@ def set_role(conn, name: str, role: str, actor_id: Optional[int] = None) -> dict
         if user['role'] == role:
             return user
         if 'worker' in (user['role'], role):
-            raise AuthError('worker 账号是 GPU 机用的，不和人的角色互换；需要的话另建一个账号')
+            raise AuthError('worker 账号供 GPU 机使用，不能与人员角色互换；如有需要，请另建一个账号')
         _keep_an_admin(conn, user)
         conn.execute('UPDATE users SET role = %s WHERE id = %s', (role, user['id']))
         events.record(conn, actor_id, 'user.role', user['name'], **{'from': user['role'], 'to': role})
@@ -149,7 +149,7 @@ def set_disabled(conn, name: str, disabled: bool, actor_id: Optional[int] = None
 
 def create_token(conn, name: str, label: str = '', actor_id: Optional[int] = None) -> Tuple[str, int]:
     if len(label) > 200 or any(ord(ch) < 32 for ch in label):
-        raise AuthError('说明写一行，最多 200 个字符')
+        raise AuthError('说明须为一行，最多 200 个字符')
     with conn.transaction():
         # FOR SHARE holds the account row until the new token is committed. A disable (UPDATE users) that
         # starts meanwhile waits for it and then revokes it with the others; a disable that came first makes
