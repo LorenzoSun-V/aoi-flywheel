@@ -33,6 +33,7 @@ const { chromium } = require('playwright');
     const pool = arg.split('@')[0];
     seen.poolOffered = await page.$eval('#predict-data', (s, p) => [...s.options].some((o) => o.value === `@${p}`), pool);
     await page.selectOption('#predict-data', `@${pool}`);
+    await page.click('#predict-dirs-box summary');  // the folders are listed when asked for
     await page.waitForFunction(() => document.querySelectorAll('#predict-dirs input[type=checkbox]').length > 0);
     seen.dirs = await page.$$eval('#predict-dirs label', (ls) => ls.map((l) => l.textContent));
     seen.version = await page.$eval('#predict-version', (s) => [s.value, [...s.options].map((o) => o.textContent)]);

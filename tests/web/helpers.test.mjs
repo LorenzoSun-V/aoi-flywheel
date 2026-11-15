@@ -8,7 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
-  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -433,4 +433,17 @@ test('the data to evaluate or predict on is offered by kind, the line of the mod
     [['测试集', ['B-test', 'A-test']], ['回归集', ['shared']], ['数据池', ['A-pool', 'C-pool']]]);
   assert.deepEqual(names(dataChoices(datasets)), [['测试集', ['A-test', 'B-test']], ['回归集', ['shared']], ['数据池', ['A-pool', 'C-pool']]]);
   assert.deepEqual(dataChoices([]), []);
+});
+
+test('a batch is pre-labelled with its line\'s release first, then the model versions of every line', () => {
+  const v = (id, ref, site, line, tags = []) => ({ id, ref, site, line, tags });
+  const versions = [v(1, 'A-det@1', 'A', 'L1', ['deprecated']), v(2, 'A-det@2', 'A', 'L1'), v(3, 'A2-det@1', 'A', 'L2'),
+    v(4, 'B-det@1', 'B', 'L1'), v(5, 'A-det@3', 'A', 'L1', ['candidate'])];
+  const refs = (out) => [out.released, out.groups.map(([label, list]) => [label, list.map((x) => x.ref)])];
+  assert.deepEqual(refs(prelabelChoices(versions, { site: 'a', line: 'l1' })),
+    ['', [['本产线', ['A-det@3', 'A-det@2']], ['同一现场的其他产线', ['A2-det@1']], ['其他现场', ['B-det@1']]]]);
+  // the release of another line's model, even a deprecated one, is offered first and only there
+  assert.deepEqual(refs(prelabelChoices(versions, { site: 'A', line: 'L2', model: { ref: 'A-det@1' } })),
+    ['A-det@1', [['本产线', ['A2-det@1']], ['同一现场的其他产线', ['A-det@3', 'A-det@2']], ['其他现场', ['B-det@1']]]]);
+  assert.deepEqual(refs(prelabelChoices([], { site: 'A', line: 'L1' })), ['', []]);
 });

@@ -1,12 +1,12 @@
 // Data and model versions are picked from lists, not typed (run by tests/server/test_web.py):
-// node picks.cjs <url> <algo token> <field token> <model version ref> <benchmark> <runner> <batch> <out dir>.
-// The evaluation form of the model version starts on the line's benchmark test set and lists its folders; one is
-// ticked and the evaluation submitted. The batch's pre-labelling form lists the model versions of its line.
-// Prints one JSON line of what it saw.
+// node picks.cjs <url> <algo token> <field token> <model version ref> <benchmark> <runner> <batches> <out dir>.
+// The evaluation form of the model version starts on the line's benchmark test set and lists its folders when
+// asked; one is ticked and the evaluation submitted. The pre-labelling form of each batch (comma-separated, one
+// page each) offers the release of its line first and the model versions of every line. Prints one JSON line.
 const { chromium } = require('playwright');
 
 (async () => {
-  const [url, algo, field, ref, bench, runner, batch, out] = process.argv.slice(2);
+  const [url, algo, field, ref, bench, runner, batches, out] = process.argv.slice(2);
   const [model, number] = ref.split('@');
   const browser = await chromium.launch();
   const errors = [];
@@ -22,7 +22,13 @@ const { chromium } = require('playwright');
   const seen = {};
 
   let page = await open(algo);
+  let manifests = 0;  // file lists read: a large pool's is many MB, read only when its folders are asked for
+  page.on('request', (r) => { if (r.url().includes('/api/v1/objects/')) manifests += 1; });
   await page.goto(`${url}#/mv/${model}/${number}`);
+  await page.waitForFunction(() => document.querySelector('#eval-version')?.options.length > 0);
+  await page.waitForTimeout(300);
+  seen.before = { manifests, dirs: await page.$$eval('#eval-dirs input', (i) => i.length), said: await page.textContent('#eval-dirs-box summary') };
+  await page.click('#eval-dirs-box summary');
   await page.waitForFunction(() => document.querySelectorAll('#eval-dirs input[type=checkbox]').length > 0);
   seen.eval = await page.evaluate(() => ({
     data: document.querySelector('#eval-data').value,
@@ -31,6 +37,7 @@ const { chromium } = require('playwright');
     typed: [...document.querySelectorAll('.forms input[type=text]')].map((i) => i.className),  // only the conf
   }));
   await page.check('#eval-dirs input[value="D2"]');
+  seen.said = await page.textContent('#eval-dirs-box summary');
   const form = page.locator('form', { hasText: '测试数据' });
   await form.locator('select').first().selectOption(runner);
   await page.screenshot({ path: `${out}/eval-form.png`, fullPage: true });
@@ -45,11 +52,25 @@ const { chromium } = require('playwright');
   seen.split = await page.evaluate(() => [document.querySelector('#eval-version').closest('label').hidden,
     document.querySelector('#eval-dirs').closest('.label').hidden]);
 
-  page = await open(field);
-  await page.goto(`${url}#/b/${batch}`);
-  await page.waitForSelector('#prelabel-model');
-  seen.prelabel = await page.$eval('#prelabel-model', (s) => ({ value: s.value, options: [...s.options].map((o) => o.textContent), tag: s.tagName }));
-  await page.screenshot({ path: `${out}/prelabel-form.png`, fullPage: true });
+  seen.prelabel = [];
+  for (const batch of batches.split(',')) {
+    page = await open(field);
+    await page.goto(`${url}#/b/${batch}`);
+    await page.waitForSelector('#prelabel-model');
+    const form = await page.$eval('#prelabel-form', (f) => {
+      const s = f.querySelector('#prelabel-model');
+      return { value: s.value, disabled: s.disabled, first: s.options[0].textContent, chosen: s.selectedOptions[0]?.textContent || null,
+        groups: [...s.querySelectorAll('optgroup')].map((g) => [g.label, [...g.querySelectorAll('option')].map((o) => o.value)]),
+        hint: f.querySelector('p.muted')?.textContent || null, go: f.querySelector('#prelabel-go').disabled };
+    });
+    if (!form.value && !form.go) {
+      await page.click('#prelabel-go');
+      await page.waitForSelector('div.error');
+      form.refused = (await page.textContent('div.error')).trim();
+    }
+    seen.prelabel.push(form);
+    await page.screenshot({ path: `${out}/prelabel-${seen.prelabel.length}.png`, fullPage: true });
+  }
 
   seen.errors = errors;
   console.log(JSON.stringify(seen));
