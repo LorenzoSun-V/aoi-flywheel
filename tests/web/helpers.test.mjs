@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  shortWhen, listWhen, sourceText, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
+  shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, lastEvalByModel,
@@ -299,4 +299,13 @@ test('a model version\'s ONNX is saved under its reference and highest 版本号
   assert.equal(onnxName({ model: 'SES-TX-detr', number: 3, labels: [] }), 'SES-TX-detr@3.onnx');
   assert.equal(onnxName({ model: 'SES-TX-detr', number: 3 }), 'SES-TX-detr@3.onnx');
   assert.equal(onnxName({ model: 'SES-TX-detr', number: 12, labels: ['v0.9.0', 'v1.0.0'] }), 'SES-TX-detr@12_v1.0.0.onnx');  // in use, lowest first
+});
+
+test('a page that cannot be shown keeps the path of its section and the name asked for', () => {
+  assert.deepEqual(errorTrail(['d', 'SES-TX']), { section: 'datasets', steps: ['SES-TX'] });
+  assert.deepEqual(errorTrail(['v', 'SES-TX', '3']), { section: 'datasets', steps: ['SES-TX'] });
+  assert.deepEqual(errorTrail(['mv', 'SES-TX-detr', '2']), { section: 'models', steps: ['SES-TX-detr'] });
+  assert.deepEqual(errorTrail(['b', 'SES-TX-20261104']), { section: 'batches', steps: ['SES-TX-20261104'] });
+  assert.deepEqual(errorTrail(['users']), { section: 'users', steps: [] });
+  assert.deepEqual(errorTrail(['nothing-here']), { section: null, steps: [] });
 });

@@ -27,7 +27,7 @@ const { chromium } = require('playwright');
   seen.who = await page.textContent('#who');
   await page.screenshot({ path: `${out}/datasets.png` });
   await page.click(`a:text-is("${dataset}")`);
-  await page.waitForSelector('select#old');  // the dataset's page (the list has tables too)
+  await page.waitForSelector('#versions');  // the dataset's page
   seen.versions = await page.$$eval('#versions tr td:first-child', (tds) => tds.map((t) => t.textContent));
   await page.click(`#versions a[title="${dataset}@2"]`);
   await page.waitForSelector('.folders');
@@ -53,11 +53,17 @@ const { chromium } = require('playwright');
   seen.hashchanges = await page.evaluate(() => window.hashchanges);
   await page.screenshot({ path: `${out}/image.png` });
   await page.goto(`${url}#/d/${encodeURIComponent(dataset)}`);
-  await page.waitForSelector('select#old');
-  await page.click('button:has-text("比较")');
-  await page.waitForSelector('h1');
-  await page.waitForFunction(() => document.querySelector('h1').textContent.includes('→'));
-  seen.diff = await page.textContent('main p');
+  await page.waitForSelector('#versions');
+  await page.click('#versions tr[data-number="2"] .more .dots');  // a version against its parent, from its ⋯
+  await page.click('.menu [role=menuitem]:has-text("与父版本比较")');
+  await page.waitForSelector('#diff-counts');
+  seen.diff = await page.textContent('#diff-counts');
+  seen.diffTitle = await page.textContent('main h1');
+  await page.selectOption('#old', '2');  // any two versions, chosen on the page
+  await page.selectOption('#new', '1');
+  await page.click('#diff-pick button');
+  await page.waitForFunction(() => document.querySelector('main h1').textContent.includes('@2 →'));
+  seen.diffBack = await page.textContent('#diff-counts');
   await page.screenshot({ path: `${out}/diff.png` });
   await page.click('#who button');
   await page.waitForSelector('form.login');

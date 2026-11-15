@@ -50,15 +50,21 @@ const { chromium } = require('playwright');
   seen.tables = {};
   seen.versionsOneLine = await oneLine('#versions td');
   seen.fits = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
-  seen.note = await page.$eval('#versions tr:nth-child(2) td:last-child', (td) => ({
+  seen.note = await page.$eval('#versions tr:nth-child(2) td:nth-last-child(2)', (td) => ({
     title: td.title, cut: td.scrollWidth > td.clientWidth, overflow: getComputedStyle(td).textOverflow }));
   seen.time = await page.$eval('#versions tr:nth-child(2) td.time', (td) => [td.textContent, td.title]);
   seen.source = await page.$eval('#versions tr:nth-child(2) td.text.muted', (td) => [td.textContent, td.title]);
   seen.numbersRight = await page.$$eval('#versions th.num', (ths) => ths.map((t) => getComputedStyle(t).textAlign));
   seen.labelChip = await page.$eval('#versions .tag.ver', (t) => getComputedStyle(t).backgroundColor);
-  seen.removeButton = await page.locator('a.button', { hasText: '移除目录' }).count();
   seen.versionRefs = await page.$$eval('#versions tr td:nth-child(3) a', (as) => as.map((a) => [a.textContent, a.title]));
   seen.tables.pool = await tables();
+  // the actions of the pool at the right of its title, the less used ones under 更多
+  seen.headActions = await page.$$eval('.page-head .actions > a.button', (as) => as.map((a) => a.textContent));
+  await page.click('.page-head .more-button');
+  seen.more = await page.$$eval('.page-head .menu [role=menuitem]', (xs) => xs.map((x) => x.textContent));
+  await page.keyboard.press('Escape');
+  seen.tree = await page.textContent('#places a.on');  // the pool's own line is the one lit in the tree
+  seen.navLine = await page.getAttribute('#nav a:has-text("模型")', 'href');
   await page.screenshot({ path: `${out}/layout-pool.png`, fullPage: true });
 
   // the record of who did what: one line per row
