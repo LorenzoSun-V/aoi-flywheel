@@ -157,9 +157,11 @@ export function compareCells(a, b, numeric, desc = false) {
 }
 
 // A list whose columns sort on a click (or Enter) on their header; a second click reverses. The order chosen
-// stays for the table's id while the page is drawn again (a refresh, the next page of rows). Only the rows
-// shown are sorted. Returns the table; table.resort() sorts rows added later.
+// stays for the table's id while the same page is drawn again (a refresh, the next page of rows, another site or
+// status of it); another page forgets it (render). Only the rows shown are sorted. Returns the table;
+// table.resort() sorts rows added later.
 const sortOrders = new Map();
+let sortedOn = null;  // the page (its address without the query) the orders were chosen on
 function sortable(table) {
   const heads = [...table.rows[0].cells];
   const keyOf = (td) => (td.hasAttribute('data-sort') ? td.dataset.sort : td.textContent.trim());
@@ -2488,11 +2490,12 @@ async function jobsPage(query) {
   let earlier = false;  // older pages shown: the page is not redrawn on its own any more, which would drop them
   const more = el('button', { id: 'jobs-more', type: 'button', hidden: !first.more, onclick: async () => {
     more.disabled = true;
+    earlier = true;  // from now on: a refresh would draw the page again while the rows asked for are on their way
+    clearTimeout(timer);
     try {
       const r = await ask(last);
       for (const j of r.jobs) table.append(rowOf(j));
       if (r.jobs.length) last = r.jobs[r.jobs.length - 1].id;
-      earlier = true;
       table.resort();
       more.hidden = !r.more;
     } catch (e) { more.after(errorBox(e)); }
@@ -3795,6 +3798,76 @@ export function detailText(detail) {
     .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ');
 }
 
+const ROLE_NAMES = { admin: '管理员', algo: '算法工程师', field: '现场实施', worker: 'GPU worker' };  // as auth.ROLES
+const JOB_KINDS = { check: '检查推理环境', eval: '评估', predict: '推理（预标注）' };  // as jobs.KINDS
+export const EVENT_GROUPS = { dataset: '数据集', version: '版本', batch: '标注批次', site: '现场', line: '产线', model: '模型',
+  model_version: '模型版本', eval: '评估', prediction_set: '预测集', release: '发布', runner: '推理环境', job: '任务',
+  user: '账号', token: '凭据' };
+
+// The details of an event (see events.record in each server module) as a sentence; an action this page does
+// not know keeps its fields as they are.
+export function eventText(action, detail) {
+  const d = detail || {};
+  const join = (...parts) => parts.filter(Boolean).join('；');
+  const said = (label, v) => (v ? `${label}：${v}` : '');
+  const place = d.site ? [d.site, d.line].filter(Boolean).join(' / ') : '';
+  const short = (v, n) => (v ? String(v).slice(0, n) : '');
+  const job = d.job_id ? `任务 ${d.job_id}` : '';
+  switch (action) {
+    case 'dataset.create': return join(KIND_NAMES[d.kind] || d.kind, place, d.classes && d.classes.length ? said('类别', d.classes.join('、')) : '');
+    case 'dataset.classes': return join(said('添加', (d.added || []).join('、')), d.count != null ? `共 ${d.count} 个类别` : '');
+    case 'version.create': return join(d.file_count != null ? `${d.file_count} 个文件，${sizeText(d.total_bytes || 0)}` : '', said('来源', sourceText(d.source)));
+    case 'version.label': case 'model_version.label': return join(`版本号 ${d.label}`, said('备注', d.note));
+    case 'version.unlabel': case 'model_version.unlabel': return join(`版本号 ${d.label}`, said('原因', d.note));
+    case 'batch.upload': return join(d.pool ? `入库到 ${d.pool} / ${d.dir}/` : '', said('标注人', d.labeler), d.by_reviewer ? '由复核人修改后上传' : '');
+    case 'batch.submit': return `复核人 ${d.reviewer}${d.self_review ? '（本人复核）' : ''}`;
+    case 'batch.reject': return join(said('意见', d.comment), d.images ? `问题图片 ${d.images} 张` : '');
+    case 'batch.approve': return d.changed_by_reviewer ? '复核人修改后通过' : '';
+    case 'batch.import': return join(`入库为 ${d.pool_version} 的 ${d.dir}/`, d.replace ? '替换原有目录' : '');
+    case 'batch.close': return said('原因', d.comment);
+    case 'batch.prelabel': return join(d.what, job);
+    case 'site.add': case 'line.add': return said('显示名', d.name);
+    case 'site.rename': return d.name ? `显示名改为「${d.name}」` : '清除显示名';
+    case 'line.benchmark': return join(`基准测试集 ${d.dataset}`, said('备注', d.note));
+    case 'model.create': return join(place, TASK_NAMES[d.task] || d.task);
+    case 'model_version.register': return said('ONNX 哈希', short(d.onnx_sha256, 12));
+    case 'model_version.tag': return join(`${d.added ? '标记为' : '取消标记'}「${TAG_NAMES[d.tag] || d.tag}」`, said('备注', d.note));
+    case 'eval.register': return join(`模型版本 ${d.model_version}`, said('快照划分', d.split), job);
+    case 'prediction_set.register': return join(`${d.model} 在 ${d.data} 上`, `${d.images} 张图片，${d.boxes} 个框`, job);
+    case 'release.register': return join(`${place} 部署 ${d.model_version}`, said('部署提交号', short(d.deploy_commit, 8)));
+    case 'runner.register': return join(said('conda 环境', d.conda_env), said('框架', d.framework), said('源码提交号', short(d.src_commit, 8)));
+    case 'job.submit': return join(JOB_KINDS[d.kind] || d.kind, d.model && d.data ? `${d.model} 在 ${d.data} 上` : '', said('推理环境', d.runner));
+    case 'job.cancel': return d.was === 'running' ? '运行中，已请求停止' : '排队中，已取消';
+    case 'user.create': return `角色为${ROLE_NAMES[d.role] || d.role}`;
+    case 'user.role': return `角色由${ROLE_NAMES[d.from] || d.from}改为${ROLE_NAMES[d.to] || d.to}`;
+    case 'user.disable': return d.tokens_revoked ? `同时吊销 ${d.tokens_revoked} 个凭据` : '';
+    case 'user.enable': return '';
+    case 'token.create': case 'token.revoke': return `凭据 ${d.token_id}${d.label ? `（${d.label}）` : ''}`;
+    default: return detailText(d);
+  }
+}
+
+// Where the object of an event is shown (null: no page of its own, or none this account may open).
+export function eventHref(action, object, mayManageUsers = false) {
+  const ref = (s) => { const i = s.lastIndexOf('@'); return i > 0 ? [s.slice(0, i), s.slice(i + 1)] : [s, '']; };
+  const number = (s) => (/(\d+)$/.exec(s) || [])[1];
+  const group = action.split('.')[0];
+  const o = String(object || '');
+  if (!o) return null;
+  if (group === 'dataset') return hrefOf(['d', o]);
+  if (group === 'version') { const [name, n] = ref(o); return n ? hrefOf(['v', name, n]) : hrefOf(['d', name]); }
+  if (group === 'batch') return hrefOf(['b', ref(o)[0]]);
+  if (group === 'site' || group === 'line') { const [site, line] = o.split('/'); return hrefOf([], { site, line }); }
+  if (group === 'model') return hrefOf(['m', o]);
+  if (group === 'model_version') { const [name, n] = ref(o); return n ? hrefOf(['mv', name, n]) : hrefOf(['m', name]); }
+  if (group === 'eval' && number(o)) return hrefOf(['eval', number(o)]);
+  if (group === 'prediction_set' && number(o)) return hrefOf(['p', number(o)]);
+  if (group === 'job' && number(o)) return hrefOf(['job', number(o)]);
+  if (group === 'release') return hrefOf(['releases'], { ref: o });
+  if (group === 'user' || group === 'token') return mayManageUsers ? hrefOf(['users']) : null;
+  return null;  // a runner: no page of its own
+}
+
 async function eventsPage(query) {
   const show = live();
   const asked = { limit: '100' };
@@ -3805,10 +3878,8 @@ async function eventsPage(query) {
     location.hash = hrefOf(['events'], next);
   };
   const groups = [...new Set(Object.keys(r.actions).map((a) => a.split('.')[0]))];
-  const groupNames = { dataset: '数据集', version: '版本', model: '模型', model_version: '模型版本', eval: '评估', release: '发布',
-    runner: '推理环境', job: '任务', prediction_set: '预测集', user: '账号', token: '凭据' };
-  const action = el('select', {}, el('option', { value: '' }, '全部操作'),
-    groups.map((g) => el('option', { value: g }, groupNames[g] || g)));
+  const action = el('select', { id: 'event-group' }, el('option', { value: '' }, '全部操作'),
+    groups.map((g) => el('option', { value: g }, EVENT_GROUPS[g] || g)));
   action.value = (asked.action || '').split('.')[0];
   const actor = el('input', { type: 'text', placeholder: '账号', value: asked.actor || '' });
   const q = el('input', { type: 'text', placeholder: '对象名称中的文字，例如 SES-TX', value: asked.q || '' });
@@ -3819,7 +3890,8 @@ async function eventsPage(query) {
     r.events.length ? el('table', {}, el('tr', {}, ['时间', '账号', '操作', '对象', '细节'].map((h) => el('th', {}, h))),
       r.events.map((e) => el('tr', {},
         timeCell(e.at), el('td', {}, e.by_server ? '服务器命令行' : e.actor), el('td', {}, e.action_text),
-        el('td', {}, e.object), el('td', { class: 'text muted mono', title: detailText(e.detail) || null }, detailText(e.detail)))))
+        ((href) => el('td', {}, href ? el('a', { href }, e.object) : e.object))(eventHref(e.action, e.object, can('users.manage'))),
+        textCell(eventText(e.action, e.detail)))))
       : el('p', { class: 'muted' }, '没有符合条件的记录。'),
     el('div', { class: 'row', style: 'margin-top:12px' },
       asked.before ? el('a', { class: 'button', href: hrefOf(['events'], { actor: asked.actor, action: asked.action, q: asked.q }) }, '返回最新') : null,
@@ -4425,6 +4497,8 @@ async function render() {
   hideTip();
   const show = live();
   const { parts, query } = route(location.hash);
+  const path = (location.hash || '#/').split('?')[0];
+  if (path !== sortedOn) { sortOrders.clear(); sortedOn = path; }
   renderNav();
   const signingIn = parts[0] === 'login' || !token();
   document.body.classList.toggle('login', signingIn);  // no side bar before one is signed in

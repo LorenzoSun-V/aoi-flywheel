@@ -64,6 +64,7 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/events?q=${name}`);
   await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '操作记录' && document.querySelector('table'));  // not the accounts page's table
   seen.events = await page.$$eval('table tr', (rows) => rows.slice(1).map((r) => [...r.children].map((c) => c.textContent)));
+  seen.eventLinks = await page.$$eval('table tr td:nth-child(4)', (tds) => tds.map((td) => td.querySelector('a')?.getAttribute('href') || null));
   await page.screenshot({ path: `${out}/events.png`, fullPage: true });
 
   // the new field account: reads, is offered nothing it may not do

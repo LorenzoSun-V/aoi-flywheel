@@ -8,7 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
-  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -376,4 +376,46 @@ test('a column sorts numbers by value, text by its words and the numbers in it, 
   assert.deepEqual(sort(['SES / TX', 'ses / ax', 'ABC / L2'], false, false), ['ABC / L2', 'ses / ax', 'SES / TX']);
   assert.deepEqual(sort(['2026-11-15T08:00:00Z', '', '2026-11-14T09:30:00Z'], false, true),
     ['2026-11-15T08:00:00Z', '2026-11-14T09:30:00Z', '']);
+});
+
+test('the record of operations says each one in words and leads to what it was done to', () => {
+  const said = [
+    ['dataset.create', { kind: 'pool', site: 'SES', line: 'TX', classes: ['scratch', 'dent'] }, '数据池；SES / TX；类别：scratch、dent'],
+    ['dataset.classes', { added: ['pit'], count: 3 }, '添加：pit；共 3 个类别'],
+    ['version.create', { kind: 'pool', file_count: 45, total_bytes: 2048, parent_id: 7, source: 'fw dataset import host:/data/pool' }, '45 个文件，2.0 KB；来源：fw dataset import · pool'],
+    ['version.label', { label: 'v0.1.0', note: '' }, '版本号 v0.1.0'],
+    ['model_version.unlabel', { label: 'v0.2.0', note: '设错了' }, '版本号 v0.2.0；原因：设错了'],
+    ['batch.upload', { pool: 'SES-TX', dir: '20261113', labeler: '张三' }, '入库到 SES-TX / 20261113/；标注人：张三'],
+    ['batch.upload', { labeler: '张三', by_reviewer: true }, '标注人：张三；由复核人修改后上传'],
+    ['batch.submit', { reviewer: 'li', self_review: false }, '复核人 li'],
+    ['batch.reject', { comment: '划痕漏标', images: 3 }, '意见：划痕漏标；问题图片 3 张'],
+    ['batch.approve', { changed_by_reviewer: false }, ''],
+    ['batch.import', { pool_version: 'SES-TX@5', dir: '20261113', replace: true }, '入库为 SES-TX@5 的 20261113/；替换原有目录'],
+    ['batch.close', { comment: '重复上传' }, '原因：重复上传'],
+    ['site.rename', { name: '' }, '清除显示名'],
+    ['line.benchmark', { dataset: 'SES-TX-test', note: '' }, '基准测试集 SES-TX-test'],
+    ['model.create', { site: 'SES', line: 'TX', task: 'det' }, 'SES / TX；检测'],
+    ['model_version.register', { trainset_id: 3, onnx_sha256: 'ab'.repeat(32) }, 'ONNX 哈希：abababababab'],
+    ['model_version.tag', { tag: 'candidate', added: true, note: '' }, '标记为「候选」'],
+    ['model_version.tag', { tag: 'deprecated', added: false, note: '误标' }, '取消标记「弃用」；备注：误标'],
+    ['eval.register', { model_version: 'M@2', testset_id: 9, split: 'test', job_id: 12 }, '模型版本 M@2；快照划分：test；任务 12'],
+    ['prediction_set.register', { model: 'M@2', data: 'SES-TX@5', job_id: 13, images: 120, boxes: 340 }, 'M@2 在 SES-TX@5 上；120 张图片，340 个框；任务 13'],
+    ['release.register', { model_version: 'M@2', site: 'SES', line: 'TX', deploy_commit: '0123456789abcdef' }, 'SES / TX 部署 M@2；部署提交号：01234567'],
+    ['job.submit', { kind: 'check', model: null, data: null, runner: 'rfdetr@2' }, '检查推理环境；推理环境：rfdetr@2'],
+    ['job.cancel', { was: 'running' }, '运行中，已请求停止'],
+    ['user.role', { from: 'algo', to: 'field' }, '角色由算法工程师改为现场实施'],
+    ['user.disable', { tokens_revoked: 2 }, '同时吊销 2 个凭据'],
+    ['token.revoke', { token_id: 4, label: '现场笔记本' }, '凭据 4（现场笔记本）'],
+    ['something.new', { a: 1, b: null }, 'a=1'],
+  ];
+  for (const [action, detail, text] of said) assert.equal(eventText(action, detail), text, action);
+  const links = [
+    ['dataset.create', 'SES-TX', '#/d/SES-TX'], ['version.label', 'SES-TX@3', '#/v/SES-TX/3'], ['batch.reject', 'SES-TX-20261113@2', '#/b/SES-TX-20261113'],
+    ['site.add', 'SES', '#/?site=SES'], ['line.benchmark', 'SES/TX', '#/?site=SES&line=TX'], ['model.create', 'SES-TX-detr', '#/m/SES-TX-detr'],
+    ['model_version.tag', 'SES-TX-detr@3', '#/mv/SES-TX-detr/3'], ['eval.register', '评估 12', '#/eval/12'], ['prediction_set.register', '预测集 5', '#/p/5'],
+    ['job.cancel', '任务 17', '#/job/17'], ['release.register', 'SES-TX-r3', '#/releases?ref=SES-TX-r3'], ['runner.register', 'rfdetr@2', null],
+    ['user.create', 'zhang', null], ['token.create', 'zhang', null],
+  ];
+  for (const [action, object, href] of links) assert.equal(eventHref(action, object), href, action);
+  assert.equal(eventHref('user.role', 'zhang', true), '#/users');
 });
