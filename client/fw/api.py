@@ -228,6 +228,14 @@ class Api:
     def rename_site(self, ref: str, name: str):
         return self.post('/sites/name', {'ref': ref, 'name': name})
 
+    def benchmark(self, site: str, line: str):
+        """The line's benchmark test set now and every setting of it."""
+        return self.get('/sites/benchmark', site=site, line=line)
+
+    def set_benchmark(self, ref: str, dataset: str, note: str = ''):
+        """ref: 'SES/TX'; dataset: a test set of that line."""
+        return self.post('/sites/benchmark', {'ref': ref, 'dataset': dataset, 'note': note})
+
     def dataset(self, name: str):
         return self.get(f'/datasets/{name}')
 

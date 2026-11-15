@@ -311,8 +311,23 @@ def test_batches_are_refused_where_pools_are_meant(api, field, pool, day, tmp_pa
         ops.import_folder(api, name, day, echo=quiet)
     with pytest.raises(ApiError, match='标注批次'):
         api.preview_trainset('TS-' + uuid.uuid4().hex[:6], {'sources': [f'{name}@1'], 'classes': ['ng']})
-    with pytest.raises(ApiError, match='批次要进的是数据池'):
+    with pytest.raises(ApiError, match='标注批次只能进入数据池'):
         upload(field, name, day, to='zz')
+
+
+def test_a_batch_goes_into_a_data_pool_only(api, field, day):
+    """A test set, a regression set or any other dataset takes no labelling batch: those are uploaded by an
+    algorithm engineer on their own page. Nothing is made."""
+    for kind, site, line, what in (('test', 'SES', 'TX', '测试集'), ('test', '', '', '测试集'),
+                                   ('regression', '', '', '回归集'), ('other', '', '', '其他数据集')):
+        target = f'K-{uuid.uuid4().hex[:8]}'
+        api.create_dataset(target, site, line, kind, '')
+        name = new_name()
+        with pytest.raises(ApiError, match=f'{target} 是{what}，标注批次只能进入数据池') as e:
+            upload(field, target, day, name=name)
+        assert e.value.status == 400
+        assert name not in [x['name'] for x in api.batches()['batches']]
+        assert api.dataset(target)['latest'] is None
 
 
 def test_database_guards(field, pool, day, sql):

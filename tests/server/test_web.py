@@ -337,9 +337,9 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker, tmp_path):  # noqa: F811
-    """The overview: every line with how much it holds; one line with its release, models and their last
-    evaluation, snapshots, pools and the batches under way; said plainly when the line is unknown or the
-    account may not see it."""
+    """The overview: every line with how much it holds; one line with its release, its benchmark test set and
+    its models evaluated on it, snapshots, pools and the batches under way; said plainly when the line is
+    unknown or the account may not see it."""
     from fw import ops
     from helpers import quiet, register_place
     from test_models import deteval_out, files_in, register, release
@@ -352,7 +352,12 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     model = f'M-{os.urandom(4).hex()}'  # noqa: F811
     api.create_model(model, site, 'TX', 'det', '')
     register(api, model, snap, files_in(tmp_path))
-    e = ops.register_eval(api, f'{model}@1', f'{snap["ref"]}:test', deteval=deteval_out(tmp_path), echo=quiet)
+    ops.register_eval(api, f'{model}@1', f'{snap["ref"]}:test', deteval=deteval_out(tmp_path), echo=quiet)  # not on the benchmark
+    bench = f'B-{os.urandom(4).hex()}'
+    api.create_dataset(bench, site, 'TX', 'test', '')
+    ops.import_folder(api, bench, write_tree(tmp_path / 'bench', {'x.png': real_png(64, 32, 7)}), echo=quiet)
+    api.set_benchmark(f'{site}/TX', bench)
+    e = _on(api, tmp_path, f'{model}@1', f'{bench}@1', {'mAP50': 0.7, 'images': 1})
     rel = release(make_api('deploy'), f'{model}@1', '2026-10-20T10:00+08:00', site=site, line='TX')
     batch = ops.upload_batch(api, write_tree(tmp_path / 'day', {'x.png': real_png(64, 32, 9)}), a, '张三', echo=quiet)['name']
     done = ops.upload_batch(api, write_tree(tmp_path / 'old', {'y.png': real_png(64, 32, 10)}), a, '张三', echo=quiet)['name']
@@ -367,11 +372,13 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert seen['nav'][0] == '概览'
-    assert seen['lineRow'] == [f'{site} / TX', '1', '1', '1', '1', '1']   # pool, snapshot, model, batch under way, release
+    assert seen['lineRow'] == [f'{site} / TX', '2', '1', '1', '1', '1']   # pool and test set, snapshot, model, batch, release
     assert rel['ref'] in seen['release'] and f'{model}@1' in seen['release']
     assert seen['models'] == [model, '@1', '0.7', '—', '—', '—', '']      # the numbers the report has
     assert seen['menu'] == [['查看版本', f'#/mv/{model}/1'], ['查看评估', f'#/eval/{e["id"]}'], ['复制版本号', None]]
-    assert seen['data'] == [f'{a}@1', f'{snap["ref"]}']                       # the pool, then the snapshot
+    assert seen['data'] == [f'{a}@1', f'{snap["ref"]}', f'{bench}@1']        # the pool, the snapshot, the test set
+    assert seen['benchmark'].startswith(f'基准测试集{bench}@1') and seen['benchmarkChange'] == '更换'
+    assert '基准测试集尚未设定' in seen['ty']
     assert seen['batches'] == [batch, '待提交复核']                            # the closed one is not under way
     assert seen['treeOn'].startswith('TX')
     assert seen['navModels'] == f'#/models?site={site}&line=TX'               # the lists keep the line
@@ -381,8 +388,74 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     assert seen['siteLines'] == [f'{site} / TX', f'{site} / TY']
     # a field account reads every part of it
     assert seen['field']['sections'] == ['models', 'data', 'batches'] and seen['field']['refused'] == []
+    assert seen['field']['benchmark'].startswith(f'基准测试集{bench}@1') and seen['field']['change'] == 0  # read, not set
     assert rel['ref'] in seen['field']['release'] and seen['field']['model'] == model
     assert '概览' not in seen['workerNav'] and '请使用有权限的账号' in seen['refused']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_models_of_a_line_are_compared_on_its_benchmark_test_set(service, tokens, api, make_api, tmp_path):
+    """The overview sets and changes a line's benchmark test set (a test set of that line), keeping every setting;
+    the models' numbers there and on their page are those measured on its newest version as a whole, the
+    released version marked and the others with their change from it; evaluation tables show mAP50,
+    mAP50-95, P and R and fit at 1180; a field account reads it and sets nothing; a new batch is offered data
+    pools only, by line, none chosen unless the line has one."""
+    from fw import ops
+    from helpers import quiet, register_place
+    from test_models import files_in, register, release
+    from test_trainsets import make, pool, sample_files
+    site = f'S{os.urandom(4).hex()}'
+    register_place(site, 'TY')
+    a = pool(api, tmp_path / 'a', sample_files('2026-09', 4), site=site, line='TX')
+    ty = [pool(api, tmp_path / f'ty{i}', sample_files('2026-09', 1), site=site, line='TY') for i in range(2)]
+    first, second, other, stray = (f'{p}-{os.urandom(4).hex()}' for p in 'ABCD')
+    for name, line in ((first, 'TX'), (second, 'TX'), (other, 'TY')):
+        api.create_dataset(name, site, line, 'test', '')
+        ops.import_folder(api, name, write_tree(tmp_path / name, {'x.png': real_png(64, 32, len(name) + ord(name[0]))}), echo=quiet)
+    api.create_dataset(stray, site, 'TX', 'regression', '')                      # not a test set: not offered
+    snap = make(api, f'T-{os.urandom(4).hex()}', [f'{a}@1'])
+    model = f'M-{os.urandom(4).hex()}'
+    api.create_model(model, site, 'TX', 'det', '')
+    for i in range(3):
+        register(api, model, snap, files_in(tmp_path, f'b{i}'))
+    for n, numbers in ((1, {'mAP50': 0.9, 'P': 0.8}), (2, {'mAP50': 0.92, 'mAP50-95': 0.7, 'P': 0.85, 'R': 0.8}),
+                       (3, {'mAP50': 0.95, 'mAP50-95': 0.72, 'P': 0.83, 'R': 0.81})):
+        _on(api, tmp_path, f'{model}@{n}', f'{second}@1', numbers)
+    _on(api, tmp_path, f'{model}@1', f'{first}@1', {'mAP50': 0.5})
+    release(make_api('deploy'), f'{model}@2', '2026-11-10T10:00+08:00', site=site, line='TX')
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'benchmark.cjs'), service.url + '/', tokens['algo'], tokens['field'], site, model,
+                        first, second, str(shots)], capture_output=True, text=True, timeout=240, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    # none set: the latest version, no numbers
+    assert '尚未设定' in seen['none']['bar'] and seen['none']['models'] == ['@3', '—', '—']
+    assert seen['offered'] == ['', first, second] and seen['unchosen'] == '请选择测试集。'
+    assert seen['setToast'] == f'已将 {first} 设为 {site}/TX 的基准测试集'
+    assert f'{first}@1' in seen['first']['bar'] and seen['first']['models'] == ['@1', '0.5', '—']   # its only report there
+    assert seen['offeredNow'] == ['', second]
+    assert f'{second}@1' in seen['second']['bar'] and seen['second']['models'] == ['@3', '0.95', '0.72', '0.83', '0.81']
+    assert seen['history'] == [[api.me()['name'], second, ''], [api.me()['name'], first, '首个基准']]
+    assert [h['dataset'] for h in api.benchmark(site, 'TX')['history']] == [second, first]
+    # the model's page: its versions on the benchmark, the release marked, the change from it
+    assert seen['benchRef'] == f'基准测试集{second}@1'
+    assert seen['bench'] == [['@3', '0.95 +0.03', '0.72 +0.02', '0.83 −0.02', '0.81 +0.01'],
+                             ['@2当前发布', '0.92', '0.7', '0.85', '0.8'],
+                             ['@1', '0.9 −0.02', '—', '0.8 −0.05', '—']]
+    assert seen['evalHead'] == ['', '编号', '模型版本', '测试集', '目录', 'mAP50', 'mAP50-95', 'P', 'R', '时间', '备注']
+    assert seen['evalRows'][0][1:] == ['@1', f'{first}@1', '全部', '0.5', '—', '—', '—']
+    assert seen['evalRows'][1][1:] == ['@3', f'{second}@1', '全部', '0.95', '0.72', '0.83', '0.81']
+    assert seen['evalWho'].startswith(api.me()['name'])
+    assert seen['versionEvalHead'] == ['', '编号', '测试集', '目录', 'mAP50', 'mAP50-95', 'P', 'R', '时间', '备注']
+    assert seen['modelWide'] == [] and seen['versionWide'] == []
+    # a new batch: pools only, by line, none chosen unless the line has only one
+    groups = dict(seen['pools'])
+    assert groups[f'{site} / TX'] == [a] and sorted(groups[f'{site} / TY']) == sorted(ty)
+    assert not {first, second, other, stray, snap['dataset']} & {n for g in groups.values() for n in g}
+    assert seen['poolFirst'] == ['', '请选择数据池'] and seen['poolOfLine'] == a and seen['poolOfTwo'] == ''
+    assert f'{second}@1' in seen['field']['bar'] and seen['field']['change'] == 0
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
@@ -447,9 +520,19 @@ def _deteval(tmp_path, numbers):
     return d
 
 
+def _on(api, tmp_path, model_ref, testset_ref, numbers):
+    """An evaluation registered by hand with these numbers."""
+    from fw import ops
+    from helpers import quiet
+    tag = os.urandom(3).hex()
+    run = write_tree(tmp_path / f'm-{tag}', {'metrics.json': json.dumps(numbers).encode()})
+    return ops.register_eval(api, model_ref, testset_ref, metrics=run / 'metrics.json', echo=quiet)
+
+
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(service, tokens, api, make_api, database, tmp_path):
-    """SES / TX 贴片线: the release first, models with the evaluation each row shows, data, batches on the right;
+    """SES / TX 贴片线: the release first, models with their evaluation on the line's benchmark test set, data,
+    batches on the right;
     the ⋯ of a row by mouse and keys, its links, copying the reference (or showing it selected where the
     browser has no clipboard); a line with nothing on it; the layout at 1440, 1920 and a narrow window."""
     from fw import ops
@@ -477,12 +560,13 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
         register(api, detr, snap, files_in(tmp_path, f'detr{i}'))
     register(api, yolo, snap, files_in(tmp_path, 'yolo'))
     register(api, seg, snap, files_in(tmp_path, 'seg'))
-    where = f'{snap["ref"]}:test'
-    ops.register_eval(api, f'{detr}@1', where, deteval=_deteval(tmp_path, {'mAP50': 0.9}), echo=quiet)
-    shown = ops.register_eval(api, f'{detr}@2', where, echo=quiet,
-                              deteval=_deteval(tmp_path, {'mAP50': 0.962, 'mAP50-95': 0.846, 'P': 0.951, 'R': 0.933}))
-    ops.register_eval(api, f'{yolo}@1', where, echo=quiet,
-                      deteval=_deteval(tmp_path, {'mAP50': 0.928, 'mAP50-95': 0.791, 'P': 0.94, 'R': 0.9}))
+    api.set_benchmark('SES/TX', test)                     # the models of the line are compared on its newest version
+    bench = f'{test}@1'
+    _on(api, tmp_path, f'{detr}@1', bench, {'mAP50': 0.9})
+    shown = _on(api, tmp_path, f'{detr}@2', bench, {'mAP50': 0.962, 'mAP50-95': 0.846, 'P': 0.951, 'R': 0.933})
+    _on(api, tmp_path, f'{yolo}@1', bench, {'mAP50': 0.928, 'mAP50-95': 0.791, 'P': 0.94, 'R': 0.9})
+    # measured elsewhere, not on the benchmark: not shown next to the others
+    ops.register_eval(api, f'{seg}@1', f'{snap["ref"]}:test', deteval=_deteval(tmp_path, {'mAP50': 0.99}), echo=quiet)
     rel = release(make_api('deploy'), f'{detr}@2', '2026-11-13T17:25+08:00', site='SES', line='TX')
     field = make_api('field')
     batches = []
@@ -512,7 +596,7 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert rel['ref'].startswith('SES-TX-r')
     rows = {r[0]: r[1:] for r in seen['models']}
     assert rows[detr] == ['@2', '0.962', '0.846'] and rows[yolo] == ['@1', '0.928', '0.791']   # the evaluated version
-    assert rows[seg] == ['@1', '—', '—']                                                       # no evaluation yet
+    assert rows[seg] == ['未评估', '—', '—']                                                    # none on the benchmark
     kinds = {name.split('@')[0]: kind for name, kind in seen['data']}
     assert kinds[data] == '数据池' and kinds[snap['dataset']] == '训练集快照' and kinds[test] == '测试集'
     mine = {name: state for name, state in seen['batches'] if name in batches}   # other tests add batches on SES/TX too

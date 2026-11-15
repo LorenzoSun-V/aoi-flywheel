@@ -188,3 +188,68 @@ def test_a_label_refused_after_the_creation_says_what_exists(api, model, snapsho
     err = capsys.readouterr().err
     assert f'{model}@2 已经建好' in err and f'fw label add {model}@2 <版本号> --model' in err
     assert api.model_version(model, 2)['labels'] == []
+
+
+def test_a_line_has_one_benchmark_test_set_and_keeps_every_setting(api, make_api, tmp_path):
+    """A line's benchmark is a test set of that line, set and changed by an algorithm engineer or an
+    administrator; models are compared on its newest version. Every setting is kept, the newest first."""
+    site = new_site()
+    api.add_site(f'{site}/TX')
+    api.add_site(f'{site}/TY')
+    field = make_api('field')
+    assert field.benchmark(site, 'TX') == {'site': site, 'line': 'TX', 'current': None, 'history': []}
+    first, second, elsewhere, pool_name, loose, regression = (f'{p}-{uuid.uuid4().hex[:8]}' for p in 'ABCDEF')
+    api.create_dataset(first, site, 'TX', 'test', '')
+    api.create_dataset(second, site.lower(), 'tx', 'test', '')
+    api.create_dataset(elsewhere, site, 'TY', 'test', '')
+    api.create_dataset(pool_name, site, 'TX', 'pool', '', classes=helpers.CLASSES)
+    api.create_dataset(loose, '', '', 'test', '')
+    api.create_dataset(regression, '', '', 'regression', '')
+    out = api.set_benchmark(f'{site.lower()}/tx', first, '每月更新')
+    assert (out['site'], out['line']) == (site, 'TX')
+    assert {k: out['current'][k] for k in ('dataset', 'note', 'latest')} == {'dataset': first, 'note': '每月更新', 'latest': None}
+    # the newest version of the test set is the one models are compared on
+    write(tmp_path / 't', '20261101/a.bmp', f'bench {first}'.encode())
+    ops.import_folder(api, first, tmp_path / 't', echo=quiet)
+    latest = field.benchmark(site.lower(), 'tx')['current']['latest']
+    assert (latest['ref'], latest['number'], latest['file_count']) == (f'{first}@1', 1, 1)
+    # changed: the newest setting is the benchmark, the earlier one is kept
+    api.set_benchmark(f'{site}/TX', second)
+    got = api.benchmark(site, 'TX')
+    assert got['current']['dataset'] == second and got['current']['latest'] is None
+    assert [(h['dataset'], h['note']) for h in got['history']] == [(second, ''), (first, '每月更新')]
+    # refused, and nothing is set
+    assert status_of(lambda: field.set_benchmark(f'{site}/TX', first)) == 403
+    for dataset, status, said in ((second, 409, '已是'), (elsewhere, 400, '不属于'), (loose, 400, '不属于任何产线'),
+                                  (pool_name, 400, '是数据池'), (regression, 400, '是回归集'), ('no-such-set', 404, '没有数据集'),
+                                  ('', 400, '请选择')):
+        with pytest.raises(ops.ApiError, match=said) as e:
+            api.set_benchmark(f'{site}/TX', dataset)
+        assert e.value.status == status, dataset
+    for ref in (site, f'{site}/TZ', f'{new_site()}/TX', 'a-b/TX'):
+        assert status_of(lambda: api.set_benchmark(ref, first)) == 400, ref
+    assert status_of(lambda: api.benchmark(site, 'TZ')) == 404
+    assert len(api.benchmark(site, 'TX')['history']) == 2
+    acts = [(e['action'], e['object'], e['detail']['dataset']) for e in api.events(q=f'{site}/TX')['events']
+            if e['action'] == 'line.benchmark']
+    assert acts == [('line.benchmark', f'{site}/TX', second), ('line.benchmark', f'{site}/TX', first)]
+
+
+def test_the_settings_of_a_benchmark_are_never_changed(api, sql):
+    """line_benchmarks only grows, and only with a test set of that line."""
+    site = new_site()
+    api.add_site(f'{site}/TX')
+    test, pool_name = f'T-{uuid.uuid4().hex[:8]}', f'P-{uuid.uuid4().hex[:8]}'
+    api.create_dataset(test, site, 'TX', 'test', '')
+    api.create_dataset(pool_name, site, 'TX', 'pool', '', classes=helpers.CLASSES)
+    api.set_benchmark(f'{site}/TX', test)
+    line = "(SELECT l.id FROM lines l JOIN sites s ON s.id = l.site_id WHERE s.code = %(s)s)"
+    for statement in (f"UPDATE line_benchmarks SET note = 'x' WHERE line_id = {line}",
+                      f"UPDATE line_benchmarks SET dataset_id = (SELECT id FROM datasets WHERE name = %(p)s) WHERE line_id = {line}",
+                      f"DELETE FROM line_benchmarks WHERE line_id = {line}",
+                      "TRUNCATE line_benchmarks",
+                      f"INSERT INTO line_benchmarks (line_id, dataset_id, created_by) SELECT {line}, id, created_by "
+                      "FROM datasets WHERE name = %(p)s"):
+        with pytest.raises(psycopg.Error):
+            sql.execute(statement, {'s': site, 'p': pool_name})
+    assert [h['dataset'] for h in api.benchmark(site, 'TX')['history']] == [test]

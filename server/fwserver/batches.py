@@ -226,8 +226,9 @@ def create(conn, store: Store, user: dict, name: str, pool: str, dir: str, manif
     note = _text(note, '说明', MAX_COMMENT)
     d = changes.clean_dir(dir)
     target = datasets.get_dataset(conn, pool)
-    if target['kind'] in datasets.MADE:
-        raise DatasetError(400, f'{target["name"]} 是{datasets.MADE[target["kind"]][0]}，批次要进的是数据池')
+    if target['kind'] != 'pool':
+        raise DatasetError(400, f'{target["name"]} 是{datasets.KIND_NAMES.get(target["kind"], target["kind"])}，'
+                                '标注批次只能进入数据池。测试集、回归集请在其数据集页上传完整版本或新增目录。')
     def no_other(c) -> None:
         for o in c.execute('SELECT d.name, b.dir FROM batches b JOIN datasets d ON d.id = b.dataset_id '
                            'WHERE b.pool_id = %s AND b.status = ANY(%s)', (target['id'], list(UNFINISHED))).fetchall():

@@ -1,8 +1,12 @@
-"""The register of sites and their production lines (migration 0013).
+"""The register of sites and their production lines (migration 0013), and each line's benchmark test set
+(migration 0015).
 
 A code (SES, TX) is what pools, models and releases store, and it is fixed for good: it is in the folders
 of training snapshots and in release numbers. The name shown next to it may change. Stored text is found
 without regard to case and never rewritten. datasets.py checks who and what and records the events.
+
+A line's benchmark is the test set its models are compared on; every setting is kept (line_benchmarks only
+grows), the newest is the benchmark now.
 """
 from __future__ import annotations
 
@@ -44,6 +48,25 @@ def rename(conn, site: str, line: Optional[str], name: str) -> bool:
                             (name, site)).fetchone() is not None
     return conn.execute('UPDATE lines l SET name = %s FROM sites s WHERE s.id = l.site_id AND lower(s.code) = lower(%s) '
                         'AND lower(l.code) = lower(%s) RETURNING l.id', (name, site, line)).fetchone() is not None
+
+
+def line_id(conn, site: str, line: str) -> Optional[int]:
+    row = conn.execute('SELECT l.id FROM lines l JOIN sites s ON s.id = l.site_id '
+                       'WHERE lower(s.code) = lower(%s) AND lower(l.code) = lower(%s)', (site, line)).fetchone()
+    return row['id'] if row is not None else None
+
+
+def set_benchmark(conn, line: int, dataset_id: int, note: str, user_id: int) -> None:
+    """The test set (of that line: the table's trigger refuses any other) is the line's benchmark from now on."""
+    conn.execute('INSERT INTO line_benchmarks (line_id, dataset_id, note, created_by) VALUES (%s, %s, %s, %s)',
+                 (line, dataset_id, note, user_id))
+
+
+def benchmarks(conn, line: int) -> List[dict]:
+    """Every setting of the line's benchmark, the newest (the benchmark now) first."""
+    return conn.execute('SELECT b.dataset_id, d.name AS dataset, b.note, u.name AS created_by, b.created_at '
+                        'FROM line_benchmarks b JOIN datasets d ON d.id = b.dataset_id JOIN users u ON u.id = b.created_by '
+                        'WHERE b.line_id = %s ORDER BY b.id DESC', (line,)).fetchall()
 
 
 _COUNTS = """
