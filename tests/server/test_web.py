@@ -1355,6 +1355,52 @@ def test_the_pages_ask_on_the_page_and_say_what_was_done(service, tokens, api, m
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_reviewer_marks_problem_images_in_the_viewer_and_rejects_with_their_notes(service, tokens, api, make_api, tmp_path):
+    from fw import ops
+    from helpers import quiet
+    seed = int.from_bytes(os.urandom(2), 'big')
+    a, b, c = (real_png(64, 32, seed + i) for i in range(3))
+    pool = f'W-{os.urandom(4).hex()}'
+    name = f'B-{os.urandom(4).hex()}'
+    api.create_dataset(pool, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
+    ops.import_folder(api, pool, write_tree(tmp_path / 'base', {'20261101/x.png': real_png(64, 32, seed + 9)}), echo=quiet)
+    day = {'a.png': a, 'a.json': label('scratch'), 'b.png': b, 'c.png': c, 'c.json': label('dent')}
+    field = make_api('field')
+    ops.upload_batch(field, write_tree(tmp_path / 'one' / '20261104', day), pool, '张三', name=name,
+                     reviewer=tokens['algo_name'], echo=quiet)
+    api.batch_step(name, 'reject', {'comment': '再看一遍'})
+    day.update({'b.json': label('dent'), 'c.json': label('scratch')})   # b labelled, c relabelled
+    ops.update_batch(field, name, write_tree(tmp_path / 'two' / '20261104', day), '张三', reviewer='-', echo=quiet)
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(['node', str(WEB_TESTS / 'review.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, str(shots)],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['start'] == {'button': '开始复核', 'seen': '已看 0 / 3'}
+    first = seen['first']
+    assert first['title'] == 'a.png' and first['progress'] == '已看 1 / 3 · 有问题 0'
+    assert (first['shots'], first['on']) == (3, 1) and first['filters'] == ['全部3', '有改动2', '有问题0', '未看2']
+    z = seen['zoom']
+    pct = lambda t: int(t.rstrip('%'))
+    assert pct(z['zoomedIn']) > pct(z['fit']) and pct(z['wheeled']) > pct(z['zoomedIn']) and z['moved'] and z['back'] == z['fit']
+    assert z['one'] == '100%'
+    assert seen['hidden'] == 'false' and seen['shownAgain'] == 'true'
+    assert seen['noteBefore'] is False
+    assert seen['marked'] == {'button': '取消标记', 'progress': '已看 1 / 3 · 有问题 1', 'flagged': 1}
+    assert seen['changed']['shots'] == 3                     # b, c, and a (shown now) in the strip
+    assert seen['changed']['last'] is True and seen['changed']['progress'] == '已看 3 / 3 · 有问题 1'
+    assert seen['kept'] == {'button': '取消标记', 'note': '右下角漏标一个划痕', 'progress': '已看 3 / 3 · 有问题 1'}
+    assert '附 1 张问题图片' in seen['ask'] and '退回意见' in seen['noComment']
+    assert 'a.png' in seen['steps'] and '右下角漏标一个划痕' in seen['steps'] and seen['left'] == []
+    assert '右下角漏标一个划痕' in seen['owner']['note'] and '请补标划痕' in seen['owner']['note'] and seen['owner']['panel'] == 0
+    step = api.batch(name)['steps'][-1]
+    assert (step['step'], step['comment'], step['images'], step['notes']) == (
+        'reject', '请补标划痕', ['a.png'], {'a.png': '右下角漏标一个划痕'})
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tmp_path):
     from fw import ops
     from helpers import quiet
@@ -1384,7 +1430,10 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']
-    assert 'b.png 漏标' in seen['rejected'] and seen['sameReviewer'] == tokens['algo_name']
+    assert seen['reviewStart'] == '开始复核' and seen['wrongPath'] == '第 1 版中不存在图片 zz.png。'
+    assert seen['marks'] == '问题图片（1）'
+    assert 'b.png 漏标' in seen['rejected'] and 'b.png：缺少划痕框' in seen['rejected']
+    assert seen['sameReviewer'] == tokens['algo_name']
     assert seen['prelabel'] == 1 and '运行预标注' in seen['rejected']
     assert '标注有变化的图片 1 张：加框 1' in seen['changes'] and seen['resubmitted'] == '待复核'
     assert '新增 20261104/：4 个文件' in seen['plan'] and f'建立 {pool}@2' in seen['plan']
@@ -1392,4 +1441,5 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     b = api.batch(name)
     assert b['status'] == 'imported' and [r['labeler'] for r in b['revisions']] == ['张三', '李四']
     assert [s['step'] for s in b['steps']] == ['upload', 'submit', 'reject', 'upload', 'submit', 'approve', 'import']
+    assert (b['steps'][2]['images'], b['steps'][2]['notes']) == (['b.png'], {'b.png': '缺少划痕框'})
     assert api.version(pool, 2)['source'] == f'batch:{name}@2'

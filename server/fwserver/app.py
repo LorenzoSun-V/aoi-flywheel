@@ -212,6 +212,8 @@ class SubmitBody(BaseModel):
 class RejectBody(BaseModel):
     comment: str
     images: List[Annotated[str, Field(max_length=MAX_PATH_BYTES)]] = Field(default=[], max_length=500)
+    notes: Dict[Annotated[str, Field(max_length=MAX_PATH_BYTES)], Annotated[str, Field(max_length=2000)]] = \
+        Field(default={}, max_length=500)   # image path -> what is wrong with it (batches.MAX_NOTE)
     revision: Optional[int] = None
 
 
@@ -839,7 +841,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.post('/api/v1/batches/{name}/reject')
     def reject_batch(name: str, body: RejectBody, user: dict = Depends(batch_reviewer)):
         with conn() as c:
-            return batches.reject(c, user, name, body.comment, body.images, body.revision)
+            return batches.reject(c, user, name, body.comment, body.images, body.revision, body.notes)
 
     @app.post('/api/v1/batches/{name}/approve')
     def approve_batch(name: str, body: ApproveBody, user: dict = Depends(batch_reviewer)):

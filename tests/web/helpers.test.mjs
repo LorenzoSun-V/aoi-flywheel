@@ -9,6 +9,7 @@ import {
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
+  fitView, zoomAt, readReview, reviewText, reviewKey, changedImages, reviewMatch, stepTo, stripWindow, rejectBody,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
 
@@ -446,4 +447,48 @@ test('a batch is pre-labelled with its line\'s release first, then the model ver
   assert.deepEqual(refs(prelabelChoices(versions, { site: 'A', line: 'L2', model: { ref: 'A-det@1' } })),
     ['A-det@1', [['本产线', ['A2-det@1']], ['同一现场的其他产线', ['A-det@3', 'A-det@2']], ['其他现场', ['B-det@1']]]]);
   assert.deepEqual(refs(prelabelChoices([], { site: 'A', line: 'L1' })), ['', []]);
+});
+
+test('an image fits its stage and zooms around the pointer, within limits', () => {
+  assert.deepEqual(fitView(200, 100, 400, 400), { scale: 2, x: 0, y: 100 });
+  const v = zoomAt({ scale: 1, x: 0, y: 0 }, 2, 100, 50, 0.5, 4);
+  assert.deepEqual(v, { scale: 2, x: -100, y: -50 });   // the image point under (100, 50) stays there
+  assert.equal((100 - v.x) / v.scale, 100);
+  assert.equal(zoomAt(v, 10, 0, 0, 0.5, 4).scale, 4);
+  assert.equal(zoomAt(v, 0.01, 0, 0, 0.5, 4).scale, 0.5);
+});
+
+test('what a reviewer has seen and marked is read back as written, and anything else starts afresh', () => {
+  const r = readReview('');
+  assert.deepEqual([r.seen.size, r.marks.size], [0, 0]);
+  r.seen.add('a.png');
+  r.marks.set('b.png', '漏标');
+  const back = readReview(reviewText(r));
+  assert.deepEqual([[...back.seen], [...back.marks]], [['a.png'], [['b.png', '漏标']]]);
+  for (const text of ['{', 'null', '[]', '"x"', '{"seen": "a", "marks": []}']) {
+    const x = readReview(text);
+    assert.deepEqual([x.seen.size, x.marks.size], [0, 0], text);
+  }
+  const mixed = readReview('{"seen": ["a", 1], "marks": {"a": "x", "b": 2}}');
+  assert.deepEqual([[...mixed.seen], [...mixed.marks]], [['a'], [['a', 'x']]]);
+  assert.equal(reviewKey('alice', 'B-1', 2), 'fw-review:alice:B-1@2');
+});
+
+test('the images under review are filtered and paged through, and a rejection sends the marks with their notes', () => {
+  const before = parseManifest('fw-manifest 1\na.json\tl1\t1\na.png\ti1\t1\nb.png\ti2\t1\nc.png\ti3\t1\nc.json\tl3\t1\n');
+  const after = parseManifest('fw-manifest 1\na.json\tl1\t1\na.png\ti1\t1\nb.json\tl2\t1\nb.png\ti2\t1\nc.png\ti3\t1\nd.png\ti4\t1\n');
+  assert.deepEqual([...changedImages(before, after)].sort(), ['b.png', 'c.png', 'd.png']);  // labelled, unlabelled, added
+  const state = { seen: new Set(['a.png', 'b.png']), marks: new Map([['b.png', ' 漏标 '], ['d.png', '']]) };
+  const changed = changedImages(before, after);
+  const paths = ['a.png', 'b.png', 'c.png', 'd.png'];
+  const only = (f) => paths.filter((p) => reviewMatch(f, p, state, changed));
+  assert.deepEqual([only('all'), only('changed'), only('marked'), only('unseen')],
+    [paths, ['b.png', 'c.png', 'd.png'], ['b.png', 'd.png'], ['c.png', 'd.png']]);
+  const marked = (p) => reviewMatch('marked', p, state, changed);
+  assert.deepEqual([stepTo(paths, 0, 1, marked), stepTo(paths, 1, 1, marked), stepTo(paths, 3, 1, marked), stepTo(paths, 3, -1, marked)], [1, 3, -1, 1]);
+  assert.deepEqual(stepTo(paths, -1, 1, () => true), 0);   // the image shown is not in the list: from the first
+  assert.deepEqual(stripWindow(paths, 0, marked), [0, 1, 3]);   // the image shown stays in the strip
+  const many = Array.from({ length: 500 }, (_, i) => `${i}`);
+  assert.deepEqual(stripWindow(many, 250, () => true, 2), [248, 249, 250, 251, 252]);
+  assert.deepEqual(rejectBody(' 请补标 ', state.marks, 2), { comment: '请补标', images: ['b.png', 'd.png'], notes: { 'b.png': '漏标' }, revision: 2 });
 });

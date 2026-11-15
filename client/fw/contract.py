@@ -274,8 +274,9 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
 #  12  a line's benchmark test set (GET and POST /sites/benchmark); labelling batches go into data pools only
 #  13  thumbnails of image objects (GET /objects/<sha256>/thumb?size=)
 #  14  GET /jobs: before, site, line, mine and 'more'; GET /predictions: site, line
+#  15  a note on each problem image of a rejection: 'notes' of POST /batches/<name>/reject and of the steps
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 14
+API_LEVEL = 15
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 
