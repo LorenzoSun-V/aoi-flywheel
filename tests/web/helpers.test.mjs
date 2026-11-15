@@ -517,6 +517,10 @@ test('a batch shows its four steps by where it stands, and what became of the im
   const own = [...sent, step('approve', 3, 'zhang')];
   assert.deepEqual(batchFlow(b('approved', own, { revision: 3 }), now).map((s) => [s.state, s.text]).slice(1, 3),
     [['done', 'zhang 修改后的一版'], ['done', 'zhang 通过 · 今天 17:12']]);
+  // and then closed before it was imported: it stopped at 入库 (review of #54)
+  const shut = batchFlow(b('closed', [...own, step('close', null, 'zhang')], { revision: 3 }), now);
+  assert.deepEqual(shut.map((s) => s.state), ['done', 'done', 'done', 'bad']);
+  assert.deepEqual(shut.map((s) => s.text).slice(1), ['zhang 修改后的一版', 'zhang 通过 · 今天 17:12', '批次已关闭']);
   assert.deepEqual(states(b('closed', [...sent, step('close', null)])), ['done', 'done', 'bad', 'off']);
   assert.equal(texts(b('closed', up))[1], '批次已关闭');
 

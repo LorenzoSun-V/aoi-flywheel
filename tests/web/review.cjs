@@ -2,7 +2,7 @@
 // node review.cjs <url> <algo token> <field token> <batch name> <out dir>.
 // The batch has two revisions (b.png and c.png changed in the second); the algo account goes through it in the
 // viewer: zooms, hides a class, marks a.png with a note, pages through the changed images, comes back to its
-// marks after a reload, and rejects from the viewer. The field account then sees the note on a.png. Prints one
+// marks after a reload, marks and unmarks images with the batch page open in a second tab, and rejects from the viewer. The field account then sees the note on a.png. Prints one
 // JSON line.
 const { chromium } = require('playwright');
 
@@ -80,6 +80,38 @@ const { chromium } = require('playwright');
   await algo.reload();
   await algo.waitForSelector('#review-panel');
   seen.kept = { button: await text('#mark'), note: await algo.inputValue('#mark-note'), progress: await text('#review-progress') };
+  // two tabs of one browser: the batch page left open while the viewer marks b.png. Each change is made to the
+  // review as kept now, and each tab shows what the other did, so neither tab's older copy undoes the other's marks
+  const tab = await algo.context().newPage();
+  tab.on('pageerror', (e) => errors.push(String(e)));
+  const kept = () => algo.evaluate(() => {
+    const k = Object.keys(localStorage).find((x) => x.startsWith('fw-review'));
+    return k ? JSON.parse(localStorage.getItem(k)).marks : null;
+  });
+  const marksName = () => tab.textContent('#review-marks-name');
+  await tab.goto(`${url}#/b/${batch}`);
+  await tab.waitForSelector('#review-marks-name');
+  seen.tabs = { before: await marksName() };
+  await algo.goto(`${url}#/img/${batch}/2/b.png`);
+  await algo.waitForFunction(() => document.querySelector('main h1')?.textContent === 'b.png');
+  await algo.waitForSelector('#review-panel');
+  await algo.click('#mark');
+  await algo.fill('#mark-note', '缺少凹坑框');
+  await tab.waitForFunction(() => document.querySelector('#review-marks-name')?.textContent === '问题图片（2）');
+  seen.tabs.told = await tab.inputValue('#review-marks input[data-path="b.png"]');
+  await tab.fill('#mark-path', 'c.png');
+  await tab.click('#mark-add');
+  seen.tabs.added = await marksName();
+  await algo.waitForFunction(() => document.querySelector('#review-progress')?.textContent.endsWith('有问题 3'));
+  await algo.click('#mark-note');
+  await algo.keyboard.type('，在左上角');           // typed on in the viewer after the batch page added c.png
+  seen.tabs.typed = await kept();
+  await tab.click('#review-marks tr:has(input[data-path="c.png"]) button');
+  await tab.click('#review-marks tr:has(input[data-path="b.png"]) button');
+  await algo.waitForFunction(() => document.querySelector('#review-progress')?.textContent.endsWith('有问题 1'));
+  seen.tabs.removed = { marks: await kept(), list: await marksName(), button: await text('#mark'),
+    shots: await algo.locator('#review-strip .shot.marked').count() };
+  await tab.close();
   // rejected from the viewer: asked on the page first, then the batch page with the notes in its record
   await algo.click('#review-reject');
   seen.ask = await text('.ask-text');

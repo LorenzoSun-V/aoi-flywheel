@@ -1356,6 +1356,9 @@ def test_the_pages_ask_on_the_page_and_say_what_was_done(service, tokens, api, m
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_a_reviewer_marks_problem_images_in_the_viewer_and_rejects_with_their_notes(service, tokens, api, make_api, tmp_path):
+    """Marked in the viewer, kept across a reload and across two tabs of one browser (each change is made to the
+    marks as kept now, so the batch page left open in a second tab does not undo the viewer's marks; review of #53),
+    and sent with the rejection."""
     from fw import ops
     from helpers import quiet
     seed = int.from_bytes(os.urandom(2), 'big')
@@ -1392,6 +1395,10 @@ def test_a_reviewer_marks_problem_images_in_the_viewer_and_rejects_with_their_no
     assert seen['changed']['shots'] == 3                     # b, c, and a (shown now) in the strip
     assert seen['changed']['last'] is True and seen['changed']['progress'] == '已看 3 / 3 · 有问题 1'
     assert seen['kept'] == {'button': '取消标记', 'note': '右下角漏标一个划痕', 'progress': '已看 3 / 3 · 有问题 1'}
+    tabs = seen['tabs']   # the batch page in a second tab: neither tab's older copy of the marks undoes the other's
+    assert (tabs['before'], tabs['told'], tabs['added']) == ('问题图片（1）', '缺少凹坑框', '问题图片（3）')
+    assert tabs['typed'] == {'a.png': '右下角漏标一个划痕', 'b.png': '缺少凹坑框，在左上角', 'c.png': ''}
+    assert tabs['removed'] == {'marks': {'a.png': '右下角漏标一个划痕'}, 'list': '问题图片（1）', 'button': '标为有问题', 'shots': 1}
     assert '附 1 张问题图片' in seen['ask'] and '退回意见' in seen['noComment']
     assert 'a.png' in seen['steps'] and '右下角漏标一个划痕' in seen['steps'] and seen['left'] == []
     assert '右下角漏标一个划痕' in seen['owner']['note'] and '请补标划痕' in seen['owner']['note'] and seen['owner']['panel'] == 0

@@ -1269,6 +1269,15 @@ function dropReview(key) {
   unsaved.delete(key);
   try { localStorage.removeItem(key); } catch { /* blocked: nothing was kept */ }
 }
+// One change to a review as it is kept now (another tab may have marked images since this page read it), kept.
+function updateReview(key, change) {
+  const r = loadReview(key);
+  change(r);
+  saveReview(key, r);
+  return r;
+}
+// What the page shown now does when another tab changes a review it shows (render clears it).
+let reviewWatch = null;
 
 // The images of a revision that differ from the revision before: added ones, and those whose image or label
 // file is another (by content).
@@ -1335,44 +1344,57 @@ async function batchReviewOf(version, files, query) {
 // The panel of a revision under review: how far the reviewer is, marking the image shown, and rejecting or
 // approving the revision (asked on the page first).
 function reviewPanel(review, path, onMark) {
-  const { b, state, key } = review;
-  const seen = review.images.filter((f) => state.seen.has(f.path)).length;
-  const unseen = review.images.length - seen;
+  const { b, key } = review;
+  const now = () => (review.state = loadReview(key));  // as kept now, whatever another tab did meanwhile
   const progress = el('p', { id: 'review-progress' });
-  const counted = () => { progress.textContent = `已看 ${seen} / ${review.images.length} · 有问题 ${state.marks.size}`; };
-  counted();
+  const counted = (r) => {
+    const seen = review.images.filter((f) => r.seen.has(f.path)).length;
+    progress.textContent = `已看 ${seen} / ${review.images.length} · 有问题 ${r.marks.size}`;
+  };
   const note = el('input', { type: 'text', id: 'mark-note', maxlength: '200', placeholder: '说明（选填）', 'aria-label': '问题说明',
-    oninput: () => { state.marks.set(path, note.value); saveReview(key, state); } });
-  note.value = state.marks.get(path) || '';
+    oninput: () => { review.state = updateReview(key, (r) => r.marks.set(path, note.value)); } });
+  note.value = review.state.marks.get(path) || '';
   const mark = el('button', { type: 'button', id: 'mark' });
-  const marking = () => {
-    const on = state.marks.has(path);
+  const marking = (r) => {
+    const on = r.marks.has(path);
+    mark.dataset.on = on ? '1' : '';
     mark.replaceChildren(on ? '取消标记' : '标为有问题');
     mark.classList.toggle('danger', !on);
     note.hidden = !on;
   };
+  const shown = (r) => { counted(r); marking(r); onMark(r); };
   mark.addEventListener('click', () => {
-    if (state.marks.has(path)) state.marks.delete(path);
-    else { state.marks.set(path, note.value); note.hidden = false; }
-    saveReview(key, state);
-    marking();
-    counted();
-    onMark(state.marks.has(path));
-    if (state.marks.has(path)) note.focus();
+    const on = !mark.dataset.on;  // what the button said, not what another tab did since
+    shown(review.state = updateReview(key, (r) => { if (on) r.marks.set(path, note.value); else r.marks.delete(path); }));
+    if (on) note.focus();
   });
-  marking();
+  counted(review.state);
+  marking(review.state);
+  reviewWatch = (ev) => {  // another tab marked images: say so here (a note being typed here stays as it is)
+    if (ev.key !== key) return;
+    const r = now();
+    shown(r);
+    if (document.activeElement !== note) note.value = r.marks.get(path) || '';
+  };
   const done = (said) => { dropReview(key); location.hash = hrefOf(['b', b.name]); toastDone(said); };
   const acts = el('div', { class: 'row' });
   acts.append(
-    el('button', { type: 'button', id: 'review-reject', onclick: () => askFirst(acts, {
-      text: state.marks.size ? `退回第 ${b.revision} 版，附 ${state.marks.size} 张问题图片及说明。` : `退回第 ${b.revision} 版。`,
-      reason: '退回意见（必填）', go: '确认退回',
-      run: async (why) => { await api.batchStep(b.name, 'reject', rejectBody(why, state.marks, b.revision)); done(`已退回第 ${b.revision} 版`); } }) }, '退回…'),
-    b.actions.includes('approve') ? el('button', { type: 'button', id: 'review-approve', onclick: () => askFirst(acts, {
-      text: [unseen ? `尚有 ${unseen} 张图片未查看。` : '', state.marks.size ? `已标出的 ${state.marks.size} 张问题图片将不再保留。` : '',
-        `通过第 ${b.revision} 版。`].join(''),
-      reason: '复核意见（选填）', go: '确认通过',
-      run: async (why) => { await api.batchStep(b.name, 'approve', { comment: why, revision: b.revision }); done(`已通过第 ${b.revision} 版`); } }) }, '通过…') : null);
+    el('button', { type: 'button', id: 'review-reject', onclick: () => {
+      const n = now().marks.size;
+      askFirst(acts, {
+        text: n ? `退回第 ${b.revision} 版，附 ${n} 张问题图片及说明。` : `退回第 ${b.revision} 版。`,
+        reason: '退回意见（必填）', go: '确认退回',
+        run: async (why) => { await api.batchStep(b.name, 'reject', rejectBody(why, now().marks, b.revision)); done(`已退回第 ${b.revision} 版`); } });
+    } }, '退回…'),
+    b.actions.includes('approve') ? el('button', { type: 'button', id: 'review-approve', onclick: () => {
+      const r = now();
+      const unseen = review.images.filter((f) => !r.seen.has(f.path)).length;
+      askFirst(acts, {
+        text: [unseen ? `尚有 ${unseen} 张图片未查看。` : '', r.marks.size ? `已标出的 ${r.marks.size} 张问题图片将不再保留。` : '',
+          `通过第 ${b.revision} 版。`].join(''),
+        reason: '复核意见（选填）', go: '确认通过',
+        run: async (why) => { await api.batchStep(b.name, 'approve', { comment: why, revision: b.revision }); done(`已通过第 ${b.revision} 版`); } });
+    } }, '通过…') : null);
   return el('div', { class: 'panel review', id: 'review-panel' },
     el('h2', {}, `复核第 ${b.revision} 版`, info(['已看和标出的问题图片仅保存在本机浏览器中，提交退回后随退回意见一并发出，通过或退回后清除。',
       '翻页：键盘左、右方向键；图片条上方可只看有改动、有问题或未看的图片。'], '复核说明')),
@@ -1391,7 +1413,7 @@ function reviewStrip(review, paths, at, match, hrefTo, hrefWith) {
     const p = paths[i];
     const img = el('img', { alt: '' });
     lazyThumb(img, review.images[i]);
-    return el('a', { href: hrefTo(p), title: p, class: ['shot', i === at ? 'on' : '', state.seen.has(p) ? 'seen' : '',
+    return el('a', { href: hrefTo(p), title: p, 'data-path': p, class: ['shot', i === at ? 'on' : '', state.seen.has(p) ? 'seen' : '',
       state.marks.has(p) ? 'marked' : ''].filter(Boolean).join(' ') }, img);
   }));
   return [tabs, strip];
@@ -1429,10 +1451,7 @@ async function imagePage(name, number, path, query) {
   const keep = set ? { pred: set.id, thr: query.get('thr') } : review ? { f: review.filter === 'all' ? '' : review.filter } : null;
   const hrefTo = (p, q = keep) => hrefOf(['img', version.dataset, String(version.number), p], q);
   const go = (i) => { if (i >= 0) location.hash = hrefTo(paths[i]); };
-  if (review && !review.state.seen.has(path)) {
-    review.state.seen.add(path);
-    saveReview(review.key, review.state);
-  }
+  if (review) review.state = updateReview(review.key, (r) => r.seen.add(path));  // seen, and marked in other tabs too
 
   const canvas = el('canvas');
   const stage = el('div', { class: 'stage', id: 'stage' }, canvas);
@@ -1515,11 +1534,10 @@ async function imagePage(name, number, path, query) {
   el('div', { class: 'viewer' },
     el('div', { class: 'viewer-main' }, tools, stage,
       review ? reviewStrip(review, paths, at, match, hrefTo, (f) => hrefTo(path, { f: f === 'all' ? '' : f })) : null),
-    el('div', { class: 'viewer-side' }, review ? reviewPanel(review, path, (on) => {  // the strip and its count follow
-      const shot = document.querySelector('#review-strip .shot.on');
-      if (shot) shot.classList.toggle('marked', on);
+    el('div', { class: 'viewer-side' }, review ? reviewPanel(review, path, (r) => {  // the strip and its count follow
+      for (const shot of document.querySelectorAll('#review-strip .shot')) shot.classList.toggle('marked', r.marks.has(shot.dataset.path));
       const n = document.querySelector('.strip-tabs a[data-filter="marked"] .count');
-      if (n) n.textContent = String(review.state.marks.size);
+      if (n) n.textContent = String(r.marks.size);
     }) : null, noted, facts)));
   keyNav = (key) => {
     if (key === 'ArrowLeft') go(before);
@@ -4007,16 +4025,15 @@ export function batchFlow(b, now = new Date()) {
     { name: '入库', state: b.imported ? 'done' : 'todo', text: b.imported ? `已入库，建立 ${b.imported}` : '复核通过后入库' },
   ];
   const set = (i, state, text) => { flow[i] = { ...flow[i], state, text }; };
+  if (ok && !sub) set(1, 'done', `${ok.actor} 修改后的一版`);  // approved with the reviewer's own folder (then maybe closed)
   if (b.status === 'open') set(1, 'on', `待 ${b.owner} 提交第 ${rev} 版`);
   else if (b.status === 'review') set(2, 'on', `待 ${b.reviewer} 复核第 ${rev} 版`);
   else if (b.status === 'rejected') {
     set(0, 'on', `待 ${b.owner} 上传第 ${rev + 1} 版`);
     set(1, 'todo', b.reviewer ? `上传后提交给 ${b.reviewer}` : '上传后提交复核');
     set(2, 'bad', `第 ${rev} 版已退回`);
-  } else if (['approved', 'imported'].includes(b.status)) {
-    if (!sub) set(1, 'done', `${ok ? ok.actor : b.reviewer} 修改后的一版`);  // approved with the reviewer's own folder
-    if (b.status === 'approved') set(3, 'on', '复核通过，待入库');
-  } else if (b.status === 'closed') {
+  } else if (b.status === 'approved') set(3, 'on', '复核通过，待入库');
+  else if (b.status === 'closed') {
     const at = flow.findIndex((s) => s.state !== 'done');
     flow.forEach((s, i) => { if (i >= at && at >= 0) set(i, i === at ? 'bad' : 'off', i === at ? '批次已关闭' : ''); });
   }
@@ -4063,7 +4080,7 @@ async function batchPage(name, query) {
     const imageHref = (rev, p, q) => hrefOf(['img', b.name, String(rev), p], q);
     const reviewing = has('approve') || has('reject');
     const key = reviewKey(me ? me.name : '', b.name, b.revision);
-    const state = reviewing ? loadReview(key) : null;
+    const state = reviewing ? loadReview(key) : null;  // as the page was drawn; changes read it again (other tabs)
     const seen = reviewing ? images.filter((f) => state.seen.has(f.path)).length : 0;
     const lastRejection = (rev) => b.steps.filter((s) => s.step === 'reject' && s.revision === rev).pop() || null;
     const cards = [];
@@ -4170,19 +4187,26 @@ async function batchPage(name, query) {
       const comment = el('textarea', { id: 'review-comment', rows: 3, placeholder: '复核意见：退回时必填，请写明需要修改之处' });
       const marks = el('div', { id: 'review-marks' });
       const marksName = el('span', { class: 'name', id: 'review-marks-name' });
-      const listMarks = () => {
-        marksName.textContent = `问题图片（${state.marks.size}）`;
-        marks.replaceChildren(state.marks.size ? el('table', { class: 'marks' },
+      const listMarks = (r = loadReview(key)) => {
+        marksName.textContent = `问题图片（${r.marks.size}）`;
+        marks.replaceChildren(r.marks.size ? el('table', { class: 'marks' },
           el('tr', {}, ['图片', '说明', ''].map((h) => el('th', {}, h))),
-          [...state.marks.keys()].sort().map((p) => {
-            const note = el('input', { type: 'text', maxlength: '200', placeholder: '说明（选填）', 'aria-label': `${p} 的说明`,
-              oninput: () => { state.marks.set(p, note.value); saveReview(key, state); } });
-            note.value = state.marks.get(p);
+          [...r.marks.keys()].sort().map((p) => {
+            const note = el('input', { type: 'text', maxlength: '200', placeholder: '说明（选填）', 'aria-label': `${p} 的说明`, 'data-path': p,
+              oninput: () => updateReview(key, (x) => x.marks.set(p, note.value)) });
+            note.value = r.marks.get(p);
             return el('tr', {}, el('td', { class: 'mono' }, el('a', { href: imageHref(b.revision, p) }, p)), el('td', {}, note),
-              el('td', {}, el('button', { type: 'button', class: 'link', onclick: () => { state.marks.delete(p); saveReview(key, state); listMarks(); } }, '移除')));
+              el('td', {}, el('button', { type: 'button', class: 'link', onclick: () => listMarks(updateReview(key, (x) => x.marks.delete(p))) }, '移除')));
           })) : el('p', { class: 'muted' }, '暂无标出的问题图片。'));
       };
-      listMarks();
+      listMarks(state);
+      reviewWatch = (ev) => {  // marked in the viewer of another tab: listed here too, unless a note is being typed here
+        if (ev.key !== key) return;
+        const r = loadReview(key);
+        const shown = document.getElementById('review-seen');
+        if (shown) shown.textContent = `已看 ${images.filter((f) => r.seen.has(f.path)).length} / ${images.length}`;
+        if (!marks.contains(document.activeElement)) listMarks(r);
+      };
       const path = el('input', { type: 'text', id: 'mark-path', class: 'mono', placeholder: '图片在批次目录中的相对路径', 'aria-label': '问题图片的路径' });
       const wrong = el('span', { class: 'bad' });
       const add = () => {
@@ -4190,10 +4214,8 @@ async function batchPage(name, query) {
         wrong.textContent = '';
         if (!p) return;
         if (!images.some((f) => f.path === p)) { wrong.textContent = `第 ${b.revision} 版中不存在图片 ${p}。`; return; }
-        if (!state.marks.has(p)) state.marks.set(p, '');
-        saveReview(key, state);
         path.value = '';
-        listMarks();
+        listMarks(updateReview(key, (x) => { if (!x.marks.has(p)) x.marks.set(p, ''); }));
       };
       path.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
       cards.push(el('div', { class: 'panel form card', id: 'review-form' },
@@ -4212,7 +4234,7 @@ async function batchPage(name, query) {
           }, `已通过第 ${b.revision} 版`) }, '通过') : null,
           has('approve') ? el('a', { class: 'button', href: hrefOf(['batch-up', b.name], { approve: '1' }) }, '上传修改后的目录并通过') : null,
           el('button', { id: 'reject', onclick: act(async () => {
-            await api.batchStep(b.name, 'reject', rejectBody(comment.value, state.marks, b.revision));
+            await api.batchStep(b.name, 'reject', rejectBody(comment.value, loadReview(key).marks, b.revision));
             dropReview(key);
           }, `已退回第 ${b.revision} 版`) }, '退回'))));
     }
@@ -5110,6 +5132,7 @@ async function render() {
   seq += 1;
   clearTimeout(timer);
   keyNav = null;
+  reviewWatch = null;
   closeMenu();
   hideTip();
   const show = live();
@@ -5193,6 +5216,7 @@ async function start() {
   }
   try { if (localStorage.getItem(SIDE_KEY) === 'off') document.body.classList.add('side-off'); } catch { /* private window */ }
   window.addEventListener('hashchange', render);
+  window.addEventListener('storage', (ev) => { if (reviewWatch) reviewWatch(ev); });  // another tab changed this browser's storage
   for (const kind of ['dragover', 'drop']) {  // a folder dropped beside the box must not open in the tab instead
     window.addEventListener(kind, (ev) => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) ev.preventDefault(); });
   }
