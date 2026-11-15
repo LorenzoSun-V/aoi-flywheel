@@ -74,10 +74,16 @@ const { dropOn } = require('./drop.cjs');
   await algo.waitForFunction(() => document.querySelector('#batch-status')?.textContent === '已退回');
 
   await field.reload();
-  await field.waitForSelector('a:has-text("上传新版次")');
+  await field.waitForSelector('#rejected-card');
   seen.rejected = await field.textContent('main');
-  seen.prelabel = await field.locator('#prelabel-go').count();  // the owner may have a rejected batch pre-labelled
-  await field.click('a:has-text("上传新版次")');
+  seen.rejectedCard = await field.textContent('#rejected-card');
+  seen.flowRejected = await field.$$eval('#batch-flow li', (l) => l.map((x) => [x.className, x.textContent]));
+  seen.revise = await field.textContent('#revise');
+  await field.screenshot({ path: `${out}/batch-rejected.png`, fullPage: true });
+  await field.click('.batch-head .more-button');
+  seen.fieldMore = await field.$$eval('.menu [role=menuitem]', (l) => l.map((x) => x.textContent));
+  await field.keyboard.press('Escape');
+  await field.click('#revise');
   await field.waitForSelector('#labeler');
   await dropOn(field, [fixed], { asFiles: true });  // a file, not a folder, is refused in the box itself
   seen.droppedFile = await field.textContent('.drop > span.bad');
@@ -99,17 +105,26 @@ const { dropOn } = require('./drop.cjs');
   await field.screenshot({ path: `${out}/batch-revision.png`, fullPage: true });
 
   await algo.reload();
-  await algo.waitForSelector('#approve');
+  await algo.waitForSelector('#since-card');
+  seen.since = { fixed: await algo.textContent('#since-fixed .value'), rows: await algo.textContent('#since-rejected'),
+    changed: await algo.textContent('#review-changed'), start: await algo.textContent('#review-start') };
+  await algo.screenshot({ path: `${out}/batch-since.png`, fullPage: true });
   await algo.click('#approve');
   await algo.waitForSelector('#import-preview');
   await algo.click('#import-preview');
   await algo.waitForSelector('#import-go');
   seen.plan = await algo.textContent('main');
   await algo.screenshot({ path: `${out}/batch-import.png`, fullPage: true });
-  await algo.click('#import-go');
+  await algo.click('#import-go');                           // asked once more: a pool version cannot be taken back
+  seen.importAsk = await algo.textContent('.ask .ask-text');
+  await algo.click('.ask .ask-go');
   await algo.waitForFunction(() => document.querySelector('#batch-status')?.textContent === '已入库');
   seen.done = await algo.textContent('main');
-  seen.buttons = await algo.locator('main button:not(.tool)').count();  // nothing left to do (the side bar switch and back are not steps of the batch)
+  seen.imported = await algo.textContent('#imported-card');
+  seen.flowDone = await algo.$$eval('#batch-flow li', (l) => l.map((x) => x.className));
+  await algo.screenshot({ path: `${out}/batch-imported.png`, fullPage: true });
+  // nothing left to do: the side bar switch, back and 更多 (copying the fetch command) are not steps of the batch
+  seen.buttons = await algo.locator('main button:not(.tool):not(.more-button)').count();
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();

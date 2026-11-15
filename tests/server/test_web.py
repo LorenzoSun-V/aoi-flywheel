@@ -1433,11 +1433,18 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert seen['reviewStart'] == '开始复核' and seen['wrongPath'] == '第 1 版中不存在图片 zz.png。'
     assert seen['marks'] == '问题图片（1）'
     assert 'b.png 漏标' in seen['rejected'] and 'b.png：缺少划痕框' in seen['rejected']
+    assert '第 1 版被退回，请修改后上传第 2 版' in seen['rejectedCard'] and '缺少划痕框' in seen['rejectedCard']
+    assert seen['revise'] == '上传第 2 版'
+    assert [c for c, _ in seen['flowRejected']] == ['on', 'todo', 'bad', 'todo'] and '第 1 版已退回' in seen['flowRejected'][2][1]
+    assert seen['fieldMore'] == ['运行预标注…', '复制取回命令', '关闭批次…']   # the owner may have a rejected batch pre-labelled
     assert seen['sameReviewer'] == tokens['algo_name']
-    assert seen['prelabel'] == 1 and '运行预标注' in seen['rejected']
     assert '标注有变化的图片 1 张：加框 1' in seen['changes'] and seen['resubmitted'] == '待复核'
+    assert seen['since']['fixed'] == '1 / 1' and '缺少划痕框' in seen['since']['rows'] and '已修改' in seen['since']['rows']
+    assert seen['since']['changed'] == '只看改动的 1 张' and seen['since']['start'] == '开始复核'
     assert '新增 20261104/：4 个文件' in seen['plan'] and f'建立 {pool}@2' in seen['plan']
-    assert f'已入库为 {pool}@2' in seen['done'] and seen['buttons'] == 0
+    assert '版本建立后不能修改或删除' in seen['importAsk'] and f'建立 {pool}@2' in seen['importAsk']
+    assert f'已入库，建立 {pool}@2' in seen['imported'] and f'用 {pool}@2 建立训练集快照' in seen['imported']
+    assert seen['flowDone'] == ['done'] * 4 and seen['buttons'] == 0
     b = api.batch(name)
     assert b['status'] == 'imported' and [r['labeler'] for r in b['revisions']] == ['张三', '李四']
     assert [s['step'] for s in b['steps']] == ['upload', 'submit', 'reject', 'upload', 'submit', 'approve', 'import']

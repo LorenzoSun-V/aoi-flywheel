@@ -490,3 +490,31 @@ td.menu-cell { text-align: right; vertical-align: middle; padding-top: 2px; padd
 #bench-table .tag { margin-left: 8px; }
 #bench-table tr.released > td { background: #f5f8fd; }
 .delta { color: var(--muted); font-size: 12px; }
+
+/* a labelling batch along its course: the head, the four steps, the card of the next step */
+.batch-head { align-items: flex-start; flex-wrap: nowrap; margin: 4px 0 18px; }
+.batch-head .facts { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 22px; padding-top: 6px; }
+.batch-head .actions { flex: none; display: flex; align-items: center; gap: 10px; }
+.steps.flow { max-width: none; margin-bottom: 20px; }
+.steps.flow li { align-items: flex-start; white-space: normal; }
+.steps.flow .what { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.steps.flow .name { font-size: 13px; }
+.steps.flow .said { font-size: 12px; font-weight: 400; color: var(--muted); }
+.steps.flow .n .icon { width: 13px; height: 13px; stroke-width: 2.4; }
+.steps.flow li.bad { border-top-color: var(--bad); color: var(--text); font-weight: 600; }
+.steps.flow li.bad .n { background: var(--bad); color: #fff; }
+.steps.flow li.bad .said { color: var(--bad); }
+.steps.flow li.off { opacity: .55; }
+.panel.card { max-width: 1000px; margin-bottom: 16px; }
+.panel.card h3 { margin: 0 0 8px; font-size: 15px; font-weight: 650; }
+.panel.card > .row:last-child { margin-top: 12px; }
+.panel.card .said { white-space: pre-wrap; margin: 8px 0 12px; }
+.bad-card { border-color: #f0c4c1; background: #fffafa; }
+.ok-card { border-color: #bfe3c8; background: #f7fcf8; }
+.stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 14px; }
+.tile-stat { min-width: 132px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--head); }
+.tile-stat .label { color: var(--muted); font-size: 12px; }
+.tile-stat .value { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile-stat.bad .value { color: var(--bad); }
+td.bad { color: var(--bad); }
+ul.problems { margin: 4px 0 0; padding-left: 18px; }
