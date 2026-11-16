@@ -183,7 +183,7 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
         return json.loads(p.stdout.strip().splitlines()[-1])
 
     seen = walk('submit', data, r['ref'])  # other tests' runners are listed too
-    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '预测集', '操作记录']
+    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '推理环境', '预测集', '操作记录']
     assert snapshot['ref'] in seen['info'] and 'scratch、dent' in seen['info']
     assert len(seen['evals']) == 2
     assert seen['refused'] == '最低分数 conf 须在 0 和 1 之间，例如 0.1。'
@@ -395,7 +395,7 @@ def test_accounts_and_the_record_in_the_browser(service, tokens, api, make_api, 
     assert r.returncode == 0, r.stdout + r.stderr
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
-    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '预测集', '操作记录', '账号']
+    assert seen['nav'] == ['概览', '数据集', '标注批次', '模型', '发布记录', '任务', '推理环境', '预测集', '操作记录', '账号']
     assert seen['made'] == f'已新建账号 {name}' and seen['dialogs'] == []                 # asked on the page itself
     assert '改为现场实施' in seen['asked'] and seen['cancelled'] == [0, 'algo']
     assert seen['repicked'] == [1, 'admin'] and seen['replaced'] == [1, 'algo']  # a question replaced puts its role back
@@ -1660,3 +1660,42 @@ def test_a_test_set_from_before_names_the_pool_whose_class_table_it_follows(serv
     assert seen['uploadAfter'] == 1
     assert seen['field'] == {'rows': len(helpers.CLASSES), 'form': 0}
     assert api.dataset(name)['classes_from'] == pool_name
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_runner_is_registered_from_the_web(service, tokens, api, make_worker, fake_conda, tmp_path):  # noqa: F811
+    """The 推理环境 page lists each runner with its machine and newest check; 登记推理环境 asks the chosen machine's
+    worker to register a new runner, 重新登记 on a runner's page asks for the same one again; both open the job.
+    A worker account sees the pages but no buttons."""
+    from test_jobs import runner
+    a = make_worker()
+    r = runner(a, fake_conda)
+    check = api.submit_job('check', runner=r['runner'])
+    from fw import worker
+    worker.run_worker(a, lambda _: None, once=True)
+    made = f'{r["runner"]}-web'
+    out = subprocess.run(['node', str(WEB_TESTS / 'runners.cjs'), service.url + '/', tokens['algo'], a.http.headers['authorization'].split(' ', 1)[1],
+                          r['runner'], a.name, made], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert '推理环境' in seen['nav']
+    assert seen['row'][:6] == [r['runner'], r['ref'], f'{a.name} 在线', r['conda_env'], '仅检查', '-']
+    assert seen['row'][7] == f'与 {r["ref"]} 登记时一致'
+    assert seen['menu'] == ['检查', '重新登记', '在其他 GPU 机上登记…']
+    checked = api.job(int(seen['checkHash'].split('/')[-1]))
+    assert checked['kind'] == 'check' and checked['runner'] == r['ref'] and checked['id'] != check['id']
+    assert seen['empty'] == '请填写名称、GPU 机、conda 环境和 onnx2engine 程序。'
+    assert seen['toolShown'] and seen['toolHidden']
+    job = int(seen['madeHash'].split('/')[-1])
+    asked = api.job(job)
+    assert asked['kind'] == 'register' and asked['machine'] == a.name and asked['submitted_by'] == tokens['algo_name']
+    assert asked['params'] == {'name': made, 'machine': {'id': asked['params']['machine']['id'], 'name': a.name},
+                               'conda_env': made, 'src_dir': '', 'framework': '', 'onnx2engine': ''}
+    assert seen['madeWhat'] == f'{made}（GPU 机 {a.name}，conda 环境 {made}）'
+    assert seen['madeWaits'] == ''                              # the machine asked for work a moment ago
+    assert seen['check'].startswith(f'检查排队（任务 {checked["id"]}）')     # the newest check: the one just asked for
+    assert seen['versions'] == 1
+    again = api.job(int(seen['againHash'].split('/')[-1]))
+    assert again['kind'] == 'register' and again['params']['name'] == r['runner'] and again['params']['conda_env'] == r['conda_env']
+    assert seen['workerButtons'] == 0

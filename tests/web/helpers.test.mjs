@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
-  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle, machineText, waitNotice, splitByModel,
+  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle, machineText, waitNotice, checkText, splitByModel,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey, placeGroups,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, failedAfter, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
@@ -409,6 +409,7 @@ test('the record of operations says each one in words and leads to what it was d
     ['prediction_set.register', { model: 'M@2', data: 'SES-TX@5', job_id: 13, images: 120, boxes: 340 }, 'M@2 在 SES-TX@5 上；120 张图片，340 个框；任务 13'],
     ['release.register', { model_version: 'M@2', site: 'SES', line: 'TX', deploy_commit: '0123456789abcdef' }, 'SES / TX 部署 M@2；部署提交号：01234567'],
     ['job.submit', { kind: 'check', model: null, data: null, runner: 'rfdetr@2' }, '检查推理环境；推理环境：rfdetr@2'],
+    ['job.submit', { kind: 'register', model: null, data: null, runner: 'rfdetr', machine: 'gpu-01' }, '登记推理环境；推理环境：rfdetr；GPU 机：gpu-01'],
     ['job.cancel', { was: 'running' }, '运行中，已请求停止'],
     ['user.role', { from: 'algo', to: 'field' }, '角色由算法工程师改为现场实施'],
     ['user.disable', { tokens_revoked: 2 }, '同时吊销 2 个凭据'],
@@ -420,7 +421,7 @@ test('the record of operations says each one in words and leads to what it was d
     ['dataset.create', 'SES-TX', '#/d/SES-TX'], ['version.label', 'SES-TX@3', '#/v/SES-TX/3'], ['batch.reject', 'SES-TX-20261113@2', '#/b/SES-TX-20261113'],
     ['site.add', 'SES', '#/?site=SES'], ['line.benchmark', 'SES/TX', '#/?site=SES&line=TX'], ['model.create', 'SES-TX-detr', '#/m/SES-TX-detr'],
     ['model_version.tag', 'SES-TX-detr@3', '#/mv/SES-TX-detr/3'], ['eval.register', '评估 12', '#/eval/12'], ['prediction_set.register', '预测集 5', '#/p/5'],
-    ['job.cancel', '任务 17', '#/job/17'], ['release.register', 'SES-TX-r3', '#/releases?ref=SES-TX-r3'], ['runner.register', 'rfdetr@2', null],
+    ['job.cancel', '任务 17', '#/job/17'], ['release.register', 'SES-TX-r3', '#/releases?ref=SES-TX-r3'], ['runner.register', 'rfdetr@2', '#/runner/rfdetr'],
     ['user.create', 'zhang', null], ['token.create', 'zhang', null],
   ];
   for (const [action, object, href] of links) assert.equal(eventHref(action, object), href, action);
@@ -593,4 +594,21 @@ test('a model without a report on the benchmark falls back to its newest version
   const out = splitByModel([e(1, 'a@1'), e(2, 'a@2'), e(3, 'a@2', { split: 'val' }), e(4, 'a@3', { dirs: ['x'] }),
     e(5, 'b@1', { split: null }), e(6, 'c@4'), e(7, 'c@4')]);
   assert.deepEqual(Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.id])), { a: 2, c: 7 });
+});
+
+test('the newest check of a runner says whether the environment and the source are as registered', () => {
+  const c = (more) => ({ job_id: 3, ref: 'trt10@2', status: 'done', status_text: '完成', same_env: true, same_src: true, ...more });
+  assert.equal(checkText(null), '尚未检查');
+  assert.equal(checkText(c({ status: 'queued', status_text: '排队' })), '检查排队');
+  assert.equal(checkText(c({ status: 'failed' })), '检查失败');
+  assert.equal(checkText(c()), '与 trt10@2 登记时一致');
+  assert.equal(checkText(c({ same_env: false })), '环境已变化（与 trt10@2 相比）');
+  assert.equal(checkText(c({ same_env: false, same_src: false })), '环境已变化，源码已变化（与 trt10@2 相比）');
+});
+
+test('a registration waits for its own machine', () => {
+  const m = { name: 'gpu-01', online: false, seen_at: null };
+  const job = { status: 'queued', runner: null, machine: 'gpu-01', waits_on: [m] };
+  assert.equal(waitNotice(job), '登记推理环境的 GPU 机 gpu-01 离线（尚未连接过平台），任务将在该机器启动 fw worker 后运行。');
+  assert.match(waitNotice({ ...job, waits_on: [{ ...m, disabled: true }] }), /^GPU 机 gpu-01 的 worker 账号已停用，无法登记/);
 });

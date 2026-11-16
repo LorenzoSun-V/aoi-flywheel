@@ -22,7 +22,7 @@ from . import auth, events
 from .datasets import CONTROL, NAME, DatasetError, check_digest, where_place
 from .store import Store, StoreError
 
-KINDS = {'check': '检查推理环境', 'eval': '评估', 'predict': '推理（预标注）'}
+KINDS = {'check': '检查推理环境', 'eval': '评估', 'predict': '推理（预标注）', 'register': '登记推理环境'}
 FRAMEWORKS = ('rfdetr',)  # TensorRT inference adapters (rfdetr: py_rfdetr of the deploy code)
 STATUSES = {'queued': '排队', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消'}
 OUTCOMES = ('done', 'failed', 'cancelled')
@@ -70,16 +70,28 @@ _RV = ('SELECT rv.*, r.name, w.name AS worker, u.name AS registered_by FROM runn
 
 
 def list_runners(conn) -> List[dict]:
-    """Every runner with its newest version."""
+    """Every runner with its newest version, and the newest check of any of its versions that was not cancelled
+    (last_check: the job, its state and, when done, whether the environment and the source were as registered)."""
     rows = conn.execute(_RV + 'WHERE rv.number = (SELECT max(number) FROM runner_versions x '
                         'WHERE x.runner_id = rv.runner_id) ORDER BY lower(r.name)').fetchall()
-    return [_runner_version(r) for r in rows]
+    out = []
+    for r in rows:
+        c = conn.execute("SELECT j.id, j.status, j.result, j.finished_at, rv.number FROM jobs j "
+                         "JOIN runner_versions rv ON rv.id = j.runner_version_id WHERE j.kind = 'check' "
+                         "AND j.status <> 'cancelled' AND rv.runner_id = %s ORDER BY j.id DESC LIMIT 1",
+                         (r['runner_id'],)).fetchone()
+        check = None if c is None else {
+            'job_id': c['id'], 'ref': f'{r["name"]}@{c["number"]}', 'status': c['status'],
+            'status_text': STATUSES[c['status']], 'finished_at': _stamp(c['finished_at']),
+            'same_env': (c['result'] or {}).get('same_env'), 'same_src': (c['result'] or {}).get('same_src')}
+        out.append(dict(_runner_version(r), last_check=check))
+    return out
 
 
 def runner_versions(conn, name: str) -> List[dict]:
     rows = conn.execute(_RV + 'WHERE lower(r.name) = lower(%s) ORDER BY rv.number', (name,)).fetchall()
     if not rows:
-        raise DatasetError(404, f'推理环境 {name} 不存在；请在 GPU 机上用 fw runner register 登记')
+        raise DatasetError(404, f'推理环境 {name} 不存在；请在网页「推理环境」页面登记，或在 GPU 机上用 fw runner register 登记')
     return [_runner_version(r) for r in rows]
 
 
@@ -100,6 +112,28 @@ def get_runner_version_by_id(conn, rv_id: int) -> dict:
     return _runner_version(row)
 
 
+def _what_is_registered(name: Any, conda_env: Any, src_dir: Any, framework: Any,
+                        onnx2engine: Any) -> Tuple[str, str, str, str, str]:
+    """The runner's name, conda environment, source folder, framework and onnx2engine program as they are
+    registered (by the worker, or asked for on the web), or 400 saying which one is wrong."""
+    if not isinstance(name, str) or not NAME.match(name):
+        raise DatasetError(400, '推理环境名只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
+    if not isinstance(conda_env, str) or not CONDA_ENV.match(conda_env):
+        raise DatasetError(400, f'conda 环境名无效：{conda_env!r}')
+    src_dir = _text(src_dir or '', '源码目录', 1000).strip()
+    if any(c in src_dir for c in '\r\n\t'):
+        raise DatasetError(400, '源码目录中含有不允许使用的字符')
+    framework = _text(framework or '', '框架', 100)
+    if framework and framework not in FRAMEWORKS:
+        raise DatasetError(400, f'框架只能是 {"、".join(FRAMEWORKS)}（用 TensorRT 引擎推理的部署代码）')
+    onnx2engine = _text(onnx2engine or '', 'onnx2engine 路径', 1000).strip()
+    if any(c in onnx2engine for c in '\r\n\t'):
+        raise DatasetError(400, 'onnx2engine 路径中含有不允许使用的字符')
+    if bool(framework) != bool(onnx2engine):
+        raise DatasetError(400, '填写框架时须同时登记 onnx2engine（路径及其哈希）；未填写框架时两者均不登记')
+    return name, conda_env, src_dir, framework, onnx2engine
+
+
 def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str, env_sha256: str,
                     src_dir: str = '', src_commit: Optional[str] = None, src_dirty: bool = False,
                     src_state_sha256: Optional[str] = None, framework: str = '', onnx2engine: str = '',
@@ -107,16 +141,11 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     """A new version of the runner when anything differs from its newest one (another machine, another
     environment listing, another source commit); the newest one again otherwise. Only worker accounts
     register: what is recorded is what that machine has."""
-    if not NAME.match(name or ''):
-        raise DatasetError(400, '推理环境名只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
-    if not CONDA_ENV.match(conda_env or ''):
-        raise DatasetError(400, f'conda 环境名无效：{conda_env!r}')
+    name, conda_env, src_dir, framework, onnx2engine = _what_is_registered(name, conda_env, src_dir, framework,
+                                                                           onnx2engine)
     env_sha256 = check_digest(env_sha256)
     if store.size(env_sha256) is None:
         raise DatasetError(400, '环境的包清单（conda list --explicit 和 pip freeze）尚未上传')
-    src_dir = _text(src_dir or '', '源码目录', 1000).strip()
-    if any(c in src_dir for c in '\r\n\t'):
-        raise DatasetError(400, '源码目录中含有不允许使用的字符')
     if src_commit is not None:
         src_commit = src_commit.strip().lower()
         if not COMMIT.match(src_commit):
@@ -133,13 +162,7 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
     except StoreError as e:
         raise DatasetError(503, str(e)) from None
     state = bytes.fromhex(src_state_sha256) if src_state_sha256 else None
-    framework = framework or ''
-    if framework and framework not in FRAMEWORKS:
-        raise DatasetError(400, f'框架只能是 {"、".join(FRAMEWORKS)}（用 TensorRT 引擎推理的部署代码）')
-    onnx2engine = _text(onnx2engine or '', 'onnx2engine 路径', 1000).strip()
-    if any(c in onnx2engine for c in '\r\n\t'):
-        raise DatasetError(400, 'onnx2engine 路径中含有不允许使用的字符')
-    if bool(framework) != bool(onnx2engine) or bool(onnx2engine) != (onnx2engine_sha256 is not None):
+    if bool(onnx2engine) != (onnx2engine_sha256 is not None):
         raise DatasetError(400, '填写框架时须同时登记 onnx2engine（路径及其哈希）；未填写框架时两者均不登记')
     tool = bytes.fromhex(check_digest(onnx2engine_sha256)) if onnx2engine_sha256 is not None else None
     with conn.transaction():
@@ -189,12 +212,13 @@ def _job(conn, r: dict) -> dict:
                              (r['id'],)).fetchone()['n']
         # the machines that can take it: the one its runner is on, or any
         on = (conn.execute('SELECT worker_id FROM runner_versions WHERE id = %s', (r['runner_version_id'],))
-              .fetchone()['worker_id'] if r['runner_version_id'] is not None else None)
+              .fetchone()['worker_id'] if r['runner_version_id'] is not None else machine_of(r))
         waits_on = machines(conn, on)
     return {'id': r['id'], 'kind': r['kind'], 'kind_text': KINDS.get(r['kind'], r['kind']), 'params': r['params'],
             'runner_version_id': r['runner_version_id'],
             'runner': (get_runner_version_by_id(conn, r['runner_version_id'])['ref']
                        if r['runner_version_id'] is not None else None),
+            'machine': (r['params'].get('machine') or {}).get('name') if r['kind'] == 'register' else None,
             'status': r['status'], 'status_text': STATUSES[r['status']], 'queued_ahead': ahead, 'waits_on': waits_on,
             'submitted_by': r['submitted_by_name'], 'created_at': _stamp(r['created_at']),
             'attempts': r['attempts'], 'max_attempts': r['max_attempts'], 'worker': r['worker_name'],
@@ -214,8 +238,13 @@ def _job(conn, r: dict) -> dict:
 def retried_by(conn, r: dict) -> Optional[dict]:
     """The newest later job doing the same work as this one, not cancelled; None when there is none. The same
     work: an evaluation or pre-label of the same model version on the same data (version, split, folders; another
-    runner or conf is the same work, for those are what one changes to make it run), a check of the same runner."""
-    if r['kind'] == 'check':
+    runner or conf is the same work, for those are what one changes to make it run), a check of the same runner, a
+    registration of a runner of the same name."""
+    if r['kind'] == 'register':
+        row = conn.execute("SELECT id, status FROM jobs WHERE id > %s AND kind = 'register' AND status <> 'cancelled' "
+                           "AND lower(params->>'name') = lower(%s) ORDER BY id DESC LIMIT 1",
+                           (r['id'], r['params']['name'])).fetchone()
+    elif r['kind'] == 'check':
         row = conn.execute("SELECT n.id, n.status FROM jobs n JOIN runner_versions a ON a.id = n.runner_version_id "
                            "JOIN runner_versions b ON b.id = %s WHERE n.id > %s AND n.kind = 'check' "
                            "AND n.status <> 'cancelled' AND a.runner_id = b.runner_id ORDER BY n.id DESC LIMIT 1",
@@ -353,18 +382,65 @@ def enqueue(conn, user: dict, kind: str, rv: Optional[dict], params: dict) -> di
                                             user['user_id'])).fetchone()
         events.record(conn, user['user_id'], 'job.submit', f'任务 {row["id"]}', kind=kind,
                       model=(params.get('model') or {}).get('ref'), data=(params.get('data') or {}).get('ref'),
-                      runner=rv.get('ref') if rv else None)
+                      runner=rv.get('ref') if rv else params.get('name'),
+                      machine=(params.get('machine') or {}).get('name'))
     return get_job(conn, row['id'])
 
 
 def submit(conn, user: dict, kind: str, runner: Optional[str] = None, params: Optional[dict] = None) -> dict:
-    """A job that needs nothing but its runner (a check). Evaluations are submitted through evals.submit."""
+    """A job that needs nothing but its runner (a check), or a registration of a runner (submit_register).
+    Evaluations are submitted through evals.submit."""
+    if kind == 'register':
+        if runner:
+            raise DatasetError(400, '登记推理环境的任务不指定推理环境；请在参数中写明推理环境名和 GPU 机')
+        return submit_register(conn, user, params or {})
     if kind != 'check':
         raise DatasetError(400, f'任务类型只能是 {"、".join(KINDS)}')
     if params:
         raise DatasetError(400, '检查推理环境不接受参数')
     rv = find_runner(conn, runner, '检查')
     return enqueue(conn, user, kind, rv, runner_params(rv))
+
+
+REGISTER_KEYS = ('name', 'machine', 'conda_env', 'src_dir', 'framework', 'onnx2engine')
+
+
+def machine_of(r: dict) -> Optional[int]:
+    """The worker account a registration is for (its params); None for other jobs."""
+    return (r['params'].get('machine') or {}).get('id') if r['kind'] == 'register' else None
+
+
+def submit_register(conn, user: dict, params: dict) -> dict:
+    """Ask the worker on a GPU machine to register a runner there, as `fw runner register` run on that machine
+    does (only that machine can read its environment). params: name, machine (the worker account), conda_env,
+    src_dir, framework, onnx2engine. One unfinished registration per runner name at a time."""
+    if not isinstance(params, dict):
+        raise DatasetError(400, '登记推理环境的参数应为 JSON 对象')
+    extra = sorted(set(params) - set(REGISTER_KEYS))
+    if extra:
+        raise DatasetError(400, f'登记推理环境不接受参数：{"、".join(extra)}')
+    name, conda_env, src_dir, framework, onnx2engine = _what_is_registered(
+        params.get('name'), params.get('conda_env'), params.get('src_dir'), params.get('framework'),
+        params.get('onnx2engine'))
+    machine = params.get('machine')
+    if not isinstance(machine, str) or not machine.strip():
+        raise DatasetError(400, '请选择在哪台 GPU 机（worker 账号）上登记')
+    w = conn.execute("SELECT id, name, role, disabled_at FROM users WHERE lower(name) = lower(%s)",
+                     (machine.strip(),)).fetchone()
+    if w is None or w['role'] != 'worker':
+        raise DatasetError(400, f'{machine} 不是 GPU 机的 worker 账号；请从 GPU 机列表中选择')
+    if w['disabled_at'] is not None:
+        raise DatasetError(400, f'worker 账号 {w["name"]} 已停用，无法在该 GPU 机上登记；请先由管理员启用')
+    with conn.transaction():
+        # one at a time per name: two registrations racing would make two versions out of one request
+        conn.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (f'register:{name.lower()}',))
+        busy = conn.execute("SELECT id FROM jobs WHERE kind = 'register' AND status IN ('queued', 'running') "
+                            "AND lower(params->>'name') = lower(%s) ORDER BY id LIMIT 1", (name,)).fetchone()
+        if busy:
+            raise DatasetError(409, f'推理环境 {name} 已有尚未结束的登记任务（任务 {busy["id"]}）；请等待其结束，或取消后再提交')
+        return enqueue(conn, user, 'register', None, {
+            'name': name, 'machine': {'id': w['id'], 'name': w['name']}, 'conda_env': conda_env, 'src_dir': src_dir,
+            'framework': framework, 'onnx2engine': onnx2engine})
 
 
 def cancel(conn, job_id: int, user_id: Optional[int] = None) -> dict:
@@ -423,7 +499,7 @@ def machines(conn, worker_id: Optional[int] = None) -> List[dict]:
 
 def claim(conn, worker: dict, lease_seconds: int) -> Optional[dict]:
     """The oldest queued job this worker can run, now running under a new lease; None when there is none.
-    Jobs bound to a runner go only to the worker the runner version is on."""
+    Jobs bound to a runner go only to the worker the runner version is on, a registration only to its machine."""
     note_seen(conn, worker['user_id'], lease_seconds)
     expire_leases(conn)
     token = secrets.token_urlsafe(32)
@@ -431,7 +507,8 @@ def claim(conn, worker: dict, lease_seconds: int) -> Optional[dict]:
         row = conn.execute(
             "SELECT j.id, j.attempts FROM jobs j LEFT JOIN runner_versions rv ON rv.id = j.runner_version_id "
             "WHERE j.status = 'queued' AND (j.runner_version_id IS NULL OR rv.worker_id = %s) "
-            "ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED", (worker['user_id'],)).fetchone()
+            "AND (j.kind <> 'register' OR (j.params->'machine'->>'id')::bigint = %s) "
+            "ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED", (worker['user_id'], worker['user_id'])).fetchone()
         if row is None:
             return None
         attempt = row['attempts'] + 1
@@ -505,6 +582,9 @@ def _check_result(kind: str, result: Any) -> dict:
     if kind == 'eval':
         if not isinstance(result.get('eval_id'), int) or isinstance(result['eval_id'], bool):
             raise DatasetError(400, '评估结果中须包含评估报告的编号')
+    if kind == 'register':
+        if not isinstance(result.get('ref'), str) or not isinstance(result.get('created'), bool):
+            raise DatasetError(400, '登记结果中须包含推理环境的版本（ref）和是否为新版本（created）')
     if kind == 'check':
         if not isinstance(result.get('env_sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', result['env_sha256']):
             raise DatasetError(400, '检查结果中须包含环境包清单的哈希')
@@ -512,6 +592,16 @@ def _check_result(kind: str, result: Any) -> dict:
             if not isinstance(result.get(key), bool):
                 raise DatasetError(400, f'检查结果中的 {key} 应为 true 或 false')
     return result
+
+
+def _registered_here(conn, job: dict, ref: str) -> None:
+    """A registration is done only when the version it names is of the runner asked for, on its machine."""
+    name, _, number = ref.partition('@')
+    rv = conn.execute('SELECT rv.worker_id FROM runner_versions rv JOIN runners r ON r.id = rv.runner_id '
+                      'WHERE lower(r.name) = lower(%s) AND rv.number::text = %s', (name, number)).fetchone()
+    if (rv is None or name.lower() != job['params']['name'].lower()
+            or rv['worker_id'] != job['params']['machine']['id']):
+        raise DatasetError(400, f'{ref} 不是任务所登记的推理环境 {job["params"]["name"]}（在 {job["params"]["machine"]["name"]} 上）')
 
 
 def finished_already(conn, job_id: int, token: str, outcome: str) -> bool:
@@ -544,6 +634,8 @@ def finish(conn, job_id: int, token: str, outcome: str, result: Any = None, erro
         kind = row['kind']
         if outcome == 'done':
             result = _check_result(kind, result)
+            if kind == 'register':
+                _registered_here(conn, row, result['ref'])
         elif result is not None:
             raise DatasetError(400, '只有已完成的任务附带结果')
         if outcome == 'failed' and not error.strip():

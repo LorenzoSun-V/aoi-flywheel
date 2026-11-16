@@ -1115,3 +1115,78 @@ def test_a_gpu_machine_is_seen_online_while_it_asks_for_work(api, make_api, make
     with pytest.raises(ApiError) as e:
         make_api('field').workers()
     assert e.value.status == 403
+
+
+def test_a_runner_registered_from_the_web_is_registered_by_the_worker_on_its_machine(api, make_api, make_worker,
+                                                                                       fake_conda, sql):
+    """An administrator or an algorithm engineer asks for a registration (a job of kind 'register' naming the
+    machine); only the worker of that machine takes it and registers the runner as fw runner register does; the
+    job's result names the version. Asking again with nothing changed makes no new version. Field and deploy
+    accounts cannot ask; a wrong machine, a bad name or a second unfinished request for the same name is refused."""
+    a, b = make_worker(), make_worker()
+    name = f'r-{uuid.uuid4().hex[:6]}'
+    fake_conda(name, '@EXPLICIT\nhttps://x/python-3.10.tar.bz2\n')
+    ask = {'name': name, 'machine': a.name, 'conda_env': name, 'src_dir': '', 'framework': '', 'onnx2engine': ''}
+    job = make_api('admin').submit_job('register', params=ask)
+    assert job['kind'] == 'register' and job['machine'] == a.name and job['runner'] is None
+    assert [m['name'] for m in api.job(job['id'])['waits_on']] == [a.name]
+    with pytest.raises(ApiError, match='已有尚未结束的登记任务') as e:          # one request per name at a time
+        api.submit_job('register', params=ask)
+    assert e.value.status == 409
+    assert b.claim() is None                                                     # not b's machine
+    assert worker.run_worker(a, quiet, once=True) == 1
+    done = api.job(job['id'])
+    assert done['status'] == 'done' and done['result'] == {'ref': f'{name}@1', 'created': True}
+    [r] = [x for x in api.runners() if x['runner'] == name]
+    assert r['worker'] == a.name and r['conda_env'] == name and r['last_check'] is None
+    log = ''.join(p['text'] for p in api.job_log(job['id'])['pieces'])
+    assert f'已登记 {name}@1' in log
+    # again, by an algorithm engineer, with nothing changed: no new version
+    again = api.submit_job('register', params=ask)
+    worker.run_worker(a, quiet, once=True)
+    assert api.job(again['id'])['result'] == {'ref': f'{name}@1', 'created': False}
+    # the newest check is listed with the runner
+    check = api.submit_job('check', runner=name)
+    worker.run_worker(a, quiet, once=True)
+    [r] = [x for x in api.runners() if x['runner'] == name]
+    assert r['last_check']['job_id'] == check['id'] and r['last_check']['same_env'] is True
+    # no permission
+    for role in ('field', 'deploy'):
+        with pytest.raises(ApiError) as e:
+            make_api(role).submit_job('register', params=ask)
+        assert e.value.status == 403
+    # errors
+    for bad, why in ((dict(ask, machine='nobody'), '不是 GPU 机的 worker 账号'),
+                     (dict(ask, machine=''), '请选择在哪台 GPU 机'),
+                     (dict(ask, name='bad name'), '推理环境名只能用'),
+                     (dict(ask, conda_env='a b'), 'conda 环境名无效'),
+                     (dict(ask, framework='rfdetr'), '须同时登记 onnx2engine'),
+                     (dict(ask, framework='yolo', onnx2engine='/x'), '框架只能是'),
+                     (dict(ask, token='x'), '不接受参数')):
+        with pytest.raises(ApiError, match=why) as e:
+            api.submit_job('register', params=bad)
+        assert e.value.status == 400
+    with pytest.raises(ApiError, match='不指定推理环境'):
+        api.submit_job('register', runner=name, params=ask)
+    # a registration whose environment is not there fails, and is submitted again as it was
+    gone = api.submit_job('register', params=dict(ask, name=f'{name}-x', conda_env=f'{name}-x'))
+    worker.run_worker(a, quiet, once=True)
+    failed = api.job(gone['id'])
+    assert failed['status'] == 'failed' and '读不了 conda 环境' in failed['error']
+    fake_conda(f'{name}-x', '@EXPLICIT\nhttps://x/python-3.12.tar.bz2\n')
+    retried = api.post(f'/jobs/{gone["id"]}/retry', {})
+    assert retried['kind'] == 'register' and retried['machine'] == a.name and retried['params'] == failed['params']
+    assert api.job(gone['id'])['retried_by']['id'] == retried['id']
+    # a worker that names another runner, or one on another machine, does not finish a registration
+    other = runner(b, fake_conda)
+    worker.run_worker(a, quiet, once=True)        # the retried one
+    assert api.job(retried['id'])['result'] == {'ref': f'{name}-x@1', 'created': True}
+    late = api.submit_job('register', params=dict(ask, name=f'{name}-y', conda_env=name))
+    got = a.claim()
+    assert got['id'] == late['id']
+    with pytest.raises(ApiError, match='不是任务所登记的推理环境') as e:
+        a.finish(late['id'], got['token'], 'done', {'ref': other['ref'], 'created': True})
+    assert e.value.status == 400
+    # the database holds a registration to its machine
+    with pytest.raises(psycopg.errors.CheckViolation):
+        sql.execute("INSERT INTO jobs (kind, params, submitted_by) SELECT 'register', '{}', id FROM users LIMIT 1")

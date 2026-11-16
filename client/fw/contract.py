@@ -332,8 +332,10 @@ def task_title(task: str) -> str:
 #  18  POST /batches/<name>/reviewer: the owner of a batch in review asks another reviewer (step 'reassign')
 #  19  GET /workers: each GPU machine (worker account), when it last asked for work, online or not; a queued job's 'waits_on'
 #  20  a test set follows a pool's class table: 'classes_from' of a dataset, POST /datasets/<name>/classes-from
+#  21  jobs of kind 'register' (POST /jobs, params name, machine, conda_env, src_dir, framework, onnx2engine): the
+#      worker on that machine registers the runner; a job's 'machine'; 'last_check' of GET /runners
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 20
+API_LEVEL = 21
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 

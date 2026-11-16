@@ -172,7 +172,7 @@ def onnx2engine_info(path: str) -> Tuple[str, str]:
 
 
 def register_runner(api: Api, name: str, env: str, src_dir: str = '', framework: str = '',
-                    onnx2engine: str = '') -> dict:
+                    onnx2engine: str = '', capture: Optional[Capture] = None) -> dict:
     """Run on the GPU machine with its worker account: records the environment's package listing (uploaded to
     the store, so a later change can be compared), the source commit, the TensorRT inference adapter (rfdetr;
     '' = the runner only runs checks) and the onnx2engine program that builds engines, as the runner's next
@@ -180,9 +180,9 @@ def register_runner(api: Api, name: str, env: str, src_dir: str = '', framework:
     if bool(framework) != bool(onnx2engine):
         raise WorkerError('--framework 和 --onnx2engine 要一起写：评估时用 onnx2engine 从 ONNX 建引擎，再用框架的推理模块跑')
     tool, tool_sha = onnx2engine_info(onnx2engine) if onnx2engine else ('', None)
-    listing = conda_listing(env)
+    listing = conda_listing(env, capture)
     digest = api.put_bytes(listing)  # the platform makes it durable before it records the runner
-    src = source_info(src_dir)
+    src = source_info(src_dir, capture)
     return api.register_runner({'name': name, 'conda_env': env, 'env_sha256': digest, 'framework': framework,
                                 'onnx2engine': tool, 'onnx2engine_sha256': tool_sha, **src})
 
@@ -487,6 +487,18 @@ def check_runner(run: JobRun, p: Optional[dict] = None) -> dict:
         run.log('源码' + ('和登记时一样' if same_src else f'变了：现在 {now}，登记时 {then}'))
     return {'env_sha256': digest, 'src_commit': src['src_commit'], 'src_dirty': src['src_dirty'],
             'src_state_sha256': src['src_state_sha256'], 'same_env': same_env, 'same_src': same_src}
+
+
+def register_job(run: JobRun) -> dict:
+    """A registration asked for on the web: what `fw runner register` does, here, with this worker account."""
+    p = run.job['params']
+    run.log(f'登记推理环境 {p["name"]}：conda 环境 {p["conda_env"]}'
+            + (f'，源码 {p["src_dir"]}' if p['src_dir'] else '') + (f'，框架 {p["framework"]}，onnx2engine {p["onnx2engine"]}'
+                                                                   if p['framework'] else ''))
+    r = register_runner(run.api, p['name'], p['conda_env'], p['src_dir'], p['framework'], p['onnx2engine'],
+                        run.capture)
+    run.log(f'已登记 {r["ref"]}' if r['created'] else f'与 {r["ref"]} 相同，没有新版本')
+    return {'ref': r['ref'], 'created': r['created']}
 
 
 def work_dir() -> Path:
@@ -1029,7 +1041,7 @@ FINISH_RETRY_SECONDS = 600.0  # how long a result the platform cannot take is re
 
 OUTCOME_TEXT = {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'lost': '租约失效，没交结果'}
 HANDLERS: Dict[str, Callable[[JobRun], dict]] = {
-    'check': check_runner, 'eval': eval_model, 'predict': predict_model}
+    'check': check_runner, 'eval': eval_model, 'predict': predict_model, 'register': register_job}
 
 
 def run_worker(api: Api, echo: Echo, poll: float = 5.0, once: bool = False,
