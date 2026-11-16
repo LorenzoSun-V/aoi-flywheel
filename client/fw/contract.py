@@ -276,7 +276,7 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
 #  14  GET /jobs: before, site, line, mine and 'more'; GET /predictions: site, line
 #  15  a note on each problem image of a rejection: 'notes' of POST /batches/<name>/reject and of the steps
 #  16  a failed job's work submitted again (POST /jobs/<id>/retry) or marked handled (POST /jobs/<id>/handled);
-#      'retried_by' and 'handled' of a job
+#      'retried_by', 'handled' and 'batch' of a job
 API_HEADER = 'X-Fw-Api'
 API_LEVEL = 16
 MIN_CLIENT_LEVEL = 1

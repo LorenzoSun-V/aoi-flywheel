@@ -343,7 +343,7 @@ def test_a_failed_pre_label_is_submitted_again_as_it_was(api, make_api, gpu, set
     (gpu.listings / 'FAIL').write_text('')
     job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': data, 'dirs': ['A'], 'conf': 0.25})
     worker.run_worker(gpu, quiet, once=True)
-    assert api.job(job['id'])['status'] == 'failed'
+    assert api.job(job['id'])['status'] == 'failed' and api.job(job['id'])['batch'] is None
     (gpu.listings / 'FAIL').unlink()
     again = api.post(f'/jobs/{job["id"]}/retry', {})
     p = again['params']
@@ -358,7 +358,8 @@ def test_a_failed_pre_label_is_submitted_again_as_it_was(api, make_api, gpu, set
     (gpu.listings / 'FAIL').write_text('')
     row = ops.prelabel_batch(field, name, model=mv['ref'], runner=r['runner'], echo=quiet)
     worker.run_worker(gpu, quiet, once=True)
-    assert api.job(row['job_id'])['status'] == 'failed'
+    failed = api.job(row['job_id'])
+    assert failed['status'] == 'failed' and failed['batch'] == {'name': name, 'uploaded_by': field.get('/me')['name']}
     (gpu.listings / 'FAIL').unlink()
     with pytest.raises(ApiError, match='不是您上传的批次') as e:   # the owner runs it again from the batch page
         api.post(f'/jobs/{row["job_id"]}/retry', {})

@@ -3080,9 +3080,14 @@ async function failedCard(j) {
     return card;
   }
   if (!can('jobs.write')) { card.append(...said); return card; }
+  const mine = j.submitted_by === me.name || can('users.manage');
+  // a pre-label of a labelling batch runs again only for the account that uploaded the batch (or an administrator)
+  const elsewhere = j.batch && j.batch.uploaded_by !== me.name && !can('users.manage');
+  if (elsewhere) said.push(el('p', { id: 'job-batch-owner' }, '该任务是标注批次 ', bref(j.batch.name),
+    ` 的预标注，仅上传该批次的账号（${j.batch.uploaded_by}）或管理员可以重新提交，上传人可在批次页重新运行预标注。`));
   const name = (j.runner || '').split('@')[0];
   let pick = null;
-  if (j.kind !== 'check') {  // a check checks its own runner: its newest version
+  if (j.kind !== 'check' && !elsewhere) {  // a check checks its own runner: its newest version
     const runners = (await api.runners()).filter((r) => r.framework);
     pick = el('select', { id: 'retry-runner', 'aria-label': '推理环境' }, runners.map((r) => el('option', { value: r.runner, selected: r.runner === name },
       r.runner === name ? `${r.ref}（同名推理环境的最新版本）` : r.ref)));
@@ -3096,12 +3101,11 @@ async function failedCard(j) {
       toastDone(`已重新提交为任务 ${made.id}`);
     } catch (e) { acts.after(errorBox(e)); retry.disabled = false; }
   } }, '重新提交');
-  const mine = j.submitted_by === me.name || can('users.manage');
   const handle = mine ? el('button', { type: 'button', id: 'job-handle', onclick: () => askFirst(acts, {
     text: `将任务 ${j.id} 标为已处理：不再运行，也不再列在「待我处理」中。此标记不能撤销。`, reason: '说明（选填）', go: '确认标为已处理',
     run: async (note) => { await api.handleJob(j.id, note); await render(); toastDone(`已将任务 ${j.id} 标为已处理`); } }) }, '标为已处理…') : null;
-  acts.append(...(pick ? [el('label', { for: 'retry-runner' }, '推理环境'), pick] : []), retry, handle);
-  card.append(...said, acts);
+  acts.append(...[pick && el('label', { for: 'retry-runner' }, '推理环境'), pick, !elsewhere && retry, handle].filter(Boolean));
+  card.append(...said, ...(acts.childElementCount ? [acts] : []));
   return card;
 }
 

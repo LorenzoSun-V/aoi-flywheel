@@ -1,12 +1,13 @@
 // A failed job in the browser (run by tests/server/test_web.py):
-// node failed.cjs <url> <algo token> <first failed job> <second failed job> <out dir>.
+// node failed.cjs <url> <algo token> <first failed job> <second failed job> <batch job> <out dir>.
 // Both jobs are evaluations that failed and wait on the home page. The first is submitted again from its page
 // (the runner offered: the newest version of its own), the second is marked handled with a note; after each,
-// the home page no longer lists it. Prints one JSON line.
+// the home page no longer lists it. The batch job is a failed pre-label of a batch another account uploaded:
+// what its page offers. Prints one JSON line.
 const { chromium } = require('playwright');
 
 (async () => {
-  const [url, token, first, second, out] = process.argv.slice(2);
+  const [url, token, first, second, batchJob, out] = process.argv.slice(2);
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errors = [];
@@ -57,6 +58,12 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#jobs');
   seen.list = await page.$$eval('#jobs tr:not(.group-head)', (rows, ids) => rows.filter((r) => ids.includes(r.cells[0]?.textContent.trim()))
     .map((r) => [r.cells[0].textContent.trim(), r.cells[4].textContent.trim()]), [`任务 ${first}`, `任务 ${second}`]);
+
+  // a pre-label of a batch another account uploaded: run again from the batch, by its uploader
+  await open(batchJob);
+  seen.batchJob = { owner: await text('#job-batch-owner'), link: await page.getAttribute('#job-batch-owner a', 'href'),
+    retry: await page.locator('#job-retry').count(), runner: await page.locator('#retry-runner').count(),
+    actions: await page.locator('#job-failed-actions').count() };
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();

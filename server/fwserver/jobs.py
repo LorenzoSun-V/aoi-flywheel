@@ -171,9 +171,14 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
 
 # --- jobs ---------------------------------------------------------------------------------------------
 _JOB = ('SELECT j.*, s.name AS submitted_by_name, w.name AS worker_name, '
-        'h.handled_at, h.note AS handled_note, hu.name AS handled_by_name FROM jobs j '
+        'h.handled_at, h.note AS handled_note, hu.name AS handled_by_name, '
+        'bd.name AS batch_name, bo.name AS batch_owner FROM jobs j '
         'JOIN users s ON s.id = j.submitted_by LEFT JOIN users w ON w.id = j.worker_id '
-        'LEFT JOIN job_handled h ON h.job_id = j.id LEFT JOIN users hu ON hu.id = h.handled_by ')
+        'LEFT JOIN job_handled h ON h.job_id = j.id LEFT JOIN users hu ON hu.id = h.handled_by '
+        # a pre-label of a labelling batch: the batch and the account that uploaded it (who may run it again)
+        "LEFT JOIN versions bv ON bv.id = (j.params->'data'->>'id')::bigint "
+        'LEFT JOIN batches b ON b.dataset_id = bv.dataset_id LEFT JOIN datasets bd ON bd.id = b.dataset_id '
+        'LEFT JOIN users bo ON bo.id = b.owner_id ')
 MAX_NOTE = 2000  # characters of the note of a handled job (0017 holds the same limit)
 
 
@@ -194,7 +199,8 @@ def _job(conn, r: dict) -> dict:
             'result': r['result'], 'error': r['error'],
             'retried_by': retried_by(conn, r) if r['status'] == 'failed' else None,
             'handled': ({'by': r['handled_by_name'], 'at': _stamp(r['handled_at']), 'note': r['handled_note']}
-                        if r['handled_at'] else None)}
+                        if r['handled_at'] else None),
+            'batch': {'name': r['batch_name'], 'uploaded_by': r['batch_owner']} if r['batch_name'] else None}
 
 
 # --- what became of a failed job ----------------------------------------------------------------------------
