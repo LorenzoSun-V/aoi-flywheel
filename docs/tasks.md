@@ -17,7 +17,7 @@
 - 同一个数据池可以建检测快照，也可以建分割快照。
 - 快照格式仍是 `fw-trainset 1`，靠 `trainset.json` 的 `task` 区分，不为新任务改格式名。
 - `/api/v1` 里数据集版本的 `task`（API 级别 17）：快照是它的任务，其余是 `null`。网页在快照列表、快照页、概览的「数据池与快照」里标出任务。
-- 标注批次没有任务：复核时的「改动统计」按形状类型比较，`rectangle` 对 `rectangle` 按 IoU 判断移动、改类别，其余形状按外接矩形比较（现在的做法，加任务时改成只按「完全相同、新增、删除」统计）。
+- 标注批次没有任务：复核时的「改动统计」按形状类型比较，`rectangle` 对 `rectangle` 按 IoU 判断移动、改类别，其余形状按外接矩形比较（现在的做法，加任务时改成只按「完全相同、新增、删除」统计）。数据池版本之间的标注对比同样没有任务，按检测读成框比较。
 
 ## 2. 任务表
 
@@ -159,6 +159,13 @@
 
 1. **数据侧：** 新迁移放开这个值；`formats.py` 实现这个任务的 `TaskFormat` 并登记进 `formats.of`；任务表这一行改 `enabled=True`（`app.js` 的副本同步）；建快照选任务（网页、命令行）；`fw get`；改 `docs/trainset-format.md`。
 2. **模型侧：** 适配器、schema 2 预测集、预标注写对应形状、评估、网页按任务画预测和指标列。
+
+加第一个新任务时，下面这些还按检测写着，要一并改成按任务：
+
+- `predictions.py` 只收 `schema_version` 1，没有用到 `Task.pred_schema`。
+- 网页新建模型写死 `task: 'det'`；概览的指标列取的是 `TASKS.det.key_metrics`，`main_metric` 还没有用到。
+- worker 打印评估指标时用的是检测的指标名（`metrics_text` 的默认值）。
+- 数据池版本对比（`changes.py`）和批次改动统计（`batches.py`）按检测读标注，见第 1 节。
 
 不变的：`test_a_detection_snapshot_is_the_same_byte_for_byte` 固定了一组检测输入的快照清单哈希和每个文件的哈希，加任务后必须原样通过（[development.md](development.md) 规则表「检测快照的字节不因加任务而变」）。
 
