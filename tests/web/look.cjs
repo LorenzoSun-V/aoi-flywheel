@@ -39,6 +39,8 @@ const { chromium } = require('playwright');
   seen.release = { ref: await page.textContent('#release .ref'), sub: await page.textContent('#release .sub'),
     acts: await page.textContent('#release .acts'), go: await page.getAttribute('#release a.go', 'href') };
   seen.models = await page.$$eval('table.models tr', (rows) => rows.slice(1).map((r) => [...r.querySelectorAll('td')].slice(0, 4).map((c) => c.textContent)));
+  seen.grey = await page.$$eval('table.models tr.on-split', (rows) => rows.map((r) => [r.cells[0].textContent,
+    [...r.querySelectorAll('td.num')].every((c) => c.classList.contains('muted')), r.title]));
   seen.data = await page.$$eval('table.data tr', (rows) => rows.slice(1).map((r) => [...r.querySelectorAll('td')].slice(0, 2).map((c) => c.textContent)));
   seen.batches = await page.$$eval('table.batches tr', (rows) => rows.map((r) => [r.querySelector('td a').textContent, r.querySelector('td.state').textContent]));
   const layout = async () => {
@@ -71,9 +73,9 @@ const { chromium } = require('playwright');
   await page.mouse.click(700, 140);  // outside
   await page.waitForFunction(() => !document.querySelector('.menu'));
   seen.closedByOutside = true;
-  await page.click(dots('SES-TX-seg'));
+  await page.click(dots('SES-TX-plain'));
   seen.menuNoEval = await page.$$eval('.menu [role=menuitem]', (items) => items.map((i) => i.textContent));
-  await page.click(dots('SES-TX-seg'));  // again: closes
+  await page.click(dots('SES-TX-plain'));  // again: closes
   await page.waitForFunction(() => !document.querySelector('.menu'));
 
   // the menu by keys: Tab to ⋯, Enter, arrows, Esc back to ⋯

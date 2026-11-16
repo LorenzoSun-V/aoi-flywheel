@@ -901,13 +901,14 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     api.create_dataset(test, 'SES', 'TX', 'test', '')
     from test_trainsets import add_version
     add_version(api, tmp_path / 't', test, sample_files('2026-11', 2))
-    detr, yolo, seg = 'SES-TX-detr', 'SES-TX-yolo', 'SES-TX-seg'
-    for m in (detr, yolo, seg):
+    detr, yolo, seg, plain = 'SES-TX-detr', 'SES-TX-yolo', 'SES-TX-seg', 'SES-TX-plain'
+    for m in (detr, yolo, seg, plain):
         api.create_model(m, 'SES', 'TX', 'det', '')
     for i in range(3):
         register(api, detr, snap, files_in(tmp_path, f'detr{i}'))
     register(api, yolo, snap, files_in(tmp_path, 'yolo'))
     register(api, seg, snap, files_in(tmp_path, 'seg'))
+    register(api, plain, snap, files_in(tmp_path, 'plain'))
     api.set_benchmark('SES/TX', test)                     # the models of the line are compared on its newest version
     bench = f'{test}@1'
     _on(api, tmp_path, f'{detr}@1', bench, {'mAP50': 0.9})
@@ -944,7 +945,12 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert rel['ref'].startswith('SES-TX-r')
     rows = {r[0]: r[1:] for r in seen['models']}
     assert rows[detr] == ['@2', '0.962', '0.846'] and rows[yolo] == ['@1', '0.928', '0.791']   # the evaluated version
-    assert rows[seg] == ['未评估', '—', '—']                                                    # none on the benchmark
+    assert rows[plain] == ['未评估', '—', '—']                                                  # none at all
+    # none on the benchmark, one on the snapshot's test split: shown in grey, said not to compare
+    assert rows[seg] == ['@1 快照 test 划分', '0.99', '—']
+    grey = {name: (muted, title) for name, muted, title in seen['grey']}
+    assert grey[seg][0] and f'{seg}@1 在快照 {snap["ref"]}:test 上的结果' in grey[seg][1] and '不可与基准测试集上的结果比较' in grey[seg][1]
+    assert detr not in grey and plain not in grey
     kinds = {name.split('@')[0]: kind for name, kind in seen['data']}
     assert kinds[data] == '数据池' and kinds[snap['dataset']] == '训练集快照（检测）' and kinds[test] == '测试集'
     mine = {name: state for name, state in seen['batches'] if name in batches}   # other tests add batches on SES/TX too

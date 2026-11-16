@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
-  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle, machineText, waitNotice,
+  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle, machineText, waitNotice, splitByModel,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey, placeGroups,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, failedAfter, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
@@ -586,4 +586,11 @@ test('a GPU machine is online or says when it was last heard from; a queued job 
   assert.match(waitNotice(job({ waits_on: [] }), now), /^平台尚无 GPU worker 账号/);
   assert.match(waitNotice(job({ runner: 'trt10@2', waits_on: [{ ...off, disabled: true }] }), now),
     /^推理环境 trt10@2 所在 GPU 机的 worker 账号 gpu-01 已停用/);
+});
+
+test('a model without a report on the benchmark falls back to its newest version on a snapshot test split', () => {
+  const e = (id, ref, more) => ({ id, model_version: { ref }, testset: { id: 9 }, split: 'test', dirs: [], ...more });
+  const out = splitByModel([e(1, 'a@1'), e(2, 'a@2'), e(3, 'a@2', { split: 'val' }), e(4, 'a@3', { dirs: ['x'] }),
+    e(5, 'b@1', { split: null }), e(6, 'c@4'), e(7, 'c@4')]);
+  assert.deepEqual(Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.id])), { a: 2, c: 7 });
 });
