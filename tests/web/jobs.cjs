@@ -19,7 +19,10 @@ const { chromium } = require('playwright');
     await page.goto(`${url}${hash}`);
     await page.waitForFunction(([h, s]) => location.hash === h && document.querySelector('h1') && document.querySelector(s), [hash, ready]);
   };
-  const ids = (table) => page.$$eval(`${table} tr:not(:first-child) td:first-child`, (tds) => tds.map((td) => td.textContent.trim()));
+  const ids = (table) => page.$$eval(`${table} tr:not(.group-head) td:first-child`, (tds) => tds.map((td) => td.textContent.trim()));
+  // the groups by site and line: [[title or null, [first cells]], ...]
+  const groups = (table) => page.$$eval(`${table} tbody`, (bodies) => bodies.map((b) => [b.querySelector('tr.group-head .name')?.textContent || null,
+    [...b.querySelectorAll('tr:not(.group-head) td:first-child')].map((td) => td.textContent.trim())]));
   const sorted = (table) => page.$$eval(`${table} th`, (ths) => ths.map((th) => [th.textContent, th.getAttribute('aria-sort')])
     .filter(([, s]) => s && s !== 'none'));
   const list = () => page.evaluate(() => ({
@@ -31,9 +34,9 @@ const { chromium } = require('playwright');
 
   // by line, by site
   await open(`#/jobs?site=${site}&line=L1`, '#jobs');
-  seen.line = { ids: await ids('#jobs'), ...(await list()) };
+  seen.line = { ids: await ids('#jobs'), groups: await groups('#jobs'), ...(await list()) };
   await open(`#/jobs?site=${site}`, '#jobs');
-  seen.site = { ids: await ids('#jobs'), ...(await list()) };
+  seen.site = { ids: await ids('#jobs'), groups: await groups('#jobs'), ...(await list()) };
   await page.screenshot({ path: `${out}/jobs-site.png` });
   await page.selectOption('#job-status', 'done');
   await page.waitForFunction(() => location.hash.includes('status=done') && document.querySelector('#job-status').value === 'done');
@@ -41,8 +44,14 @@ const { chromium } = require('playwright');
   seen.done = { hash: await page.evaluate(() => location.hash), ids: await ids('#jobs') };
   await open(`#/predictions?site=${site}&line=L1`, '#prediction-list');
   seen.predictions = { ids: await ids('#prediction-list'), ...(await list()) };
+  await open('#/predictions', '#prediction-list');
+  seen.allPredictions = await groups('#prediction-list');
   await open(`#/predictions?site=${site}&line=L2`, '.browse .list p.muted:last-child');
   seen.noPredictions = await page.textContent('.browse .list > p.muted:last-child');
+
+  await open('#/jobs?status=done', '#jobs');  // 「全部」: the newest done jobs, ours among them
+  seen.all = { groups: await groups('#jobs') };
+  await page.screenshot({ path: `${out}/jobs-grouped.png`, fullPage: true });
 
   // older jobs on request, and sorting
   await open('#/jobs?status=cancelled', '#jobs');
@@ -53,15 +62,17 @@ const { chromium } = require('playwright');
   seen.down = { ids: await ids('#jobs'), sorted: await sorted('#jobs') };
   await page.click('#jobs th:nth-child(1)');  // ascending again, then the older ones come in their place
   await page.click('#jobs-more');
-  await page.waitForFunction(() => document.querySelectorAll('#jobs tr').length > 101 && !document.querySelector('#jobs-more').disabled);
-  seen.more = { ids: await ids('#jobs'), sorted: await sorted('#jobs'), button: await page.isVisible('#jobs-more') };
+  await page.waitForFunction(() => document.querySelectorAll('#jobs tr:not(.group-head)').length > 101 && !document.querySelector('#jobs-more').disabled);
+  seen.more = { ids: await ids('#jobs'), groups: await groups('#jobs'), sorted: await sorted('#jobs'), button: await page.isVisible('#jobs-more') };
   await page.focus('#jobs th:nth-child(6)');
   await page.keyboard.press('Enter');
   seen.keyboard = await sorted('#jobs');
   await page.screenshot({ path: `${out}/jobs-sorted.png` });
 
-  // the models of the site, sorted by name, the other way round
+  // the models of the site, by line; those of L1, sorted by name, the other way round
   await open(`#/models?site=${site}`, '#model-list');
+  seen.siteModels = await groups('#model-list');
+  await open(`#/models?site=${site}&line=L1`, '#model-list');
   await page.click('#model-list th:nth-child(1)');
   await page.click('#model-list th:nth-child(1)');
   seen.models = { names: await ids('#model-list'), sorted: await sorted('#model-list') };

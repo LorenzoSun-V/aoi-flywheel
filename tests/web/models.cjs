@@ -61,8 +61,9 @@ const { chromium } = require('playwright');
     await page.screenshot({ path: `${out}/eval-compare.png` });
     await page.goto(`${url}#/jobs`);
     await h1('任务');
-    seen.jobs = await page.$$eval('table tr td:nth-child(5)', (tds) => tds.map((t) => t.textContent));
-    await page.click('table tr:nth-child(2) td:first-child a');
+    const line = `table tbody:has(td:has-text("${ref}"))`;  // the group of the model's line, newest first
+    seen.jobs = await page.$$eval(`${line} tr:not(.group-head) td:nth-child(5)`, (tds) => tds.map((t) => t.textContent));
+    await page.click(`${line} tr:not(.group-head) td:first-child a >> nth=0`);
     await page.waitForFunction(() => document.querySelector('pre.log') && document.querySelector('pre.log').textContent.length > 0);
     seen.result = await page.textContent('dl.kv');
     seen.log = await page.textContent('pre.log');

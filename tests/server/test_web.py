@@ -206,9 +206,10 @@ def test_a_walk_through_models_jobs_and_predictions(service, tokens, api, gpu, m
 
 @pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
 def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens, api, gpu, snapshot, tmp_path):  # noqa: F811
-    """The jobs and prediction sets of a line are those of its models (a check of a runner is under 「全部」 only);
-    the jobs list shows the newest 100 and loads older ones on request; a click on a header sorts the rows shown,
-    a second click the other way, the order kept when more rows come in."""
+    """The jobs and prediction sets of a line are those of its models (a check of a runner is under 「全部」 only,
+    in the last group); under 「全部」 and under a site the rows are grouped by line; the jobs list shows the newest
+    100 and loads older ones on request; a click on a header sorts the rows shown (within each group), a second
+    click the other way, the order kept when more rows come in."""
     from test_evals import add_runner, trained
     from fw import worker
     from helpers import quiet, register_place
@@ -230,6 +231,8 @@ def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens
         done.append(api.job(job['id']))
         assert done[-1]['status'] == 'done', done[-1]['error']
     set_id = done[0]['result']['prediction_set']
+    other = f'L1-z{os.urandom(3).hex()}'                                   # a second model on L1, to sort (after the first)
+    api.create_model(other, site, 'L1', 'det', '')
     cancelled = [api.submit_job('check', runner=r['runner'])['id'] for _ in range(101)]
     for job_id in cancelled:
         api.cancel_job(job_id)
@@ -244,9 +247,15 @@ def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens
     assert seen['line']['ids'] == [predicted] and seen['line']['here'].startswith('L1')
     assert seen['line']['path'] == f'概览/{site}/L1/任务' and seen['line']['scope'] == f'范围：{site} / L1'
     assert not seen['line']['search']                                  # a list of jobs has no names to search
-    assert seen['site']['ids'] == [evaluated, predicted]
-    assert f'site={site}' in seen['done']['hash'] and seen['done']['ids'] == [evaluated, predicted]
+    assert seen['line']['groups'] == [[None, [predicted]]]
+    # by line under a site, L1 first; a check of a runner under 「全部」 only, in the last group
+    assert seen['site']['ids'] == [predicted, evaluated]
+    assert seen['site']['groups'] == [[f'{site} / L1', [predicted]], [f'{site} / L2', [evaluated]]]
+    everything = dict(seen['all']['groups'])
+    assert everything[f'{site} / L1'] == [predicted] and everything[f'{site} / L2'] == [evaluated]
+    assert f'site={site}' in seen['done']['hash'] and seen['done']['ids'] == [predicted, evaluated]
     assert seen['predictions']['ids'] == [f'#{set_id}'] and seen['predictions']['path'] == f'概览/{site}/L1/预测集'
+    assert dict(seen['allPredictions'])[f'{site} / L1'] == [f'#{set_id}']
     assert seen['noPredictions'] == '没有符合条件的预测集。'
     ours = [f'任务 {i}' for i in cancelled]
     assert seen['first'] == {'rows': 100, 'more': True}               # the newest 100: ours but the oldest
@@ -254,11 +263,14 @@ def test_jobs_and_prediction_sets_are_browsed_by_line_and_sorted(service, tokens
     assert seen['down']['ids'] == ours[1:][::-1] and seen['down']['sorted'] == [['编号', 'descending']]
     shown = seen['more']['ids']
     assert len(shown) >= 101 and shown[-101:] == ours and seen['more']['sorted'] == [['编号', 'ascending']]
-    assert shown == sorted(shown, key=lambda t: int(t.split()[-1]))           # the older rows sorted in with the rest
+    for _, rows in seen['more']['groups']:                                 # the older rows sorted in with the rest
+        assert rows == sorted(rows, key=lambda t: int(t.split()[-1]))
+    assert seen['more']['groups'][-1][0] == '不属于任何产线'                # the checks of a runner
     assert seen['keyboard'] == [['提交人', 'ascending']]
-    assert seen['models']['names'] == sorted(models.values(), reverse=True)
-    assert seen['models']['sorted'] == [['名称', 'descending']]
-    assert seen['modelsBack']['sorted'] == [] and seen['modelsBack']['names'] == sorted(models.values())  # the server's order again
+    on_l1 = [models['L1'], other]
+    assert seen['models']['names'] == on_l1[::-1] and seen['models']['sorted'] == [['名称', 'descending']]
+    assert seen['modelsBack']['sorted'] == [] and seen['modelsBack']['names'] == on_l1  # the server's order again
+    assert seen['siteModels'] == [[f'{site} / L1', on_l1], [f'{site} / L2', [models['L2']]]]
 
 
 @pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
@@ -448,6 +460,8 @@ def test_every_page_keeps_rows_on_one_line_and_forms_to_one_width(service, token
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
+    """A site or line chosen in the tree narrows the lists; under 「全部」 and under a site the rows are grouped by
+    line (a title row each, in the order of the tree), under a line they are listed plainly."""
     from fw import ops
     from helpers import quiet, register_place
     from test_trainsets import make, pool, sample_files
@@ -467,15 +481,22 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     seen = json.loads(r.stdout.strip().splitlines()[-1])
     assert seen['errors'] == []
     assert {a, b} <= set(seen['all']['pools']) and ts in seen['all']['snapshots']
+    titles = [t for t, _ in seen['all']['poolGroups']]
+    tx, ty = f'{site} / TX', f'{site} / TY'
+    assert dict(seen['all']['poolGroups'])[tx] == [a] and dict(seen['all']['poolGroups'])[ty] == [b]
+    assert titles.index(tx) + 1 == titles.index(ty) and dict(seen['all']['snapshotGroups'])[tx] == [ts]
     assert any(x.startswith(site) for x in seen['tree']) and seen['tree'][0].startswith('全部')
-    assert sorted(seen['site']['pools']) == sorted([a, b]) and seen['site']['snapshots'] == [ts]
-    assert seen['ty'] == {'pools': [b], 'snapshots': []} and f'site={site}' in seen['tyHash']
-    assert seen['tx'] == {'pools': [a], 'snapshots': [ts]}           # the snapshot took its data from TX
+    assert seen['site']['pools'] == [a, b] and seen['site']['snapshots'] == [ts]
+    assert seen['site']['poolGroups'] == [[tx, [a]], [ty, [b]]] and seen['site']['snapshotGroups'] == [[tx, [ts]]]
+    assert seen['ty'] == {'pools': [b], 'snapshots': [], 'poolGroups': [[None, [b]]], 'snapshotGroups': []}
+    assert f'site={site}' in seen['tyHash']
+    # the snapshot took its data from TX
+    assert seen['tx'] == {'pools': [a], 'snapshots': [ts], 'poolGroups': [[None, [a]]], 'snapshotGroups': [[None, [ts]]]}
     assert seen['newHref'] == f'#/dataset-new?site={site}&line=TX'    # a new pool starts on the line being browsed
     assert '没有符合条件的数据集' in seen['none']
     assert seen['navModels'] == f'#/models?site={site}&line=TX' and seen['models'] == [model] and seen['navOn'] == '模型'
     assert seen['navAfter'] == '#/datasets'
-    assert batch in seen['batches']
+    assert batch in seen['batches'] and seen['batchGroups'] == [[ty, [batch]]]
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')

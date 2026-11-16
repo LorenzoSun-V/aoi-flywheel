@@ -94,6 +94,12 @@ tr:first-child > :last-child { border-top-right-radius: 11px; }
 tr:last-child > :first-child { border-bottom-left-radius: 11px; }
 tr:last-child > :last-child { border-bottom-right-radius: 11px; }
 tr:hover > td { background: #fafafc; }
+/* a list grouped by site and line: a row with each group's title; the corners are the table's alone */
+table.grouped > tbody:not(:last-child) > tr:last-child > td { border-bottom: 1px solid var(--line); border-radius: 0; }
+table.grouped > tbody:not(:last-child) > tr:last-child:hover > td { border-radius: 0; }
+table.grouped tr.group-head > td, table.grouped tr.group-head:hover > td { background: var(--soft); padding: 6px 12px; font-size: 12px;
+  font-weight: 600; color: #3a3f47; border-radius: 0; }
+table.grouped tr.group-head .count { margin-left: 8px; font-weight: 400; color: var(--muted); }
 table.narrow { width: auto; min-width: 360px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.mark { width: 6px; padding: 0; }

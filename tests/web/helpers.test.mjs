@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import {
   shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
-  trailOf, visited, readPlaces, toggled, shownPlaces, placeKey,
+  trailOf, visited, readPlaces, toggled, shownPlaces, placeKey, placeGroups,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
   batchFlow, rejectionChecks, fitView, zoomAt, readReview, reviewText, reviewKey, changedImages, reviewMatch, stepTo, stripWindow, rejectBody,
@@ -527,4 +527,30 @@ test('a batch shows its four steps by where it stands, and what became of the im
   const checks = rejectionChecks({ images: ['a.png', 'b.png', 'c.png'], notes: { 'a.png': '漏标' } }, new Set(['a.png']), ['a.png', 'b.png']);
   assert.deepEqual(checks, { done: 2, rows: [{ path: 'a.png', note: '漏标', change: 'changed' },
     { path: 'b.png', note: '', change: 'same' }, { path: 'c.png', note: '', change: 'gone' }] });
+});
+
+test('a list is grouped by site and line in the order of the tree, what has no line last', () => {
+  const tree = { sites: [{ code: 'SES', name: '', lines: [{ code: 'TX', name: '贴片线' }, { code: 'ASM', name: '' }] },
+    { code: 'HZ', name: '杭州', lines: [{ code: 'L1', name: '' }] }] };
+  const rows = [['a', 'HZ', 'L1'], ['b', '', ''], ['c', 'ses', 'tx'], ['d', 'SES', ''], ['e', 'OLD', 'X'], ['f', 'SES', 'ASM'],
+    ['g', 'SES', 'TX'], ['h', 'SES', 'ZZ'], ['i', 'OLD', '']].map(([name, site, line]) => ({ name, site, line }));
+  const shown = (at) => placeGroups(tree, at, rows, (r) => r, '不属于任何产线').map((g) => [g.title, g.items.map((r) => r.name)]);
+  const all = { site: '', line: '' };
+  assert.deepEqual(shown(all), [
+    ['SES / TX（贴片线）', ['c', 'g']],          // one line however its code is spelled; rows in the order given
+    ['SES / ASM', ['f']],
+    ['SES / ZZ', ['h']],                         // a line not registered: after the site's own
+    ['SES（未指定产线）', ['d']],
+    ['HZ（杭州） / L1', ['a']],
+    ['OLD / X', ['e']], ['OLD（未指定产线）', ['i']],  // a site not registered: after the registered ones
+    ['不属于任何产线', ['b']]]);
+  assert.deepEqual(placeGroups(tree, all, rows, (r) => r, 'x').map((g) => g.key).slice(0, 2), ['ses/tx', 'ses/asm']);
+  // one line chosen: a plain list, unless something on no line is listed there too (a snapshot of several lines)
+  const one = [rows[2], rows[6]];
+  assert.deepEqual(placeGroups(tree, { site: 'SES', line: 'TX' }, one, (r) => r, '跨产线').map((g) => [g.title, g.items.length]), [[null, 2]]);
+  assert.deepEqual(placeGroups(tree, { site: 'SES', line: 'TX' }, [...one, rows[1]], (r) => r, '跨产线').map((g) => g.title),
+    ['SES / TX（贴片线）', '跨产线']);
+  assert.deepEqual(placeGroups(tree, { site: 'SES', line: '' }, one, (r) => r, '跨产线').map((g) => g.title), ['SES / TX（贴片线）']);
+  assert.deepEqual(placeGroups(tree, all, [], (r) => r, 'x'), []);
+  assert.deepEqual(placeGroups(tree, all, [{ name: 'j' }], () => null, '不属于任何产线').map((g) => g.title), ['不属于任何产线']);
 });

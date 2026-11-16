@@ -34,7 +34,7 @@ const { chromium } = require('playwright');
     return page.evaluate(() => ({
       tabs: [...document.querySelectorAll('.tabs a[data-view]')].map((a) => [a.dataset.view, a.querySelector('.count')?.textContent ?? null]),
       on: document.querySelector('.tabs a.on').dataset.view,
-      rows: document.querySelectorAll('.browse table tr').length - (document.querySelector('.browse table') ? 1 : 0),
+      rows: document.querySelectorAll('.browse table tr:not(.group-head)').length - (document.querySelector('.browse table') ? 1 : 0),
     }));
   };
   const seen = {};

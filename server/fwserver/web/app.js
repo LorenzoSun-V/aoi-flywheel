@@ -171,8 +171,12 @@ function sortable(table) {
     heads.forEach((th, i) => { if (th.classList.contains('sortable')) th.setAttribute('aria-sort', o && o.col === i ? (o.desc ? 'descending' : 'ascending') : 'none'); });
     if (!o || !heads[o.col]) return;
     const numeric = heads[o.col].classList.contains('num');
-    const rows = [...table.rows].slice(1).sort((x, y) => compareCells(keyOf(x.cells[o.col]), keyOf(y.cells[o.col]), numeric, o.desc));
-    table.append(...rows);
+    // a list grouped by site and line (groupedTable) is sorted within each group
+    for (const body of table.tBodies.length ? [...table.tBodies] : [table]) {
+      const rows = [...body.rows].filter((r) => r !== table.rows[0] && !r.classList.contains('group-head'))
+        .sort((x, y) => compareCells(keyOf(x.cells[o.col]), keyOf(y.cells[o.col]), numeric, o.desc));
+      body.append(...rows);
+    }
   };
   heads.forEach((th, i) => {
     if (!th.textContent.trim()) return;  // a column of actions
@@ -876,24 +880,79 @@ function browse(tree, at, parts, keep, counts, hint, ...list) {
       ...list))];
 }
 
+// The groups of a list's rows by site and line, in the order of the tree: each registered site's lines, then
+// its lines not registered, then what names the site alone; then the sites not registered; last what names no
+// site (titled loose, such as 跨产线). placeOf(item) -> {site, line}. With a line chosen (at.line) and all rows
+// on it, one group with no title: a plain list. Returns [{key, title, items}], items in the order given.
+export function placeGroups(tree, at, items, placeOf, loose) {
+  const same = (x, y) => x.toLowerCase() === y.toLowerCase();
+  const sites = (tree && tree.sites) || [];
+  const order = (site, line) => {  // [registered site's place or after them, line's place, the code] to sort by
+    const si = sites.findIndex((s) => same(s.code, site));
+    if (!site) return [sites.length + 1, 0, ''];
+    if (si < 0) return [sites.length, 0, line ? placeKey(site, line) : `${placeKey(site)}/\uffff`];  // the site alone after its lines
+    const li = line ? sites[si].lines.findIndex((x) => same(x.code, line)) : -1;
+    return [si, line ? (li < 0 ? sites[si].lines.length : li) : sites[si].lines.length + 1, placeKey(site, line)];
+  };
+  const titleOf = (site, line) => {
+    if (!site) return loose;
+    const s = sites.find((x) => same(x.code, site));
+    const x = s && line ? s.lines.find((y) => same(y.code, line)) : null;
+    const siteText = s ? placeText(s) : site;
+    return line ? `${siteText} / ${x ? placeText(x) : line}` : `${siteText}（未指定产线）`;
+  };
+  const groups = new Map();
+  for (const item of items) {
+    const { site = '', line = '' } = placeOf(item) || {};
+    const key = site ? placeKey(site, line) : '';
+    if (!groups.has(key)) groups.set(key, { key, site, line, items: [] });
+    groups.get(key).items.push(item);
+  }
+  const list = [...groups.values()].map((g) => ({ ...g, rank: order(g.site, g.line) }))
+    .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || (a.rank[2] < b.rank[2] ? -1 : a.rank[2] > b.rank[2] ? 1 : 0));  // codes: ASCII
+  const plain = !!at.line && list.length === 1 && list[0].site && same(list[0].line, at.line);
+  return list.map((g) => ({ key: g.key, title: plain ? null : titleOf(g.site, g.line), items: g.items }));
+}
+
+// A list grouped by site and line (placeGroups): its head row, then each group with a row of its title and how
+// many rows it has. Columns sort within the groups. table.add(items) puts more rows in (the next page).
+// by: {tree, at, placeOf, loose} as placeGroups takes them.
+function groupedTable(id, head, items, rowOf, by) {
+  const table = el('table', { id, class: 'grouped' }, head);
+  const all = [];
+  const draw = () => {
+    for (const b of [...table.tBodies]) b.remove();
+    for (const g of placeGroups(by.tree, by.at, all, by.placeOf, by.loose)) {
+      table.append(el('tbody', { 'data-place': g.key },
+        g.title === null ? null : el('tr', { class: 'group-head' }, el('td', { colspan: String(head.cells.length) },
+          el('span', { class: 'name' }, g.title), el('span', { class: 'count' }, String(g.items.length)))),
+        g.items.map(rowOf)));
+    }
+  };
+  table.add = (more) => { all.push(...more); draw(); table.resort(); };
+  all.push(...items);
+  draw();
+  return sortable(table);
+}
+
 async function datasetsPage(query) {
   const show = live();
   const at = scopeOf(query);
   scope = at;
   renderNav();
   const [rows, tree] = await Promise.all([api.datasets(scopeQuery(at)), api.sites()]);
-  const table = (list, kindColumn) => sortable(el('table', { id: kindColumn ? 'pool-list' : 'snapshot-list' }, el('tr', {}, [['名称'], kindColumn ? ['类型'] : null, ['现场 / 产线'], ['版本数', 'num'],
+  // by site and line (a snapshot that took data from several lines has none: 跨产线)
+  const table = (list, kindColumn) => groupedTable(kindColumn ? 'pool-list' : 'snapshot-list', el('tr', {}, [['名称'], kindColumn ? ['类型'] : null, ['版本数', 'num'],
     ['最新版本'], ['文件', 'num'], ['大小', 'num'], ['最新版本时间'], ['备注']]
-    .filter(Boolean).map(([h, c]) => el('th', { class: c }, h))), list.map((d) => el('tr', {},
+    .filter(Boolean).map(([h, c]) => el('th', { class: c }, h))), list, (d) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['d', d.name]) }, d.name)),
     kindColumn ? el('td', {}, KIND_NAMES[d.kind] || d.kind) : null,
-    el('td', {}, [d.site, d.line].filter(Boolean).join(' / ') || (d.kind === 'trainset' ? '跨产线' : '-')),
     numCell(d.version_count),
     el('td', {}, d.latest ? [el('a', { class: 'ref', href: hrefOf(['v', d.name, String(d.latest.number)]), title: d.latest.ref },
       `@${d.latest.number}`), labelChips(d.latest)] : '-'),  // the name is the row's first column
     numCell(d.latest ? d.latest.file_count : null), sizeCell(d.latest ? d.latest.total_bytes : null),
     d.latest ? timeCell(d.latest.created_at) : el('td', {}, '-'),
-    textCell(d.note)))));
+    textCell(d.note)), { tree, at, placeOf: (d) => d, loose: kindColumn ? '不属于任何产线' : '跨产线' });
   const pools = rows.filter((d) => d.kind !== 'trainset');
   const snapshots = rows.filter((d) => d.kind === 'trainset');
   const narrowed = at.site || at.q;
@@ -2143,13 +2202,13 @@ async function modelsPage(query) {
   show(crumbs('models', at), pageHead(['模型', info('在网页上点击「登记模型版本」上传 ONNX，或使用 fw model create 和 fw model register。', '模型说明')],
     can('models.write') ? el('a', { id: 'model-register', class: 'button primary', href: '#/model-register' }, icon('plus'), '登记模型版本') : null),
     browse(tree, at, ['models'], {}, countsBy(tree, ['models']), '按名称搜索',
-      rows.length ? sortable(el('table', { id: 'model-list' }, el('tr', {}, [['名称'], ['现场 / 产线'], ['任务'], ['版本数', 'num'], ['最新版本'], ['建立人'], ['建立时间'], ['备注']]
+      rows.length ? groupedTable('model-list', el('tr', {}, [['名称'], ['任务'], ['版本数', 'num'], ['最新版本'], ['建立人'], ['建立时间'], ['备注']]
         .map(([h, c]) => el('th', { class: c }, h))),
-        rows.map((m) => el('tr', {},
+        rows, (m) => el('tr', {},
           el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
-          el('td', {}, `${m.site} / ${m.line}`), el('td', {}, TASK_NAMES[m.task] || m.task),
+          el('td', {}, TASK_NAMES[m.task] || m.task),
           numCell(m.version_count), el('td', {}, m.latest ? mref(m.latest, true) : '-'),
-          el('td', {}, m.created_by), timeCell(m.created_at), textCell(m.note)))))
+          el('td', {}, m.created_by), timeCell(m.created_at), textCell(m.note)), { tree, at, placeOf: (m) => m, loose: '不属于任何产线' })
         : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的模型。' : '暂无模型。')));
 }
 
@@ -2286,7 +2345,7 @@ async function modelVersionPage(name, number) {
     flattenMetrics(mv.metrics).length ? [el('h2', {}, '训练时的指标（metrics.json）'), metricsTable(mv.metrics, 20)] : null,
     el('h2', {}, '文件'), fileTable(mv.files, { 'model.onnx': saveAs }),
     el('h2', {}, '评估'), evalTable(mv.evals.slice().reverse(), false),
-    el('h2', {}, '预测集'), predictionTable(mine, false),
+    el('h2', {}, '预测集'), predictionTable(mine),
     can('jobs.write') ? await submitForms(mv) : null);
 }
 
@@ -2888,7 +2947,10 @@ async function jobsPage(query) {
   renderNav();
   const status = query.get('status') || '';
   const ask = (before) => api.jobPage(scopeQuery(at, { status, limit: JOB_PAGE, before }));
-  const [first, tree] = await Promise.all([ask(null), can('sites.read') ? api.sites() : null]);  // a worker account sees no places
+  const [first, tree, models] = await Promise.all([ask(null), can('sites.read') ? api.sites() : null,  // a worker account sees no places
+    can('models.read') ? api.models() : []]);
+  const placeOfModel = new Map(models.map((m) => [m.name, m]));
+  const placeOf = (j) => (j.params && j.params.model ? placeOfModel.get(j.params.model.ref.split('@')[0]) : null);  // a check: no line
   const pick = el('select', { id: 'job-status', onchange: (ev) => { location.hash = hrefOf(['jobs'], { status: ev.target.value, site: at.site, line: at.line }); } },
     [['', '全部'], ['queued', '排队'], ['running', '运行中'], ['done', '完成'], ['failed', '失败'], ['cancelled', '已取消']]
       .map(([v, t]) => el('option', { value: v, selected: v === status }, t)));
@@ -2897,9 +2959,9 @@ async function jobsPage(query) {
     el('td', {}, statusText(JOB_DOT[j.status], j.status_text + (j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '')
       + (j.cancel_requested && j.status === 'running' ? '（正在取消）' : ''))),
     el('td', {}, j.submitted_by), timeCell(j.created_at), timeCell(j.started_at), timeCell(j.finished_at));
-  const table = first.jobs.length ? sortable(el('table', { id: 'jobs' },
-    el('tr', {}, [['编号'], ['类型'], ['内容'], ['推理环境'], ['状态'], ['提交人'], ['提交时间'], ['开始'], ['结束']].map(([h, c]) => el('th', { class: c }, h))),
-    first.jobs.map(rowOf))) : null;
+  const head = el('tr', {}, [['编号'], ['类型'], ['内容'], ['推理环境'], ['状态'], ['提交人'], ['提交时间'], ['开始'], ['结束']].map(([h, c]) => el('th', { class: c }, h)));
+  const table = !first.jobs.length ? null : tree ? groupedTable('jobs', head, first.jobs, rowOf, { tree, at, placeOf, loose: '不属于任何产线' })
+    : sortable(el('table', { id: 'jobs' }, head, first.jobs.map(rowOf)));
   let last = first.jobs.length ? first.jobs[first.jobs.length - 1].id : null;
   let earlier = false;  // older pages shown: the page is not redrawn on its own any more, which would drop them
   const more = el('button', { id: 'jobs-more', type: 'button', hidden: !first.more, onclick: async () => {
@@ -2908,9 +2970,9 @@ async function jobsPage(query) {
     clearTimeout(timer);
     try {
       const r = await ask(last);
-      for (const j of r.jobs) table.append(rowOf(j));
+      if (table.add) table.add(r.jobs);
+      else { for (const j of r.jobs) table.append(rowOf(j)); table.resort(); }
       if (r.jobs.length) last = r.jobs[r.jobs.length - 1].id;
-      table.resort();
       more.hidden = !r.more;
     } catch (e) { more.after(errorBox(e)); }
     more.disabled = false;
@@ -2988,17 +3050,19 @@ async function jobPage(id, query) {
   await poll();
 }
 
-function predictionTable(rows, withModel) {  // withModel: the list of all prediction sets, sortable
+// The prediction sets of a model version, or (by: grouping as groupedTable takes it) the list of all of them.
+function predictionTable(rows, by = null) {
   if (!rows.length) return el('p', { class: 'muted' }, '暂无预测集。');
-  const table = el('table', { id: withModel ? 'prediction-list' : null }, el('tr', {}, [['编号'], withModel ? ['模型版本'] : null, ['数据'], ['目录'], ['conf', 'num'], ['图片', 'num'], ['框', 'num'],
-    ['推理环境'], ['任务'], ['登记人'], ['时间']].filter(Boolean).map(([h, c]) => el('th', { class: c }, h))),
-  rows.map((p) => el('tr', {},
+  const withModel = !!by;
+  const head = el('tr', {}, [['编号'], withModel ? ['模型版本'] : null, ['数据'], ['目录'], ['conf', 'num'], ['图片', 'num'], ['框', 'num'],
+    ['推理环境'], ['任务'], ['登记人'], ['时间']].filter(Boolean).map(([h, c]) => el('th', { class: c }, h)));
+  const rowOf = (p) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['p', String(p.id)]) }, `#${p.id}`)),
     withModel ? el('td', {}, mref(p.model_version.ref)) : null,
     el('td', {}, vref(p.data.ref)), textCell(p.dirs.join('、') || '全部'), numCell(numberText(p.conf)),
     numCell(p.images), numCell(p.boxes), el('td', {}, p.runner), el('td', {}, jobLink(p.job_id)),
-    el('td', {}, p.created_by), timeCell(p.created_at))));
-  return withModel ? sortable(table) : table;
+    el('td', {}, p.created_by), timeCell(p.created_at));
+  return by ? groupedTable('prediction-list', head, rows, rowOf, by) : el('table', {}, head, rows.map(rowOf));
 }
 
 async function predictionsPage(query) {
@@ -3006,12 +3070,14 @@ async function predictionsPage(query) {
   const at = { ...scopeOf(query), q: '' };
   scope = at;
   renderNav();
-  const [rows, tree] = await Promise.all([api.predictionSets('', scopeQuery(at)), api.sites()]);
+  const [rows, tree, models] = await Promise.all([api.predictionSets('', scopeQuery(at)), api.sites(), api.models()]);
+  const placeOfModel = new Map(models.map((m) => [m.name, m]));
   show(crumbs('predictions', at), pageHead(['预测集', info(['预测集是模型在数据池图片上的推理结果。',
     '下载为预标注：fw predict get <编号> <目录> --threshold 0.3。', '左侧选择现场 / 产线时，只列出该处模型的预测集。',
     '点击列标题可按该列排序，再次点击反向排序。'], '预测集说明')]),
     browse(tree, at, ['predictions'], {}, null, null,
-      rows.length || !at.site ? predictionTable(rows.slice().reverse(), true) : el('p', { class: 'muted' }, '没有符合条件的预测集。')));
+      rows.length || !at.site ? predictionTable(rows.slice().reverse(), { tree, at, loose: '不属于任何产线',
+        placeOf: (p) => placeOfModel.get(p.model_version.ref.split('@')[0]) }) : el('p', { class: 'muted' }, '没有符合条件的预测集。')));
 }
 
 async function predictionPage(id, query) {
@@ -3755,11 +3821,11 @@ async function batchesPage(query) {
   const batches = listOf[view] || [];
   const tabs = views.map(([k, t]) => el('a', { href: hrefOf(['batches'], { view: k, site: at.site, line: at.line, q: at.q }), class: k === view ? 'on' : '', 'data-view': k },
     t, k !== 'all' ? el('span', { class: 'count' }, String(listOf[k].length)) : null));
-  const rows = batches.map((b) => el('tr', {},
+  const rowOf = (b) => el('tr', {},
     el('td', {}, bref(b.name)), el('td', {}, `第 ${b.revision} 版`),
     el('td', {}, statusText(BATCH_DOT[b.status], b.status_text)),
     textCell(`${b.pool} / ${b.dir}/`), numCell(b.file_count), sizeCell(b.total_bytes),
-    el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), timeCell(b.updated_at)));
+    el('td', {}, b.owner), el('td', {}, b.labeler), el('td', {}, b.reviewer || '-'), timeCell(b.updated_at));
   const empty = at.site || at.q ? '没有符合条件的批次。'
     : { todo: '暂无待复核的批次。', mine: '本账号尚未上传批次。', all: '暂无批次。' }[view];
   show(crumbs('batches', at), pageHead(['标注批次', info([
@@ -3769,8 +3835,9 @@ async function batchesPage(query) {
       icon('plus'), '上传新批次') : null),
     browse(tree, at, ['batches'], { view }, countsBy(tree, ['batches']), '按批次名称搜索',
       el('div', { class: 'row tabs' }, tabs),
-      rows.length ? sortable(el('table', { id: 'batch-list' }, el('tr', {}, [['批次'], ['版次'], ['状态'], ['入库到'], ['文件', 'num'], ['大小', 'num'], ['上传账号'], ['标注人'], ['复核人'], ['最近变化']]
-        .map(([h, c]) => el('th', { class: c }, h))), rows)) : el('p', { class: 'muted' }, empty)));
+      batches.length ? groupedTable('batch-list', el('tr', {}, [['批次'], ['版次'], ['状态'], ['入库到'], ['文件', 'num'], ['大小', 'num'], ['上传账号'], ['标注人'], ['复核人'], ['最近变化']]
+        .map(([h, c]) => el('th', { class: c }, h))), batches, rowOf, { tree, at, placeOf: (b) => b, loose: '不属于任何产线' })
+        : el('p', { class: 'muted' }, empty)));
 }
 
 // Pick a folder, check it, hash it, upload what the server lacks and its file list; done(manifest digest)

@@ -1,6 +1,7 @@
 // Browsing the lists by site and line (run by tests/server/test_web.py):
 // node browse.cjs <url> <token> <site> <pool on TX> <pool on TY> <snapshot from TX> <model on TX> <out dir>.
-// Picks the line TY in the tree, then TX, searches, and follows the scope to the models. Prints one JSON line.
+// Picks the line TY in the tree, then TX, searches, and follows the scope to the models; the lists of 「全部」 and of
+// a site are grouped by line. Prints one JSON line.
 const { chromium } = require('playwright');
 
 (async () => {
@@ -15,9 +16,14 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/datasets`);
   await page.reload();
   const seen = {};
+  // the rows, and the groups by site and line they are listed in: [[title or null, [names]], ...]
+  const groups = (table) => page.$$eval(`${table} tbody`, (bodies) => bodies.map((b) => [b.querySelector('tr.group-head .name')?.textContent || null,
+    [...b.querySelectorAll('tr:not(.group-head) td:first-child')].map((td) => td.textContent)]));
   const lists = async () => ({
-    pools: await page.$$eval('#pools + table tr td:first-child', (c) => c.map((x) => x.textContent)),
-    snapshots: await page.$$eval('#snapshots + table tr td:first-child', (c) => c.map((x) => x.textContent)),
+    pools: await page.$$eval('#pools + table tr:not(.group-head) td:first-child', (c) => c.map((x) => x.textContent)),
+    snapshots: await page.$$eval('#snapshots + table tr:not(.group-head) td:first-child', (c) => c.map((x) => x.textContent)),
+    poolGroups: await groups('#pools + table'),
+    snapshotGroups: await groups('#snapshots + table'),
   });
   await page.waitForSelector('#pools');
   seen.all = await lists();
@@ -44,7 +50,7 @@ const { chromium } = require('playwright');
   seen.navModels = await page.getAttribute('#nav a:has-text("模型")', 'href');
   await page.click('#nav a:has-text("模型")');
   await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '模型' && document.querySelector('#places li.line a.on'));
-  seen.models = await page.$$eval('.browse table tr td:first-child', (c) => c.map((x) => x.textContent));
+  seen.models = await page.$$eval('.browse table tr:not(.group-head) td:first-child', (c) => c.map((x) => x.textContent));
   seen.navOn = await page.textContent('#nav a.on');
   await page.click('#places li a:has-text("全部")');
   await page.waitForFunction(() => !location.hash.includes('site=') && !document.querySelector('#places li.line a.on'));
@@ -52,6 +58,7 @@ const { chromium } = require('playwright');
   await page.goto(`${url}#/batches?view=all&site=${site}`);
   await page.waitForFunction(() => document.querySelector('main h1')?.textContent === '标注批次' && document.querySelector('#places li.site a.on'));
   seen.batches = await page.textContent('.browse .list');
+  seen.batchGroups = await groups('#batch-list');
   seen.errors = errors;
   console.log(JSON.stringify(seen));
   await browser.close();

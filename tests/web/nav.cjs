@@ -64,7 +64,7 @@ const { chromium } = require('playwright');
   await page.click('#nav a:has-text("数据集")');
   await page.waitForSelector('#pools');
   seen.listTree = await page.$$eval('#places li a', (as) => as.map((a) => a.getAttribute('href')));
-  seen.listPools = await page.$$eval('#pools + table tr td:first-child', (c) => c.map((x) => x.textContent));
+  seen.listPools = await page.$$eval('#pools + table tr:not(.group-head) td:first-child', (c) => c.map((x) => x.textContent));
   seen.listCrumbs = (await page.textContent('.crumbs .path')).trim();
   seen.headers = await page.$$eval('main th', (ths) => ths.map((t) => [getComputedStyle(t).whiteSpace, t.getClientRects()[0].height < 45]));
   await page.screenshot({ path: `${out}/nav-datasets.png`, fullPage: true });
@@ -74,7 +74,7 @@ const { chromium } = require('playwright');
   seen.siteModels = await page.textContent(`#places li.site a[href$="site=${site}"] .count`);
   await page.click(`#places li.site a[href$="site=${site}"]`);
   await page.waitForFunction(() => location.hash.includes('site=') && document.querySelector('#places li.site a.on'));
-  seen.siteModelRows = await page.$$eval('.browse table tr td:first-child', (c) => c.length);
+  seen.siteModelRows = await page.$$eval('.browse table tr:not(.group-head) td:first-child', (c) => c.length);
   // a line that is not shown is still there when one goes to it
   await page.goto(`${url}#/?site=${site}&line=TY`);
   await lineAt('TY');
@@ -112,7 +112,7 @@ const { chromium } = require('playwright');
   await tab.click('.crumbs button.back');
   await tab.waitForSelector('#pools');
   seen.upTo = tab.url().split('#')[1];
-  seen.upPools = await tab.$$eval('#pools + table tr td:first-child', (c) => c.map((x) => x.textContent));
+  seen.upPools = await tab.$$eval('#pools + table tr:not(.group-head) td:first-child', (c) => c.map((x) => x.textContent));
   // the dataset address of a batch leads to the batch without staying in the way back
   await tab.goto(`${url}#/datasets`);
   await tab.waitForSelector('#pools');
