@@ -42,6 +42,7 @@ ACTIONS = {
     'runner.register': '登记推理环境',
     'job.submit': '提交任务',
     'job.cancel': '取消任务',
+    'job.handle': '将失败的任务标为已处理',
     'user.create': '新建账号',
     'user.role': '修改账号角色',
     'user.disable': '停用账号',

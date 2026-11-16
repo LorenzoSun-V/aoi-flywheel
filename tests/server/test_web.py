@@ -458,6 +458,57 @@ def test_every_page_keeps_rows_on_one_line_and_forms_to_one_width(service, token
     assert seen['fileBoxes'] == 3 and seen['nativeHidden'] == '0' and seen['fileChosen'] == 'best.onnx · 2 B'
 
 
+@pytest.mark.skipif(not node_with_playwright() or os.name != 'posix', reason='Playwright for node is not installed')
+def test_a_failed_job_is_submitted_again_or_marked_handled_in_the_browser(service, tokens, api, make_api, gpu, model, snapshot,  # noqa: F811
+                                                                          tmp_path):
+    """A failed job's page says why and offers 「重新提交」 (on the newest version of its runner by default) and
+    「标为已处理…」 (asked on the page, with a note); after either the home page's 「待我处理」 lists it no more, and the
+    list of jobs says what became of it. A failed pre-label of a labelling batch another account uploaded is not
+    offered for resubmission: the page names the uploader."""
+    from test_evals import add_runner, trained
+    from fw import ops, worker
+    from helpers import quiet
+    r = add_runner(gpu)
+    (gpu.listings / f'{r["conda_env"]}.txt').write_text('@EXPLICIT\nhttps://x/torch-other.tar.bz2\n')  # changed
+    failed = []
+    for _ in range(2):   # two model versions: two pieces of work
+        mv = trained(api, model, snapshot, tmp_path)
+        job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+        worker.run_worker(gpu, quiet, once=True)
+        assert api.job(job['id'])['status'] == 'failed'
+        failed.append(job['id'])
+    field = make_api('field')
+    batch = ops.upload_batch(field, write_tree(tmp_path / 'day', {'y.png': real_png(64, 32, 8)}),
+                             pool(api, tmp_path, {'A/x.png': real_png(64, 32, 7)}), '张三', echo=quiet)['name']
+    pre = ops.prelabel_batch(field, batch, model=mv['ref'], runner=r['runner'], echo=quiet)['job_id']
+    worker.run_worker(gpu, quiet, once=True)
+    assert api.job(pre)['status'] == 'failed'
+    newer = worker.register_runner(gpu, r['runner'], r['conda_env'], '', 'rfdetr', gpu.onnx2engine)  # registered anew
+    shots = Path(os.environ.get('FW_WEB_SHOTS') or tmp_path / 'shots')
+    shots.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run(['node', str(WEB_TESTS / 'failed.cjs'), service.url + '/', tokens['algo'], *map(str, failed), str(pre), str(shots)],
+                         capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    a, b = (f'任务 {i}' for i in failed)
+    assert {a, b} <= set(seen['before'])
+    assert '推理环境和登记时不一样' in seen['card']['error'] and seen['card']['runner'] == f'{newer["ref"]}（同名推理环境的最新版本）'
+    assert seen['card']['buttons'] == ['重新提交', '标为已处理…']
+    again = api.job(int(seen['retried']['hash'].split('/')[-1]))
+    assert again['runner'] == newer['ref'] and again['status'] == 'queued' and seen['retried']['title'].startswith(f'任务 {again["id"]}')
+    assert seen['firstAfter'] == {'retried': f'已重新提交为任务 {again["id"]}（排队）。', 'actions': 0}
+    assert a not in seen['afterRetry'] and b in seen['afterRetry']
+    assert '此标记不能撤销' in seen['ask']
+    assert seen['handled']['text'].startswith(f'已由 {tokens["algo_name"]} 于 ') and seen['handled']['text'].endswith('标为已处理：模型版本选错，无需重跑')
+    assert seen['handled']['actions'] == 0 and b not in seen['afterHandled']
+    assert seen['list'] == [[b, '失败（已处理）'], [a, f'失败（已重新提交为任务 {again["id"]}）']]
+    assert api.job(failed[1])['handled']['note'] == '模型版本选错，无需重跑'
+    assert seen['batchJob'] == {'owner': f'该任务是标注批次 {batch} 的预标注，仅上传该批次的账号（{field.get("/me")["name"]}）'
+                                         '或管理员可以重新提交，上传人可在批次页重新运行预标注。',
+                                'link': f'#/b/{batch}', 'retry': 0, 'runner': 0, 'actions': 0}
+
+
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     """A site or line chosen in the tree narrows the lists; under 「全部」 and under a site the rows are grouped by

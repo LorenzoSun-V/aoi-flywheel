@@ -336,6 +336,40 @@ def test_a_batch_is_pre_labelled_by_its_owner(api, make_api, gpu, setup, tmp_pat
     assert f'预标注第 1 版（任务 {row["job_id"]}，{done["status_text"]}）' in capsys.readouterr().out
 
 
+def test_a_failed_pre_label_is_submitted_again_as_it_was(api, make_api, gpu, setup, tmp_path):  # noqa: F811
+    """「重新提交」 of a pre-labelling job: the same model version, folders and lowest score. One of a labelling
+    batch goes through the batch, whose record notes the new job: by its owner or an administrator."""
+    mv, data, r, _ = setup
+    (gpu.listings / 'FAIL').write_text('')
+    job = api.submit_job('predict', runner=r['runner'], params={'model': mv['ref'], 'data': data, 'dirs': ['A'], 'conf': 0.25})
+    worker.run_worker(gpu, quiet, once=True)
+    assert api.job(job['id'])['status'] == 'failed' and api.job(job['id'])['batch'] is None
+    (gpu.listings / 'FAIL').unlink()
+    again = api.post(f'/jobs/{job["id"]}/retry', {})
+    p = again['params']
+    assert (again['kind'], p['model']['ref'], p['data']['ref'], p['data']['dirs'], p['conf']) == (
+        'predict', mv['ref'], data, ['A'], 0.25)
+    run_job(api, gpu, again)
+    assert api.job(job['id'])['retried_by']['id'] == again['id']
+    # a batch's pre-label
+    field = make_api('field')
+    name = f'B-{os.urandom(4).hex()}'
+    ops.upload_batch(field, raw_folder(tmp_path), data.split('@')[0], '张三', name=name, echo=quiet)
+    (gpu.listings / 'FAIL').write_text('')
+    row = ops.prelabel_batch(field, name, model=mv['ref'], runner=r['runner'], echo=quiet)
+    worker.run_worker(gpu, quiet, once=True)
+    failed = api.job(row['job_id'])
+    assert failed['status'] == 'failed' and failed['batch'] == {'name': name, 'uploaded_by': field.get('/me')['name']}
+    (gpu.listings / 'FAIL').unlink()
+    with pytest.raises(ApiError, match='不是您上传的批次') as e:   # the owner runs it again from the batch page
+        api.post(f'/jobs/{row["job_id"]}/retry', {})
+    assert e.value.status == 403
+    again = make_api('admin').post(f'/jobs/{row["job_id"]}/retry', {})
+    steps = [s for s in field.batch(name)['steps'] if s['step'] == 'prelabel']
+    assert [s['job_id'] for s in steps] == [row['job_id'], again['id']]
+    assert api.job(row['job_id'])['retried_by']['id'] == again['id']
+
+
 def test_pre_label_defaults(api, make_api, gpu, setup, tmp_path):  # noqa: F811
     mv, data, r, _ = setup
     field = make_api('field')

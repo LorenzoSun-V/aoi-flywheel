@@ -316,6 +316,8 @@ export const api = {
   job: (id) => call(`/jobs/${Number(id)}`),
   jobLog: (id, attempt = 0, after = -1) => call(`/jobs/${Number(id)}/log?attempt=${attempt}&after=${after}`),
   cancelJob: (id) => call(`/jobs/${Number(id)}/cancel`, { method: 'POST', body: {} }),
+  retryJob: (id, runner) => call(`/jobs/${Number(id)}/retry`, { method: 'POST', body: { runner: runner || null } }),
+  handleJob: (id, note) => call(`/jobs/${Number(id)}/handled`, { method: 'POST', body: { note } }),
   submitJob: (kind, runner, params) => call('/jobs', { method: 'POST', body: { kind, runner, params } }),
   predictionSets: async (model = '', where = {}) => (await call(`/predictions?${new URLSearchParams({ model, ...where })}`)).prediction_sets,
   predictionSet: (id) => call(`/predictions/${Number(id)}`),
@@ -2940,6 +2942,13 @@ function jobWhat(j) {
 
 const JOB_PAGE = 100;
 
+// What became of a failed job, after its state in the list: submitted again, or marked handled.
+export function failedAfter(j) {
+  if (j.status !== 'failed') return '';
+  if (j.retried_by) return `（已重新提交为任务 ${j.retried_by.id}）`;
+  return j.handled ? '（已处理）' : '';
+}
+
 async function jobsPage(query) {
   const show = live();
   const at = { ...scopeOf(query), q: '' };
@@ -2957,7 +2966,7 @@ async function jobsPage(query) {
   const rowOf = (j) => el('tr', {},
     el('td', { 'data-sort': String(j.id) }, jobLink(j.id)), el('td', {}, j.kind_text), textCell(jobWhat(j)), el('td', {}, j.runner || '-'),
     el('td', {}, statusText(JOB_DOT[j.status], j.status_text + (j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '')
-      + (j.cancel_requested && j.status === 'running' ? '（正在取消）' : ''))),
+      + (j.cancel_requested && j.status === 'running' ? '（正在取消）' : '') + failedAfter(j))),
     el('td', {}, j.submitted_by), timeCell(j.created_at), timeCell(j.started_at), timeCell(j.finished_at));
   const head = el('tr', {}, [['编号'], ['类型'], ['内容'], ['推理环境'], ['状态'], ['提交人'], ['提交时间'], ['开始'], ['结束']].map(([h, c]) => el('th', { class: c }, h)));
   const table = !first.jobs.length ? null : tree ? groupedTable('jobs', head, first.jobs, rowOf, { tree, at, placeOf, loose: '不属于任何产线' })
@@ -3025,10 +3034,11 @@ async function jobPage(id, query) {
       el('dt', {}, '内容'), el('dd', {}, jobWhat(j) || '-'),
       el('dt', {}, '推理环境'), el('dd', {}, j.runner || '-'),
       el('dt', {}, '状态'), el('dd', {}, status),
-      el('dt', {}, '结果'), result,
+      j.status === 'failed' ? null : [el('dt', {}, '结果'), result],  // a failure's reason is in its card below
       el('dt', {}, '提交'), el('dd', {}, `${j.submitted_by}，${when(j.created_at)}`),
       el('dt', {}, '开始 / 结束'), el('dd', {}, `${when(j.started_at) || '-'} / ${when(j.finished_at) || '-'}`)),
     (j.params && j.params.warnings || []).map((w) => el('div', { class: 'error' }, w)),
+    j.status === 'failed' ? await failedCard(j) : null,
     el('h2', {}, attempt ? `日志（第 ${attempt} 次）` : '日志'), log);
   paint();
   const poll = async () => {
@@ -3041,7 +3051,7 @@ async function jobPage(id, query) {
       refreshLater(async () => {
         const before = j.attempts;
         j = await api.job(j.id);
-        if (j.attempts !== before) { await jobPage(id, query); return; }
+        if (j.attempts !== before || j.status === 'failed') { await jobPage(id, query); return; }  // a new claim; or failed: what now
         paint();
         await poll();
       }, 3000);
@@ -3051,6 +3061,54 @@ async function jobPage(id, query) {
 }
 
 // The prediction sets of a model version, or (by: grouping as groupedTable takes it) the list of all of them.
+// A failed job: why, and what now. Its work submitted again (on the runner chosen, by default the newest version
+// of its own) or, when no new run is needed, marked handled; after either it no longer waits on the home page.
+async function failedCard(j) {
+  const card = el('div', { class: 'panel card bad-card', id: 'job-failed' });
+  const head = el('div', { class: 'row' }, el('h3', { style: 'flex:1;margin:0' }, '任务失败', info([
+    '请先查看下方日志，找出失败原因并排除，例如在 GPU 机上修复推理环境后用 fw runner register 重新登记。',
+    '「重新提交」使用同一模型版本和同一份数据（预标注还使用同一最低分数）再运行一次，默认使用同名推理环境的最新版本。',
+    '无需再运行时，请点击「标为已处理」，可写明原因（仅提交人或管理员可操作）。重新提交或标为已处理后，该任务不再列在「待我处理」中。'], '处理失败任务的说明')));
+  const said = [head, el('p', { class: 'bad', id: 'job-error' }, j.error || '未说明原因')];
+  if (j.retried_by) {
+    card.append(...said, el('p', { id: 'job-retried' }, '已重新提交为', jobLink(j.retried_by.id), `（${j.retried_by.status_text}）。`));
+    return card;
+  }
+  if (j.handled) {
+    card.append(...said, el('p', { id: 'job-handled' }, `已由 ${j.handled.by} 于 ${when(j.handled.at)} 标为已处理`,
+      j.handled.note ? `：${j.handled.note}` : '。'));
+    return card;
+  }
+  if (!can('jobs.write')) { card.append(...said); return card; }
+  const mine = j.submitted_by === me.name || can('users.manage');
+  // a pre-label of a labelling batch runs again only for the account that uploaded the batch (or an administrator)
+  const elsewhere = j.batch && j.batch.uploaded_by !== me.name && !can('users.manage');
+  if (elsewhere) said.push(el('p', { id: 'job-batch-owner' }, '该任务是标注批次 ', bref(j.batch.name),
+    ` 的预标注，仅上传该批次的账号（${j.batch.uploaded_by}）或管理员可以重新提交，上传人可在批次页重新运行预标注。`));
+  const name = (j.runner || '').split('@')[0];
+  let pick = null;
+  if (j.kind !== 'check' && !elsewhere) {  // a check checks its own runner: its newest version
+    const runners = (await api.runners()).filter((r) => r.framework);
+    pick = el('select', { id: 'retry-runner', 'aria-label': '推理环境' }, runners.map((r) => el('option', { value: r.runner, selected: r.runner === name },
+      r.runner === name ? `${r.ref}（同名推理环境的最新版本）` : r.ref)));
+  }
+  const acts = el('div', { class: 'row', id: 'job-failed-actions' });
+  const retry = el('button', { type: 'button', class: 'primary', id: 'job-retry', onclick: async () => {
+    retry.disabled = true;
+    try {
+      const made = await api.retryJob(j.id, pick ? pick.value : null);
+      location.hash = hrefOf(['job', String(made.id)]);
+      toastDone(`已重新提交为任务 ${made.id}`);
+    } catch (e) { acts.after(errorBox(e)); retry.disabled = false; }
+  } }, '重新提交');
+  const handle = mine ? el('button', { type: 'button', id: 'job-handle', onclick: () => askFirst(acts, {
+    text: `将任务 ${j.id} 标为已处理：不再运行，也不再列在「待我处理」中。此标记不能撤销。`, reason: '说明（选填）', go: '确认标为已处理',
+    run: async (note) => { await api.handleJob(j.id, note); await render(); toastDone(`已将任务 ${j.id} 标为已处理`); } }) }, '标为已处理…') : null;
+  acts.append(...[pick && el('label', { for: 'retry-runner' }, '推理环境'), pick, !elsewhere && retry, handle].filter(Boolean));
+  card.append(...said, ...(acts.childElementCount ? [acts] : []));
+  return card;
+}
+
 function predictionTable(rows, by = null) {
   if (!rows.length) return el('p', { class: 'muted' }, '暂无预测集。');
   const withModel = !!by;
@@ -4544,6 +4602,7 @@ export function eventText(action, detail) {
     case 'runner.register': return join(said('conda 环境', d.conda_env), said('框架', d.framework), said('源码提交号', short(d.src_commit, 8)));
     case 'job.submit': return join(JOB_KINDS[d.kind] || d.kind, d.model && d.data ? `${d.model} 在 ${d.data} 上` : '', said('推理环境', d.runner));
     case 'job.cancel': return d.was === 'running' ? '运行中，已请求停止' : '排队中，已取消';
+    case 'job.handle': return d.note ? `说明：${d.note}` : '';
     case 'user.create': return `角色为${ROLE_NAMES[d.role] || d.role}`;
     case 'user.role': return `角色由${ROLE_NAMES[d.from] || d.from}改为${ROLE_NAMES[d.to] || d.to}`;
     case 'user.disable': return d.tokens_revoked ? `同时吊销 ${d.tokens_revoked} 个凭据` : '';
@@ -4754,7 +4813,8 @@ export function batchesUnderWay(batches) {
 
 // What waits for an account (name), for the home page, in this order: batches it is asked to review, approved
 // batches to import, its own batches rejected or not yet sent to review, and the jobs it submitted that failed
-// in the last days; newest first within each. Rows: {kind, batch | job, at}.
+// in the last days, unless their work was submitted again or they were marked handled; newest first within
+// each. Rows: {kind, batch | job, at}.
 export const TODO_KINDS = ['review', 'import', 'rejected', 'unsent', 'failed'];
 export function todoItems({ toReview = [], approved = [], mine = [], failed = [] }, name, now = new Date(), days = 7) {
   const since = now.getTime() - days * 86400000;
@@ -4763,7 +4823,7 @@ export function todoItems({ toReview = [], approved = [], mine = [], failed = []
     ...approved.filter((b) => b.status === 'approved').map((b) => ({ kind: 'import', batch: b, at: b.updated_at })),
     ...mine.filter((b) => b.status === 'rejected').map((b) => ({ kind: 'rejected', batch: b, at: b.updated_at })),
     ...mine.filter((b) => b.status === 'open').map((b) => ({ kind: 'unsent', batch: b, at: b.updated_at })),
-    ...failed.filter((j) => j.status === 'failed' && j.submitted_by === name
+    ...failed.filter((j) => j.status === 'failed' && j.submitted_by === name && !j.retried_by && !j.handled
       && new Date(j.finished_at || j.created_at).getTime() >= since)
       .map((j) => ({ kind: 'failed', job: j, at: j.finished_at || j.created_at }))];
   return rows.sort((a, b) => TODO_KINDS.indexOf(a.kind) - TODO_KINDS.indexOf(b.kind) || (b.at || '').localeCompare(a.at || ''));
@@ -4808,7 +4868,8 @@ function todoSection(rows) {
       textCell(todoText(r)), timeCell(r.at))))
     : el('p', { id: 'todo-none', class: 'muted' }, '暂无待处理的事项。');
   return [el('div', { class: 'section-head' }, el('h2', { id: 'todo-head' }, '待我处理', rows.length ? el('span', { class: 'count' }, String(rows.length)) : null,
-    info('列出需要本账号处理的事项：请本账号复核的批次、复核通过待入库的批次、本账号被退回或尚未提交复核的批次，以及本账号近 7 天提交且执行失败的任务。', '待我处理说明'))), body];
+    info(['列出需要本账号处理的事项：请本账号复核的批次、复核通过待入库的批次、本账号被退回或尚未提交复核的批次，以及本账号近 7 天提交且执行失败的任务。',
+      '失败的任务在任务页上重新提交或标为已处理后，不再列在此处。'], '待我处理说明'))), body];
 }
 
 // The reports measured on a version of a line's benchmark test set as a whole: all its images, no folders

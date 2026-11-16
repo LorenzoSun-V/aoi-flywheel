@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fw.contract import IMAGE_EXTS, ContractError, blocking_reasons, classify_paths, fold, parse_manifest
 
 from . import auth, changes, datasets, events, formats
-from .datasets import NAME, DatasetError, check_digest
+from .datasets import CONTROL, NAME, DatasetError, check_digest
 from .store import Store
 
 STATUS = {'open': '待提交复核', 'review': '待复核', 'rejected': '已退回', 'approved': '复核通过', 'imported': '已入库',
@@ -48,7 +48,6 @@ UNFINISHED = ('open', 'review', 'rejected', 'approved')
 MAX_COMMENT = 2000
 MAX_IMAGES = 500         # images a rejection points at
 MAX_NOTE = 200           # characters of the note on one of them (0016 holds the same limit)
-CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')   # in a text: never meant (line breaks and tabs are fine)
 EXAMPLES = 200           # images a comparison lists
 MAX_LABEL_READS = 20000  # labels a comparison reads; beyond this the rest are counted but not compared
 MAX_PAIRS = 250_000      # old x new boxes of one image a comparison pairs up; beyond this only added / removed

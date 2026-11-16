@@ -414,6 +414,29 @@ def test_an_eval_in_a_changed_runner_fails(api, gpu, model, snapshot, tmp_path):
     assert j['status'] == 'failed' and '推理环境和登记时不一样' in j['error'] and api.evals(model) == []
 
 
+def test_a_failed_eval_is_submitted_again_on_its_runner_registered_anew(api, gpu, model, snapshot, tmp_path):  # noqa: F811
+    """The case of the trial (2026-11-16): an evaluation failed because its runner's environment had changed; the
+    runner is registered again on the machine, and 「重新提交」 runs the same evaluation (model version, snapshot
+    and split) on its newest version; the failed job then names the job that did its work."""
+    mv = trained(api, model, snapshot, tmp_path)
+    r = add_runner(gpu)
+    (gpu.listings / f'{r["conda_env"]}.txt').write_text('@EXPLICIT\nhttps://x/torch-other.tar.bz2\n')
+    job = api.submit_job('eval', runner=r['runner'], params={'model': mv['ref'], 'data': f'{snapshot["ref"]}:test'})
+    worker.run_worker(gpu, quiet, once=True)
+    failed = api.job(job['id'])
+    assert failed['status'] == 'failed' and failed['retried_by'] is None
+    newer = worker.register_runner(gpu, r['runner'], r['conda_env'], '', 'rfdetr', gpu.onnx2engine)
+    assert newer['ref'] == f'{r["runner"]}@2'
+    again = api.post(f'/jobs/{job["id"]}/retry', {})
+    p = again['params']
+    assert (again['kind'], again['runner'], p['model']['ref']) == ('eval', newer['ref'], mv['ref'])
+    assert (p['data']['ref'], p['data']['split'], p['data']['dirs']) == (snapshot['ref'], 'test', [])
+    worker.run_worker(gpu, quiet, once=True)
+    assert api.job(again['id'])['status'] == 'done'
+    assert api.job(job['id'])['retried_by'] == {'id': again['id'], 'status': 'done', 'status_text': '完成'}
+    assert [e['job_id'] for e in api.evals(model)] == [again['id']]
+
+
 def test_a_cancelled_or_lost_eval_registers_nothing(api, gpu, model, snapshot, tmp_path, database):  # noqa: F811
     mv = trained(api, model, snapshot, tmp_path)
     r = add_runner(gpu)

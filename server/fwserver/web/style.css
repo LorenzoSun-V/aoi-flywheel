@@ -97,6 +97,7 @@ tr:hover > td { background: #fafafc; }
 /* a list grouped by site and line: a row with each group's title; the corners are the table's alone */
 table.grouped > tbody:not(:last-child) > tr:last-child > td { border-bottom: 1px solid var(--line); border-radius: 0; }
 table.grouped > tbody:not(:last-child) > tr:last-child:hover > td { border-radius: 0; }
+table.grouped > tbody > tr:first-child > td { border-top-left-radius: 0; border-top-right-radius: 0; }  /* a group without a title row */
 table.grouped tr.group-head > td, table.grouped tr.group-head:hover > td { background: var(--soft); padding: 6px 12px; font-size: 12px;
   font-weight: 600; color: #3a3f47; border-radius: 0; }
 table.grouped tr.group-head .count { margin-left: 8px; font-weight: 400; color: var(--muted); }
