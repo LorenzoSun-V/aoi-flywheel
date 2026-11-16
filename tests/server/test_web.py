@@ -1560,6 +1560,27 @@ def test_the_reviewer_of_a_batch_is_changed_in_the_browser(service, tokens, api,
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_jobs_pages_say_whether_a_gpu_machine_is_there(service, tokens, api, make_worker, fake_conda, tmp_path):  # noqa: F811
+    """The jobs page lists each GPU machine as 在线 or 离线; a queued job whose machine has never asked for work
+    says that it waits for fw worker to start there."""
+    from test_jobs import runner
+    a = make_worker()
+    r = runner(a, fake_conda)
+    job = api.submit_job('check', runner=r['runner'])
+    other = make_worker()
+    assert other.claim() is None                     # another machine is there; this job is not for it
+    out = subprocess.run(['node', str(WEB_TESTS / 'machines.cjs'), service.url + '/', tokens['algo'], str(job['id'])],
+                         capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert out.returncode == 0, out.stdout + out.stderr
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    machines = {text.split(' ')[0]: (dot, text) for dot, text in seen['machines']}
+    assert machines[a.name] == ('dot gray', f'{a.name} 离线（尚未连接过平台）')
+    assert machines[other.name] == ('dot green', f'{other.name} 在线')
+    assert seen['waits'] == f'推理环境 {r["runner"]}@1 所在的 GPU 机 {a.name} 离线（尚未连接过平台），任务将在该机器启动 fw worker 后运行。'
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_folders_are_added_from_the_newest_version_and_from_the_overview(service, tokens, api, make_api, tmp_path):
     """上传新增目录 sits beside the title of the newest version of a pool or test set (not an older one) and in
     the ⋯ of their rows on the line's overview; a snapshot's row has no ⋯; a field account sees none of them."""

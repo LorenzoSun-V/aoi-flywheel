@@ -1130,6 +1130,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         with conn() as c:
             return jobs.job_log(c, job_id, attempt or None, after)
 
+    @app.get('/api/v1/workers')
+    def list_workers(user: dict = Depends(job_reader)):
+        """The GPU machines (worker accounts) and whether each is running fw worker now."""
+        with conn() as c:
+            return {'workers': jobs.machines(c), 'online_seconds': jobs.online_seconds(settings.job_lease_seconds)}
+
     @app.post('/api/v1/worker/claim')
     def claim_job(user: dict = Depends(worker)):
         with conn() as c:
@@ -1141,7 +1147,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     @app.post('/api/v1/jobs/{job_id}/renew')
     def renew_job(job_id: int, body: LeaseBody, user: dict = Depends(worker)):
         with conn() as c:
-            return jobs.renew(c, job_id, body.token, settings.job_lease_seconds)
+            return jobs.renew(c, job_id, body.token, settings.job_lease_seconds, user['user_id'])
 
     @app.post('/api/v1/jobs/{job_id}/log')
     def add_job_log(job_id: int, body: LogBody, user: dict = Depends(worker)):

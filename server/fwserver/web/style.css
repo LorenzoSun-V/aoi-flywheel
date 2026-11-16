@@ -346,6 +346,7 @@ th[aria-sort=descending]::after { content: ' ↓'; }
 .dot.red { background: #e5484d; }
 .dot.gray { background: #b0b4bc; }
 .status { display: inline-flex; align-items: center; white-space: nowrap; }
+.machines { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-left: auto; font-size: 13px; }
 h1 .status { font-size: 14px; font-weight: 500; letter-spacing: 0; vertical-align: middle; margin-left: 10px; color: var(--muted); }
 
 .cols { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 0 32px; }
