@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
-  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle,
+  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle, machineText, waitNotice,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey, placeGroups,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, failedAfter, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
@@ -568,4 +568,20 @@ test('a snapshot is named with its task, a pool without one', () => {
   assert.equal(kindText({ kind: 'pool', latest: { task: null } }), '数据池');
   assert.equal(taskTitle('semseg'), '语义分割');
   assert.equal(taskTitle('pose'), 'pose');
+});
+
+test('a GPU machine is online or says when it was last heard from; a queued job says when none can take it', () => {
+  const now = new Date(2026, 10, 16, 18, 0);
+  const at = new Date(2026, 10, 16, 17, 25).toISOString();
+  assert.equal(machineText({ name: 'gpu-01', online: true, seen_at: at }, now), 'gpu-01 在线');
+  assert.equal(machineText({ name: 'gpu-01', online: false, seen_at: at }, now), 'gpu-01 离线（最后联系于 今天 17:25）');
+  assert.equal(machineText({ name: 'gpu-02', online: false, seen_at: null }, now), 'gpu-02 离线（尚未连接过平台）');
+  const off = { name: 'gpu-01', online: false, seen_at: at };
+  const job = (more) => ({ status: 'queued', runner: null, waits_on: [off], ...more });
+  assert.equal(waitNotice(job({ status: 'running' }), now), null);
+  assert.equal(waitNotice(job({ waits_on: [off, { name: 'gpu-02', online: true }] }), now), null);
+  assert.equal(waitNotice(job(), now), '暂无在线的 GPU 机：gpu-01 离线（最后联系于 今天 17:25）。请在 GPU 机上启动 fw worker，任务将随后运行。');
+  assert.equal(waitNotice(job({ runner: 'trt10@2' }), now),
+    '推理环境 trt10@2 所在的 GPU 机 gpu-01 离线（最后联系于 今天 17:25），任务将在该机器启动 fw worker 后运行。');
+  assert.match(waitNotice(job({ waits_on: [] }), now), /^平台尚无 GPU worker 账号/);
 });

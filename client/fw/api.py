@@ -409,6 +409,10 @@ class Api:
     def register_runner(self, body: dict):
         return self.post_retried('/runners', body)  # registering the same thing again returns it
 
+    def workers(self):
+        """The GPU machines (worker accounts), when each last asked for work and whether it is online."""
+        return self.get('/workers')
+
     def jobs(self, status: str = '', limit: int = 50):
         return self.get('/jobs', status=status, limit=limit)['jobs']
 

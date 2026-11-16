@@ -311,6 +311,7 @@ export const api = {
   releases: (site, line) => call(`/releases?${new URLSearchParams({ site, line })}`),  // oldest deployed first
   registerRelease: (body) => call('/releases', { method: 'POST', body }),
   runners: async () => (await call('/runners')).runners,
+  workers: () => call('/workers'),
   jobs: async (status = '', limit = 100) => (await call(`/jobs?status=${encodeURIComponent(status)}&limit=${limit}`)).jobs,
   jobPage: (query) => call(`/jobs?${new URLSearchParams(query)}`),  // {jobs, more}
   job: (id) => call(`/jobs/${Number(id)}`),
@@ -2961,6 +2962,19 @@ function jobWhat(j) {
 const JOB_PAGE = 100;
 
 // What became of a failed job, after its state in the list: submitted again, or marked handled.
+// A GPU machine as the jobs pages show it: 在线, or 离线 with when it last asked for work (or never did).
+export function machineText(m, now = new Date()) {
+  return m.online ? `${m.name} 在线` : `${m.name} 离线（${m.seen_at ? `最后联系于 ${listWhen(m.seen_at, now)}` : '尚未连接过平台'}）`;
+}
+
+// Why a queued job may not start: no machine that can take it is online. null while one is.
+export function waitNotice(j, now = new Date()) {
+  if (j.status !== 'queued' || !j.waits_on || j.waits_on.some((m) => m.online)) return null;
+  if (!j.waits_on.length) return '平台尚无 GPU worker 账号，任务无法运行；请管理员新建 worker 账号，并在 GPU 机上启动 fw worker。';
+  if (j.runner) return `推理环境 ${j.runner} 所在的 GPU 机 ${machineText(j.waits_on[0], now)}，任务将在该机器启动 fw worker 后运行。`;
+  return `暂无在线的 GPU 机：${j.waits_on.map((m) => machineText(m, now)).join('；')}。请在 GPU 机上启动 fw worker，任务将随后运行。`;
+}
+
 export function failedAfter(j) {
   if (j.status !== 'failed') return '';
   if (j.retried_by) return `（已重新提交为任务 ${j.retried_by.id}）`;
@@ -2974,8 +2988,8 @@ async function jobsPage(query) {
   renderNav();
   const status = query.get('status') || '';
   const ask = (before) => api.jobPage(scopeQuery(at, { status, limit: JOB_PAGE, before }));
-  const [first, tree, models] = await Promise.all([ask(null), can('sites.read') ? api.sites() : null,  // a worker account sees no places
-    can('models.read') ? api.models() : []]);
+  const [first, tree, models, workers] = await Promise.all([ask(null), can('sites.read') ? api.sites() : null,  // a worker account sees no places
+    can('models.read') ? api.models() : [], api.workers()]);
   const placeOfModel = new Map(models.map((m) => [m.name, m]));
   const placeOf = (j) => (j.params && j.params.model ? placeOfModel.get(j.params.model.ref.split('@')[0]) : null);  // a check: no line
   const pick = el('select', { id: 'job-status', onchange: (ev) => { location.hash = hrefOf(['jobs'], { status: ev.target.value, site: at.site, line: at.line }); } },
@@ -3009,7 +3023,12 @@ async function jobsPage(query) {
     '左侧选择现场 / 产线时，只列出该处模型的评估和推理任务；检查推理环境的任务不属于任何产线，仅在「全部」中列出。',
     '点击列标题可按该列排序，再次点击反向排序；排序只作用于已加载的任务。'], '任务列表说明')]),
     ((list) => (tree ? browse(tree, at, ['jobs'], { status }, null, null, list) : list))([
-      el('div', { class: 'row' }, el('label', { for: 'job-status' }, '状态'), pick),
+      el('div', { class: 'row' }, el('label', { for: 'job-status' }, '状态'), pick,
+        el('span', { id: 'machines', class: 'machines' }, el('span', { class: 'muted' }, 'GPU 机'),
+          info([`GPU 机上运行 fw worker 时，空闲时每隔几秒向平台领取任务，运行任务时定期续租；${workers.online_seconds} 秒内与平台联系过的显示为在线。`,
+            '离线的 GPU 机请检查机器是否开机、fw worker 是否在运行、网络是否连通。'], 'GPU 机状态说明'),
+          workers.workers.length ? workers.workers.map((m) => statusText(m.online ? 'green' : 'gray', machineText(m)))
+            : el('span', { class: 'muted' }, '暂无 GPU worker 账号'))),
       table || el('p', { class: 'muted' }, empty), el('div', { class: 'row' }, more)]));
   if (first.jobs.some((j) => j.status === 'queued' || j.status === 'running')) refreshLater(() => (earlier ? Promise.resolve() : jobsPage(query)), 10000);
 }
@@ -3027,6 +3046,7 @@ async function jobPage(id, query) {
   let j = await api.job(id);
   const log = el('pre', { class: 'log' });
   const status = el('span');
+  const waiting = el('div', { id: 'job-waits' });
   const result = el('dd');
   const attempt = j.attempts || 0;
   let after = -1;
@@ -3042,6 +3062,8 @@ async function jobPage(id, query) {
     status.replaceChildren(statusText(JOB_DOT[j.status], j.status_text),
       j.queued_ahead ? `（前方排队 ${j.queued_ahead} 个）` : '', j.cancel_requested && j.status === 'running' ? '（正在取消）' : '',
       j.attempts ? `，第 ${j.attempts} 次领取（最多 ${j.max_attempts} 次）` : '', j.worker ? `，执行机器 ${j.worker}` : '');
+    const notice = waitNotice(j);
+    waiting.replaceChildren(notice ? el('div', { class: 'error' }, notice) : '');
     result.replaceChildren(j.status === 'done' ? jobResult(j) : j.error ? el('span', { class: 'bad' }, j.error) : '-');
     cancel.hidden = !can('jobs.write') || !(j.status === 'queued' || j.status === 'running') || j.cancel_requested;
   };
@@ -3055,6 +3077,7 @@ async function jobPage(id, query) {
       j.status === 'failed' ? null : [el('dt', {}, '结果'), result],  // a failure's reason is in its card below
       el('dt', {}, '提交'), el('dd', {}, `${j.submitted_by}，${when(j.created_at)}`),
       el('dt', {}, '开始 / 结束'), el('dd', {}, `${when(j.started_at) || '-'} / ${when(j.finished_at) || '-'}`)),
+    waiting,
     (j.params && j.params.warnings || []).map((w) => el('div', { class: 'error' }, w)),
     j.status === 'failed' ? await failedCard(j) : null,
     el('h2', {}, attempt ? `日志（第 ${attempt} 次）` : '日志'), log);
