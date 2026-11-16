@@ -536,6 +536,7 @@ def test_the_lists_are_browsed_by_site_and_line(service, tokens, api, tmp_path):
     tx, ty = f'{site} / TX', f'{site} / TY'
     assert dict(seen['all']['poolGroups'])[tx] == [a] and dict(seen['all']['poolGroups'])[ty] == [b]
     assert titles.index(tx) + 1 == titles.index(ty) and dict(seen['all']['snapshotGroups'])[tx] == [ts]
+    assert seen['tasks']['head'][:2] == ['名称', '任务'] and dict(seen['tasks']['rows'])[ts] == '检测'  # the snapshot's task
     assert any(x.startswith(site) for x in seen['tree']) and seen['tree'][0].startswith('全部')
     assert seen['site']['pools'] == [a, b] and seen['site']['snapshots'] == [ts]
     assert seen['site']['poolGroups'] == [[tx, [a]], [ty, [b]]] and seen['site']['snapshotGroups'] == [[tx, [ts]]]
@@ -945,7 +946,7 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     assert rows[detr] == ['@2', '0.962', '0.846'] and rows[yolo] == ['@1', '0.928', '0.791']   # the evaluated version
     assert rows[seg] == ['未评估', '—', '—']                                                    # none on the benchmark
     kinds = {name.split('@')[0]: kind for name, kind in seen['data']}
-    assert kinds[data] == '数据池' and kinds[snap['dataset']] == '训练集快照' and kinds[test] == '测试集'
+    assert kinds[data] == '数据池' and kinds[snap['dataset']] == '训练集快照（检测）' and kinds[test] == '测试集'
     mine = {name: state for name, state in seen['batches'] if name in batches}   # other tests add batches on SES/TX too
     assert mine == dict(zip(batches, ['待复核', '待提交复核', '复核通过']))
     for at in (seen['at1440'], seen['at1920']):
@@ -1155,7 +1156,7 @@ def test_a_snapshot_is_built_and_continued_from_the_pool_pages(service, tokens, 
     assert counts['0 scratch（框）'] and counts['1 dent（框）']
     assert seen['preview']['create'] == f'建立 {snap}@1' and '12 个样本' in seen['preview']['total']
     assert seen['made']['command'] == f'fw get {snap}@1 --to {snap}@1'
-    assert '0 scratch、1 dent' in seen['made']['info'] and f'{name}@1' in seen['made']['info']
+    assert '0 scratch、1 dent' in seen['made']['info'] and f'{name}@1' in seen['made']['info'] and seen['made']['task'] == '检测'
     assert '按比例划分（val 20%，test 10%，随机种子 0）' in seen['made']['info']
     assert seen['made']['next'] == f'#/trainset-new?name={snap}'
     assert '复制' in seen['copied']                                          # copied, or selected for Ctrl+C

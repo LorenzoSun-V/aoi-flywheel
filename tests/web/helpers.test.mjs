@@ -5,7 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
   shortWhen, listWhen, sourceText, errorTrail, modelRow, downloadText, readDropped, diffListText, topDirs, namesText,
-  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
+  parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName, kindText, taskTitle,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey, placeGroups,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
   newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, failedAfter, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
@@ -559,4 +559,13 @@ test('a list is grouped by site and line in the order of the tree, what has no l
   assert.deepEqual(placeGroups(tree, { site: 'SES', line: '' }, one, (r) => r, '跨产线').map((g) => g.title), ['SES / TX（贴片线）']);
   assert.deepEqual(placeGroups(tree, all, [], (r) => r, 'x'), []);
   assert.deepEqual(placeGroups(tree, all, [{ name: 'j' }], () => null, '不属于任何产线').map((g) => g.title), ['不属于任何产线']);
+});
+
+test('a snapshot is named with its task, a pool without one', () => {
+  assert.equal(kindText({ kind: 'trainset', latest: { task: 'det' } }), '训练集快照（检测）');
+  assert.equal(kindText({ kind: 'trainset', latest: { task: 'seg' } }), '训练集快照（实例分割）');
+  assert.equal(kindText({ kind: 'trainset', latest: null }), '训练集快照');
+  assert.equal(kindText({ kind: 'pool', latest: { task: null } }), '数据池');
+  assert.equal(taskTitle('semseg'), '语义分割');
+  assert.equal(taskTitle('pose'), 'pose');
 });

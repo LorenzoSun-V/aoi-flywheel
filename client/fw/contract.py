@@ -16,6 +16,7 @@ import hashlib
 import re
 import unicodedata
 from pathlib import PurePosixPath
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 MANIFEST_HEADER = 'fw-manifest 1'
@@ -254,6 +255,56 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
     return {'patch': f'v{a}.{b}.{c + 1}', 'minor': f'v{a}.{b + 1}.0', 'major': f'v{a + 1}.0.0'}
 
 
+# --- tasks: what a snapshot, a model, an evaluation and a prediction set are for ----------------------------
+# One row per task (docs/tasks.md). Everything that depends on the task reads it here: the server's label
+# readers and writers (fwserver/formats.py, by formats.of(task)), the snapshot's formats, the metrics an
+# evaluation shows, the names on the web (app.js keeps a copy of the fields it shows; a test keeps the two the
+# same). Only enabled tasks can be chosen; the others are written down so that their interfaces are known, and
+# their metric names are provisional until the evaluation tool writes them. Adding a task is enabling its row
+# with its format functions, a migration that lets the database take it, and its tests.
+@dataclass(frozen=True)
+class Task:
+    id: str                        # 'det', 'obb', 'seg', 'semseg': stored in trainset.json and the database
+    title: str                     # what people see
+    enabled: bool                  # can be chosen for a snapshot or a model
+    shapes: Dict[str, str]         # LiteAnno shape_type -> read as 'bbox', 'obb' or 'polygon'; any other is refused
+    stored: Tuple[str, ...]        # the formats a snapshot of this task freezes, in this order
+    pred_schema: int               # schema_version of predictions.json
+    key_metrics: Tuple[str, ...]   # the metrics lists and comparisons show, in order
+    main_metric: str               # the one models are compared by
+    eval_tool: str                 # the evaluation tool, as an evaluation report names it
+
+
+_POLYGONS = {'rectangle': 'polygon', 'rotation': 'polygon', 'polygon': 'polygon'}
+TASKS: Dict[str, Task] = {t.id: t for t in (
+    Task('det', '检测', True, {'rectangle': 'bbox', 'rotation': 'bbox', 'polygon': 'bbox'},
+         ('yolo', 'coco', 'json'), 1, ('mAP50', 'mAP50-95', 'P', 'R'), 'mAP50-95', 'aoi-deteval'),
+    # not yet enabled: docs/tasks.md (their metric names wait for the evaluation tool)
+    Task('obb', '旋转框', False, {'rectangle': 'obb', 'rotation': 'obb'},
+         ('yolo', 'json'), 2, ('mAP50', 'mAP50-95', 'P', 'R'), 'mAP50-95', 'aoi-deteval'),
+    Task('seg', '实例分割', False, dict(_POLYGONS),
+         ('yolo', 'coco', 'json'), 2, ('mAP50(M)', 'mAP50-95(M)', 'P(M)', 'R(M)'), 'mAP50-95(M)', 'aoi-deteval'),
+    Task('semseg', '语义分割', False, dict(_POLYGONS),
+         ('mask', 'json'), 2, ('mIoU', 'mAcc'), 'mIoU', 'aoi-deteval'),
+)}
+DEFAULT_TASK = 'det'
+
+
+def enabled_tasks() -> List[str]:
+    return [t.id for t in TASKS.values() if t.enabled]
+
+
+def metrics_text(metrics: dict, task: str = DEFAULT_TASK) -> str:
+    """The first two key metrics of a result, as fw and the worker print them: 'mAP50 0.9，mAP50-95 0.6'."""
+    return '，'.join(f'{k} {metrics.get(k)}' for k in TASKS[task].key_metrics[:2])
+
+
+def task_title(task: str) -> str:
+    """The name people see; an unknown id as it is."""
+    t = TASKS.get(task)
+    return t.title if t else task
+
+
 # --- which fw works with which server ------------------------------------------------------------------
 # Every request of fw carries its interface level and every answer of the server carries the server's, in this
 # header. A side that sends none is level 1 (anything before the header existed). Raise API_LEVEL when the
@@ -277,8 +328,9 @@ def next_labels(labels: Iterable[str]) -> Dict[str, str]:
 #  15  a note on each problem image of a rejection: 'notes' of POST /batches/<name>/reject and of the steps
 #  16  a failed job's work submitted again (POST /jobs/<id>/retry) or marked handled (POST /jobs/<id>/handled);
 #      'retried_by', 'handled' and 'batch' of a job
+#  17  'task' of a dataset version: a training-set snapshot's task (fw.contract.TASKS), null for the rest
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 16
+API_LEVEL = 17
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 

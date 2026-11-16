@@ -19,14 +19,14 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from fw.contract import ContractError, check_path, collisions, eval_dirs, is_label, manifest_bytes
+from fw.contract import (ContractError, check_path, collisions, enabled_tasks, eval_dirs, is_label, manifest_bytes,
+                         task_title)
 from fw.onnx_check import OnnxError, check_self_contained
 
 from . import datasets, events, labels, trainsets
 from .datasets import NAME, DatasetError, check_digest
 from .store import Store, StoreError
 
-TASKS = {'det': '检测'}
 TAGS = {'candidate': '候选', 'deprecated': '弃用'}
 PRECISIONS = ('fp32', 'fp16')
 SPLITS = ('train', 'val', 'test')
@@ -265,8 +265,8 @@ def create_model(conn, user_id: int, name: str, site: str, line: str, task: str 
     if not NAME.match(name or ''):
         raise DatasetError(400, '模型名称只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
     site, line = datasets.place(conn, _name(site, '现场'), _name(line, '产线'))
-    if task not in TASKS:
-        raise DatasetError(400, f'任务类型只能是 {"、".join(TASKS)}（{"、".join(TASKS.values())}）')
+    if task not in enabled_tasks():
+        raise DatasetError(400, f'任务类型只能是 {"、".join(enabled_tasks())}（{"、".join(map(task_title, enabled_tasks()))}）')
     note = _text(note, '备注')
     with conn.transaction():  # ON CONFLICT: someone creating the same name meanwhile also gets 409, not 500
         if conn.execute('INSERT INTO models (name, site, line, task, note, created_by) VALUES (%s, %s, %s, %s, %s, %s) '
@@ -421,8 +421,8 @@ def register_model_version(conn, store: Store, user_id: int, name: str, files: S
         raise DatasetError(400, f'{trainset["ref"]} 不是训练集快照；模型版本须引用训练所用的快照（由 fw trainset create 建立）')
     ts = conn.execute('SELECT task FROM trainset_versions WHERE version_id = %s', (trainset_id,)).fetchone()
     if ts['task'] != model['task']:
-        raise DatasetError(400, f'{trainset["ref"]} 是{TASKS.get(ts["task"], ts["task"])}的快照，'
-                                f'模型 {model["name"]} 是{TASKS[model["task"]]}模型')
+        raise DatasetError(400, f'{trainset["ref"]} 是{task_title(ts["task"])}的快照，'
+                                f'模型 {model["name"]} 是{task_title(model["task"])}模型')
     classes = conn.execute("SELECT encode(sha256, 'hex') AS d, size FROM version_files "
                            "WHERE version_id = %s AND path = 'classes.txt'", (trainset_id,)).fetchone()
     entries.append((CLASSES, classes['d'], classes['size']))

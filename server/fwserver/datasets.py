@@ -58,12 +58,13 @@ def _stamp(t) -> Optional[str]:
 _VERSION = """
 SELECT v.id, d.name AS dataset, d.kind, v.number, v.parent_id, pd.name AS parent_dataset, p.number AS parent_number,
        encode(v.manifest_sha256, 'hex') AS manifest_sha256, v.file_count, v.total_bytes, v.source, v.note,
-       u.name AS created_by, v.created_at
+       u.name AS created_by, v.created_at, tv.task
 FROM versions v
 JOIN datasets d ON d.id = v.dataset_id
 JOIN users u ON u.id = v.created_by
 LEFT JOIN versions p ON p.id = v.parent_id
 LEFT JOIN datasets pd ON pd.id = p.dataset_id
+LEFT JOIN trainset_versions tv ON tv.version_id = v.id
 """
 
 
@@ -76,7 +77,8 @@ def _version(row: dict) -> dict:
             'ref': f'{row["dataset"]}@{row["number"]}', 'parent': parent,
             'manifest_sha256': row['manifest_sha256'], 'file_count': row['file_count'],
             'total_bytes': row['total_bytes'], 'source': row['source'], 'note': row['note'],
-            'created_by': row['created_by'], 'created_at': _stamp(row['created_at']), 'labels': []}
+            'created_by': row['created_by'], 'created_at': _stamp(row['created_at']), 'labels': [],
+            'task': row.get('task')}  # a training-set snapshot's task (fw.contract.TASKS); None for the rest
 
 
 def _labelled(conn, versions: List[dict]) -> List[dict]:

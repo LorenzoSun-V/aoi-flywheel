@@ -25,6 +25,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import httpx
 
+from . import contract
 from .api import Api, ApiError
 
 Echo = Callable[[str], None]
@@ -930,7 +931,7 @@ def _eval_in(run: JobRun, p: dict, runner: dict, folder: Path) -> dict:
         rows += ops._send_files(run.api, items, 4, run.log)
     except ops.FwError as e:
         raise WorkerError(str(e)) from None
-    run.log(f'评了 {metrics.get("images")} 张图，mAP50 {metrics.get("mAP50")}，mAP50-95 {metrics.get("mAP50-95")}')
+    run.log(f'评了 {metrics.get("images")} 张图，{contract.metrics_text(metrics)}')  # aoi-deteval: detection
     return {'files': rows, 'tool_version': str(info.get('deteval_version', ''))}
 
 

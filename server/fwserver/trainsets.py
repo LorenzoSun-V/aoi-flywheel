@@ -40,7 +40,8 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
-from fw.contract import (IMAGE_EXTS, LABEL_EXTS, META_NAMES, TRAINSET_FORMATS, collisions, fold, manifest_bytes,
+from fw.contract import (DEFAULT_TASK, IMAGE_EXTS, LABEL_EXTS, META_NAMES, TASKS, TRAINSET_FORMATS, collisions, fold,
+                         manifest_bytes,
                          path_problem, short_paths, trainset_flat, trainset_layout, yolo_label_stem)
 
 from . import datasets, formats
@@ -93,6 +94,7 @@ class Options:
     label_classes: Optional[List[str]] = None  # the class table the .txt labels are numbered by (None: classes)
     class_map: Optional[Dict[str, str]] = None  # class in the labels -> class in classes, or '' (drop the box)
     test: float = 0.0  # the share of the samples cut by ratio that goes to test (0: train/val only)
+    task: str = DEFAULT_TASK  # what the labels are read and written for (fw.contract.TASKS; only 'det' so far)
 
 
 def _examples(items, n: int = EXAMPLES) -> str:
@@ -127,6 +129,8 @@ def _check_table(names: List[str], what: str) -> None:
 
 
 def check_options(o: Options) -> None:
+    if o.task not in TASKS or not TASKS[o.task].enabled:
+        raise DatasetError(400, f'任务类型只能是 {"、".join(t.id for t in TASKS.values() if t.enabled)}')
     if not o.sources:
         raise DatasetError(400, '请至少指定一个来源版本（--from）')
     _check_table(o.classes, '类别表')
@@ -291,17 +295,17 @@ def _parse(store: Store, label: File, o: Options):
     class_map = o.class_map or {}
     if label[0].lower().endswith('.json'):
         mapped, moved = formats.remap_json(text, class_map)
-        parsed = formats.parse_json(text if mapped is None else mapped)
+        parsed = formats.of(o.task).parse_json(text if mapped is None else mapped)
         if not isinstance(parsed, str) and mapped is not None:
             parsed.data, parsed.moved = mapped.encode('utf-8'), moved
         return parsed
-    parsed = formats.parse_txt(text, o.label_classes if o.label_classes is not None else o.classes)
+    parsed = formats.of(o.task).parse_txt(text, o.label_classes if o.label_classes is not None else o.classes)
     if isinstance(parsed, str):
         return parsed
     if data.startswith(BOM):
         parsed.data = data[len(BOM):]  # YOLO readers take the BOM for part of the first class id
     if formats.remap_txt(parsed, class_map, o.classes):
-        parsed.data = formats.yolo_bytes(parsed, o.classes, None)
+        parsed.data = formats.of(o.task).yolo_bytes(parsed, o.classes, None)
     if not parsed.names and (data if parsed.data is None else parsed.data):
         parsed.data = b''  # only blank lines: frozen empty, so a label's size tells whether it has a box
     return parsed
@@ -341,7 +345,7 @@ def _read_labels(store: Store, samples: Dict[str, Sample], o: Options) -> Tuple[
             if key not in clipped_by:
                 copy = Label('json', label.names, list(label.boxes), size=size, shapes=label.shapes,
                              refused=label.refused, data=label.data, moved=label.moved)
-                formats.clip(copy, size)
+                formats.of(o.task).fit(copy, size)
                 clipped_by[key] = copy
             label = clipped_by[key]
             s.size = size
@@ -365,7 +369,7 @@ def _read_labels(store: Store, samples: Dict[str, Sample], o: Options) -> Tuple[
     for name, where in sorted(unknown.items()):
         problems.append(f'类别 {name!r} 不在类别表中，{len(where)} 个标注使用了该类别，例如 {_examples(where, 3)}')
     for kind, where in sorted(refused.items()):
-        problems.append(f'{len(where)} 个标注中有 {kind} 形状，不能作为检测框（仅接受 rectangle、polygon、rotation），'
+        problems.append(f'{len(where)} 个标注中有 {kind} 形状，{formats.of(o.task).refused}，'
                         f'例如 {_examples(where, 3)}')
     if outside:
         problems.append(f'{len(outside)} 个标注中有框完全位于图片之外：{_examples(outside, 3)}')
@@ -387,19 +391,19 @@ def _read_labels(store: Store, samples: Dict[str, Sample], o: Options) -> Tuple[
     return problems, notices
 
 
-def _formats(store: Store, samples: Dict[str, Sample]) -> Dict[str, Optional[str]]:
-    """Which formats the snapshot can hold: format -> None, or why it is left out."""
+def _formats(store: Store, samples: Dict[str, Sample], task: str) -> Dict[str, Optional[str]]:
+    """Which formats the snapshot can hold: format -> None, or why it is left out (the task's, in its order)."""
     unsized = []
     for s in samples.values():
         if s.size is None:
             s.size = _header_size(store, s.image)
             if s.size is None:
                 unsized.append(s.key)
-    out: Dict[str, Optional[str]] = {'yolo': None, 'coco': None, 'json': None}
-    if unsized:
+    out: Dict[str, Optional[str]] = {f: None for f in TASKS[task].stored}
+    if unsized and 'coco' in out:
         out['coco'] = f'{len(unsized)} 张图片无法读取尺寸（仅识别 PNG、JPEG、BMP、GIF、TIFF、WebP 的文件头）：{_examples(unsized, 3)}'
     txt = [k for k in unsized if samples[k].parsed is not None and samples[k].parsed.kind == 'txt']
-    if txt:  # their JSON is made from the YOLO boxes, which needs the image size
+    if txt and 'json' in out:  # their JSON is made from the YOLO boxes, which needs the image size
         out['json'] = f'{len(txt)} 张图片的标注为 YOLO txt，且图片尺寸无法读取，无法生成 LiteAnno JSON：{_examples(txt, 3)}'
     return out
 
@@ -514,9 +518,10 @@ def _counts(samples: Dict[str, Sample], classes: List[str]) -> dict:
     return counts
 
 
-def _outputs(samples: Dict[str, Sample], classes: List[str], with_json: bool) -> None:
+def _outputs(samples: Dict[str, Sample], classes: List[str], with_json: bool, task: str) -> None:
     """Sample.outputs of every sample whose label can be converted (a negative has none)."""
     known = set(classes)
+    fmt = formats.of(task)
     for s in samples.values():
         if s.label is None:
             s.outputs = {}
@@ -528,9 +533,9 @@ def _outputs(samples: Dict[str, Sample], classes: List[str], with_json: bool) ->
         if label.kind == 'txt':
             out['labels'] = (label.data, None) if label.data is not None else (None, s.label)
             if with_json:  # for LiteAnno: rectangles from the boxes
-                out['json'] = (formats.liteanno_bytes(label, classes, s.size, PurePosixPath(s.image[0]).name), None)
+                out['json'] = (fmt.liteanno_bytes(label, classes, s.size, PurePosixPath(s.image[0]).name), None)
         else:
-            out['labels'] = (formats.yolo_bytes(label, classes, s.size), None)
+            out['labels'] = (fmt.yolo_bytes(label, classes, s.size), None)
             out['json'] = (label.data, None) if label.data is not None else (None, s.label)
         s.outputs = out
 
@@ -566,9 +571,10 @@ def _json_bytes(obj) -> bytes:
 
 
 def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, Optional[str]],
-          classes_data: bytes, info_data: bytes) -> Tuple[List[File], Dict[str, bytes], List[str]]:
+          classes_data: bytes, info_data: bytes, task: str) -> Tuple[List[File], Dict[str, bytes], List[str]]:
     """The snapshot's files (path, sha256, size), the converted contents to store (sha256 -> bytes), problems."""
     blobs: Dict[str, bytes] = {}
+    fmt = formats.of(task)
 
     def made(path: str, data: bytes) -> File:
         digest = hashlib.sha256(data).hexdigest()
@@ -587,12 +593,12 @@ def _tree(samples: Dict[str, Sample], classes: List[str], available: Dict[str, O
         for top, (data, file) in s.outputs.items():  # see _outputs
             path = f'{top}/{rest}{stem}.{"txt" if top == "labels" else "json"}'
             entries.append(made(path, data) if data is not None else (path, file[1], file[2]))
-        if available['coco'] is None:
-            boxes = formats.pixel_boxes(s.parsed, classes, s.size) if s.parsed is not None else []
+        if available.get('coco', '') is None:
+            boxes = fmt.coco_objects(s.parsed, classes, s.size) if s.parsed is not None else []
             coco[s.split].append((short[s.key], s.size, boxes))
     for split in SPLITS:
         if coco.get(split):
-            entries.append(made(f'coco/{split}.json', formats.coco_bytes(coco[split], classes)))
+            entries.append(made(f'coco/{split}.json', fmt.coco_bytes(coco[split], classes)))
     problems = [f'{p}：{why}' for p, why in ((e[0], path_problem(e[0])) for e in entries) if why]
     for fmt in TRAINSET_FORMATS:  # every layout fw get can make must work on Windows too
         if fmt == 'yolo':  # the flat layout: its collisions do not stop the snapshot (plan tells), fw get refuses
@@ -636,6 +642,7 @@ class Plan:
     formats: Dict[str, Optional[str]] = field(default_factory=dict)  # format -> None, or why it is left out
     entries: List[File] = field(default_factory=list)
     blobs: Dict[str, bytes] = field(default_factory=dict)  # contents made for the snapshot, by sha256
+    task: str = DEFAULT_TASK
 
     def summary(self) -> dict:
         return {'name': self.name, 'sources': [v['ref'] for v, _ in self.sources],
@@ -643,7 +650,7 @@ class Plan:
                 'latest': self.latest['ref'] if self.latest else None,
                 'expect_latest_id': self.latest['id'] if self.latest else None,
                 'rule': self.rule, 'counts': self.counts, 'changes': self.changes, 'problems': self.problems,
-                'notices': self.notices, 'task': formats.TASK,
+                'notices': self.notices, 'task': self.task,
                 'formats': [f for f, why in self.formats.items() if why is None],
                 'missing_formats': {f: why for f, why in self.formats.items() if why is not None},
                 'samples': len(self.samples), 'file_count': len(self.entries),
@@ -678,10 +685,10 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
         if bare:
             problems.append(f'要求每张图片都有标注（--require-labels），有 {len(bare)} 张没有标注：{_examples(bare, 3)}')
     counts = _counts(samples, o.classes)
-    available = _formats(store, samples)  # also gives the txt-labelled images their size
-    _outputs(samples, o.classes, available['json'] is None)
+    available = _formats(store, samples, o.task)  # also gives the txt-labelled images their size
+    _outputs(samples, o.classes, available.get('json', '') is None, o.task)
     p = Plan(name, sources, latest, previous, samples, rule, counts, _changes(samples, prev_splits), problems,
-             notices)
+             notices, task=o.task)
     if previous is not None and _previous_classes(conn, previous) != o.classes:
         p.notices.append(f'类别表和 {previous["ref"]} 不同，类别编号可能已变化')
     empty = [split for split in ('train', 'val') if samples and not counts[split]['samples']]
@@ -691,13 +698,13 @@ def plan(conn, store: Store, name: str, o: Options) -> Plan:
         return p
     p.formats = available
     summary = p.summary()
-    info = {'format': FORMAT, 'name': name, 'task': formats.TASK,
+    info = {'format': FORMAT, 'name': name, 'task': o.task,
             'sources': [{'ref': v['ref'], 'manifest_sha256': v['manifest_sha256'], 'site': d['site'],
                          'line': d['line']} for v, d in sources],
             'based_on': previous['ref'] if previous else None, 'classes': o.classes, 'rule': rule, 'counts': counts,
             'formats': summary['formats'], 'missing_formats': summary['missing_formats']}
     classes_data = ('\n'.join(o.classes) + '\n').encode('utf-8')
-    p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info))
+    p.entries, p.blobs, p.problems = _tree(samples, o.classes, p.formats, classes_data, _json_bytes(info), o.task)
     flat = trainset_flat(p.entries)[1]
     if flat:
         p.notices.append(f'有 {len(flat)} 处文件名在平铺后会重名，该快照取回时不能使用默认的平铺目录（--format yolo），'
@@ -753,7 +760,7 @@ def create(conn, store: Store, user_id: int, name: str, o: Options, expect_lates
         summary = p.summary()
         c.execute('INSERT INTO trainset_versions (version_id, based_on_id, task, classes, rule, counts, formats) '
                   'VALUES (%s, %s, %s, %s, %s, %s, %s)',
-                  (version_id, p.previous['id'] if p.previous else None, formats.TASK,
+                  (version_id, p.previous['id'] if p.previous else None, p.task,
                    json.dumps(o.classes, ensure_ascii=False), json.dumps(p.rule, ensure_ascii=False),
                    json.dumps(p.counts, ensure_ascii=False), json.dumps(summary['formats'])))
         for i, (v, _) in enumerate(p.sources):
