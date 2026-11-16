@@ -329,8 +329,9 @@ def task_title(task: str) -> str:
 #  16  a failed job's work submitted again (POST /jobs/<id>/retry) or marked handled (POST /jobs/<id>/handled);
 #      'retried_by', 'handled' and 'batch' of a job
 #  17  'task' of a dataset version: a training-set snapshot's task (fw.contract.TASKS), null for the rest
+#  18  POST /batches/<name>/reviewer: the owner of a batch in review asks another reviewer (step 'reassign')
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 17
+API_LEVEL = 18
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 

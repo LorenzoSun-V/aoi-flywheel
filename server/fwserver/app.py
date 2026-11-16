@@ -217,6 +217,12 @@ class SubmitBody(BaseModel):
     revision: Optional[int] = None   # the revision the caller looked at
 
 
+class ReassignBody(BaseModel):
+    reviewer: str
+    comment: str = ''
+    revision: Optional[int] = None   # the revision the caller looked at
+
+
 class RejectBody(BaseModel):
     comment: str
     images: List[Annotated[str, Field(max_length=MAX_PATH_BYTES)]] = Field(default=[], max_length=500)
@@ -845,6 +851,12 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def submit_batch(name: str, body: SubmitBody, user: dict = Depends(batch_writer)):
         with conn() as c:
             return batches.submit(c, user, name, body.reviewer, body.revision)
+
+    @app.post('/api/v1/batches/{name}/reviewer')
+    def reassign_batch(name: str, body: ReassignBody, user: dict = Depends(batch_writer)):
+        """The owner of a batch in review (or an administrator) asks another reviewer."""
+        with conn() as c:
+            return batches.reassign(c, user, name, body.reviewer, body.comment, body.revision)
 
     @app.post('/api/v1/batches/{name}/reject')
     def reject_batch(name: str, body: RejectBody, user: dict = Depends(batch_reviewer)):

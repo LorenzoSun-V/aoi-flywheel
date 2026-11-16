@@ -25,7 +25,8 @@
 
 Who may do what beyond the capability the endpoint asks for: only the owner (or an administrator) uploads
 revisions and submits; only the reviewer who was asked (or an administrator) rejects and approves; the owner,
-the reviewer who was asked and an administrator close.
+the reviewer who was asked and an administrator close. While a batch is in review, its owner (or an
+administrator) may ask another reviewer instead (step 'reassign').
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ from .store import Store
 STATUS = {'open': '待提交复核', 'review': '待复核', 'rejected': '已退回', 'approved': '复核通过', 'imported': '已入库',
           'closed': '已关闭'}
 STEPS = {'upload': '上传', 'submit': '提交复核', 'reject': '退回', 'approve': '通过', 'import': '入库', 'close': '关闭',
-         'prelabel': '预标注'}
+         'prelabel': '预标注', 'reassign': '更换复核人'}
 UNFINISHED = ('open', 'review', 'rejected', 'approved')
 MAX_COMMENT = 2000
 MAX_IMAGES = 500         # images a rejection points at
@@ -99,6 +100,8 @@ def _actions(user: Optional[dict], b: dict) -> List[str]:
         out.append('prelabel')
     if _owns(user, b) and b['status'] == 'open':
         out.append('submit')
+    if _owns(user, b) and b['status'] == 'review':
+        out.append('reassign')
     if _reviews(user, b) and b['status'] == 'review':
         out.append('approve')
     if _reviews(user, b) and b['status'] in ('review', 'approved'):
@@ -359,6 +362,33 @@ def submit(conn, user: dict, name: str, reviewer: Optional[str] = None, revision
         latest = _latest(conn, b)
         _same_revision(b, latest, revision)
         _submit(conn, user, b, latest, _who(conn, b, reviewer))
+    return get(conn, name, user)
+
+
+def reassign(conn, user: dict, name: str, reviewer: str, comment: str = '', revision: Optional[int] = None) -> dict:
+    """Ask another reviewer for a batch in review (the one asked was the wrong one, or is away). Its owner or an
+    administrator does it; the batch stays in review, and the trail gets one more row naming the new reviewer."""
+    comment = _text(comment, '说明', MAX_COMMENT)
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        raise DatasetError(400, '请选择新的复核人')
+    with conn.transaction():
+        b = _find(conn, name, lock=True)
+        if not _owns(user, b):
+            raise DatasetError(403, f'{b["name"]} 不是您上传的批次；只有上传该批次的账号或管理员可以更换复核人')
+        if b['status'] != 'review':
+            raise DatasetError(409, f'{b["name"]} 现在是「{STATUS[b["status"]]}」，只有待复核的批次可以更换复核人')
+        latest = _latest(conn, b)
+        _same_revision(b, latest, revision)
+        asked = _reviewer(conn, reviewer.strip())
+        if asked['id'] == b['reviewer_id']:
+            raise DatasetError(400, f'{asked["name"]} 已是 {b["name"]} 的复核人，请选择其他账号')
+        before = conn.execute('SELECT name FROM users WHERE id = %s', (b['reviewer_id'],)).fetchone()['name']
+        mine = asked['id'] == b['owner_id']
+        conn.execute('UPDATE batches SET reviewer_id = %s, updated_at = now() WHERE id = %s', (asked['id'], b['id']))
+        _step(conn, b['id'], user['user_id'], 'reassign', latest['id'], comment=comment, reviewer_id=asked['id'],
+              self_review=mine)
+        events.record(conn, user['user_id'], 'batch.reassign', f'{b["name"]}@{latest["number"]}',
+                      reviewer=asked['name'], before=before, self_review=mine)
     return get(conn, name, user)
 
 
