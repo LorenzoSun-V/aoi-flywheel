@@ -323,6 +323,7 @@ export const api = {
   predictionSets: async (model = '', where = {}) => (await call(`/predictions?${new URLSearchParams({ model, ...where })}`)).prediction_sets,
   predictionSet: (id) => call(`/predictions/${Number(id)}`),
   createDataset: (body) => call('/datasets', { method: 'POST', body }),
+  followClasses: (name, pool) => call(`/datasets/${encodeURIComponent(name)}/classes-from`, { method: 'POST', body: { pool } }),
   addClasses: (name, classes) => call(`/datasets/${encodeURIComponent(name)}/classes`, { method: 'POST', body: { classes } }),
   createModel: (body) => call('/models', { method: 'POST', body }),
   registerModelVersion: (name, body) => call(`/models/${encodeURIComponent(name)}/versions`, { method: 'POST', body }),
@@ -1001,6 +1002,46 @@ export function sourceText(source) {
 
 // The class table of a pool by number and, for an account that may change datasets, adding to its end. added: what
 // the last addition answered, to show how the newest version fits a pool's first table.
+// The pools a test set of site / line may follow the class table of: those of its line, or any when it has
+// none. pools: GET /datasets?kind=pool.
+export function poolChoices(pools, site, line) {
+  const same = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
+  return pools.filter((p) => p.kind === 'pool' && (!line || (same(p.site, site) && same(p.line, line)))).map((p) => p.name).sort();
+}
+
+// A test set's class table: the one of the pool it follows; one made before follows none until one is named, once.
+async function followSection(d, added) {
+  const head = el('p', { class: 'muted' }, d.classes_from ? ['沿用数据池 ', el('a', { href: hrefOf(['d', d.classes_from], { tab: 'classes' }) }, d.classes_from),
+    ` 的类别表，共 ${d.classes.length} 个类别`] : '尚未指定沿用哪个数据池的类别表。',
+  info(['测试集的标注与所属产线的数据池使用同一张类别表，上传时按该表核对；含表外类别或无法读取的标注将被拒收。',
+    '该表随数据池在末尾添加类别而增长；测试集本身不能修改类别表。指定后不能更改。'], '测试集类别表说明'));
+  const table = d.classes.length
+    ? el('table', { id: 'class-table', class: 'narrow' }, el('tr', {}, el('th', { class: 'num' }, '编号'), el('th', {}, '类别')),
+      d.classes.map((c, i) => el('tr', {}, numCell(i), el('td', {}, c))))
+    : null;
+  const check = added && added.latest_check;
+  const part = check && check.complete === false ? `（已核对其中 ${check.checked} 个标注文件，共 ${check.total} 个；其余的将在下一次上传时核对）` : '';
+  const fits = !check ? null : check.problem
+    ? el('div', { class: 'error', id: 'class-check' }, `${check.ref} 中有不符合类别表的标注${part}，下一次上传时须一并改正：${check.problem}`)
+    : el('p', { class: 'muted', id: 'class-check' }, part ? `${check.ref} 中已核对的标注均符合类别表${part}。` : `${check.ref} 中的标注均符合类别表。`);
+  if (d.classes_from || !can('datasets.write')) return [head, table, fits];
+  const names = poolChoices(await api.datasets({ kind: 'pool' }), d.site, d.line);
+  const pick = el('select', { id: 'follow-pool' }, el('option', { value: '' }, '选择数据池'), names.map((n) => el('option', { value: n }, n)));
+  const msg = el('div');
+  const go = el('button', { id: 'follow-go', class: 'primary', onclick: async () => {
+    if (!pick.value) { msg.replaceChildren(errorBox('请选择数据池。')); return; }
+    go.disabled = true;
+    try {
+      const out = await api.followClasses(d.name, pick.value);
+      await datasetPage(d.name, new URLSearchParams({ tab: 'classes' }), out);
+      toastDone(`已沿用 ${pick.value} 的类别表`);
+    } catch (e) { msg.replaceChildren(errorBox(e)); go.disabled = false; }
+  } }, '保存');
+  return [head, el('div', { class: 'panel form', id: 'follow-form' }, msg,
+    names.length ? el('div', { class: 'row' }, pick, go, el('span', { class: 'muted small' }, '保存后不能更改。'))
+      : el('p', { class: 'muted' }, d.line ? `${d.site} / ${d.line} 暂无数据池，请先新建该产线的数据池。` : '暂无数据池，请先新建数据池。'))];
+}
+
 function classSection(d, added) {
   const head = el('p', { class: 'muted' }, `共 ${d.classes.length} 个类别`, info(['上传到该数据池的标注只能使用类别表中的类别；含表外类别或无法读取的标注将被拒收，请改正后重新上传。',
     'YOLO txt 标注中的类别编号即类别在表中的序号（从 0 开始）；目录中附带的 classes.txt 须与类别表一致。',
@@ -1066,8 +1107,9 @@ async function datasetPage(name, query = new URLSearchParams(), added = null) {
   const list = versions.slice().reverse();
   placeCache.set(d.name, { site: d.site, line: d.line });
   const pool = d.kind === 'pool';
-  const noClasses = pool && !d.classes.length;
-  const tab = !pool ? 'versions' : added ? 'classes' : query.get('tab') || (noClasses ? 'classes' : 'versions');
+  const tabbed = pool || d.kind === 'test';   // a test set's labels follow a pool's class table
+  const noClasses = tabbed && !d.classes.length;
+  const tab = !tabbed ? 'versions' : added ? 'classes' : query.get('tab') || (noClasses ? 'classes' : 'versions');
   const write = can('datasets.write');
   const labels = list.length && write ? await labelSection(d.name, false, () => datasetPage(name, query)) : null;
   const actions = !write ? [] : d.kind === 'trainset'
@@ -1099,10 +1141,10 @@ async function datasetPage(name, query = new URLSearchParams(), added = null) {
         numCell(v.file_count), sizeCell(v.total_bytes),
         textCell(opsText(v.ops)), sourceCell(v.source), el('td', {}, v.created_by), timeCell(v.created_at),
         textCell(v.note), el('td', { class: 'menu-cell' }, menuOf(v)))))
-      : el('p', { class: 'muted' }, noClasses ? '暂无版本。请先填写类别表，再上传数据。' : '暂无版本。'),
+      : el('p', { class: 'muted' }, noClasses ? (pool ? '暂无版本。请先填写类别表，再上传数据。' : '暂无版本。请先指定类别表，再上传数据。') : '暂无版本。'),
     labels ? labels.form : null,
     labels ? labels.list : null];
-  const tabs = pool ? el('nav', { class: 'tabs page-tabs', 'aria-label': `${d.name} 的内容` },
+  const tabs = tabbed ? el('nav', { class: 'tabs page-tabs', 'aria-label': `${d.name} 的内容` },
     [['versions', '版本', list.length], ['classes', '类别表', d.classes.length]].map(([k, t, n]) => el('a', {
       id: `tab-${k}`, href: hrefOf(['d', d.name], { tab: k }), class: k === tab ? 'on' : '', 'aria-current': k === tab ? 'page' : null },
     t, el('span', { class: 'count' }, String(n))))) : null;
@@ -1111,9 +1153,10 @@ async function datasetPage(name, query = new URLSearchParams(), added = null) {
     el('dl', { class: 'kv' }, el('dt', {}, '类型'), el('dd', { id: 'dataset-type' }, kindText(d)), el('dt', {}, '现场 / 产线'),
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
       el('dd', {}, `${d.created_by}，${when(d.created_at)}`), el('dt', {}, '备注'), el('dd', {}, d.note || '-')),
-    noClasses && write ? el('p', { class: 'warn', id: 'class-none' }, '该数据池尚未填写类别表，无法上传。请先填写类别表。') : null,
+    noClasses && write ? el('p', { class: 'warn', id: 'class-none' }, pool ? '该数据池尚未填写类别表，无法上传。请先填写类别表。'
+      : '该测试集尚未指定沿用哪个数据池的类别表，无法上传。请先在「类别表」中选择数据池。') : null,
     tabs,
-    tab === 'classes' ? classSection(d, added) : [pool ? null : el('h2', {}, '版本'), versionsTab]);
+    tab === 'classes' ? (pool ? classSection(d, added) : await followSection(d, added)) : [tabbed ? null : el('h2', {}, '版本'), versionsTab]);
 }
 
 // How the server made a version from its parent (version.ops), in a few words.
@@ -1185,7 +1228,8 @@ async function versionPage(name, number, query) {
   const writer = !dir && can('datasets.write');
   // folders are added to the newest version only: the page of an older one does not offer it
   const owner = writer && version.kind !== 'trainset' && version.kind !== 'batch' ? await api.dataset(version.dataset) : null;
-  const addable = owner && owner.latest && owner.latest.number === version.number && !(owner.kind === 'pool' && !owner.classes.length);
+  const addable = owner && owner.latest && owner.latest.number === version.number
+    && !((owner.kind === 'pool' || owner.kind === 'test') && !owner.classes.length);  // no table yet: no upload
   show(crumbsFor(version, dir, place),
     el('div', { class: 'page-head' }, el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version),
       snapshot && flat && !dir ? info(['此处的目录结构与 fw get 默认取回的结构一致：train 中有标注框的图片位于 train/images，没有标注框的图片位于 neg_train；',
@@ -4638,8 +4682,9 @@ export function eventText(action, detail) {
   const short = (v, n) => (v ? String(v).slice(0, n) : '');
   const job = d.job_id ? `任务 ${d.job_id}` : '';
   switch (action) {
-    case 'dataset.create': return join(KIND_NAMES[d.kind] || d.kind, place, d.classes && d.classes.length ? said('类别', d.classes.join('、')) : '');
+    case 'dataset.create': return join(KIND_NAMES[d.kind] || d.kind, place, d.classes && d.classes.length ? said('类别', d.classes.join('、')) : '', said('沿用数据池的类别表', d.classes_from));
     case 'dataset.classes': return join(said('添加', (d.added || []).join('、')), d.count != null ? `共 ${d.count} 个类别` : '');
+    case 'dataset.classes_from': return said('沿用数据池的类别表', d.pool);
     case 'version.create': return join(d.file_count != null ? `${d.file_count} 个文件，${sizeText(d.total_bytes || 0)}` : '', said('来源', sourceText(d.source)));
     case 'version.label': case 'model_version.label': return join(`版本号 ${d.label}`, said('备注', d.note));
     case 'version.unlabel': case 'model_version.unlabel': return join(`版本号 ${d.label}`, said('原因', d.note));
@@ -4787,21 +4832,36 @@ async function datasetNewPage(query) {
     info(['上传到数据池的标注只能使用类别表中的类别；含表外类别或无法读取的标注将被拒收。',
       'YOLO txt 标注中的类别编号即类别在表中的序号（从 0 开始）。创建后只能在表的末尾添加类别，不能删除、改名或调整顺序。',
       '对应命令行选项 fw dataset create --classes。'], '类别表的说明')), classes.box);
+  const pools = (await api.datasets({ kind: 'pool' }));
+  const from = el('select', { id: 'dataset-classes-from' });
+  const fromRow = el('div', { class: 'label', id: 'dataset-from-row' }, el('span', { class: 'name' }, '类别表',
+    info(['测试集沿用所属产线一个数据池的类别表，上传时按该表核对标注，含表外类别或无法读取的标注将被拒收；不属于任何产线的测试集可选择任一数据池。',
+      '该表随数据池在末尾添加类别而增长。创建后不能更改。', '对应命令行选项 fw dataset create --classes-from。'], '测试集类别表说明')), from);
   const msg = el('div');
   const sync = () => {
     none.disabled = kind.value === 'pool';  // a pool belongs to a line
     if (none.disabled && !site.value && site.options.length > 1) { site.selectedIndex = 1; site.dispatchEvent(new Event('change')); }
     classRow.hidden = kind.value !== 'pool';  // only a pool has a class table
+    fromRow.hidden = kind.value !== 'test';   // a test set follows the table of a pool of its line
+    const names = poolChoices(pools, site.value, line.value);
+    const was = from.value;
+    from.replaceChildren(el('option', { value: '' }, names.length ? '选择数据池' : '该产线暂无数据池'), ...names.map((n) => el('option', { value: n }, n)));
+    if (names.includes(was)) from.value = was;
+    else if (names.length === 1) from.value = names[0];
   };
   kind.addEventListener('change', sync);
+  site.addEventListener('change', sync);
+  line.addEventListener('change', sync);
   sync();
   const go = async (ev) => {
     ev.preventDefault();
     const pool = kind.value === 'pool';
+    const test = kind.value === 'test';
     if (pool && !classes.names().length) { msg.replaceChildren(errorBox('请填写数据池的类别表，每行一个类别名。')); return; }
+    if (test && !from.value) { msg.replaceChildren(errorBox('请选择测试集沿用哪个数据池的类别表。')); return; }
     try {
       const d = await api.createDataset({ name: name.value.trim(), kind: kind.value, site: site.value, line: line.value, note: note.value.trim(),
-        ...(pool ? { classes: classes.names() } : {}) });
+        ...(pool ? { classes: classes.names() } : {}), ...(test ? { classes_from: from.value } : {}) });
       location.hash = hrefOf(['upload', d.name]);
     } catch (e) { msg.replaceChildren(errorBox(e)); }
   };
@@ -4811,9 +4871,9 @@ async function datasetNewPage(query) {
     el('form', { class: 'panel form narrow', onsubmit: go }, msg,
       noLines ? el('p', { class: 'muted' }, '尚未登记产线，数据池只能建在已登记的产线下。',
         can('sites.write') ? el('a', { href: '#/places' }, '登记现场和产线') : '请联系管理员或算法工程师登记。') : null,
-      field('类型', kind, ['数据池：一条产线采集的数据，此后按批次追加目录。', '测试集：用于评估模型，可不属于任何产线。',
+      field('类型', kind, ['数据池：一条产线采集的数据，此后按批次追加目录。', '测试集：用于评估模型，沿用数据池的类别表，可不属于任何产线。',
         '回归集：每次发布前必须通过的一组图片，可不属于任何产线。', '其他：不属于以上类型的数据。']),
-      el('label', {}, '名称', name), el('label', {}, '现场', site), el('label', {}, '产线', line), classRow, el('label', {}, '备注', note),
+      el('label', {}, '名称', name), el('label', {}, '现场', site), el('label', {}, '产线', line), classRow, fromRow, el('label', {}, '备注', note),
       el('div', { class: 'label' }, el('span'), el('div', { class: 'row' }, el('button', { id: 'dataset-go', class: 'primary', type: 'submit' }, '创建并上传')))));
 }
 
@@ -5182,7 +5242,7 @@ async function overviewPage(query) {
     })) : el('p', { class: 'muted' }, '该产线暂无模型。');
 
   // what is done most to a pool or test set of the line, without opening it first
-  const dataMenu = (d) => !can('datasets.write') || d.kind === 'trainset' ? null : moreMenu(d.name, [
+  const dataMenu = (d) => !can('datasets.write') || d.kind === 'trainset' || (d.kind === 'test' && !d.classes_from) ? null : moreMenu(d.name, [
     { icon: 'plus', text: '上传新增目录', href: hrefOf(['add', d.name]), id: `add-${d.name}` },
     d.kind === 'pool' && d.latest ? { icon: 'plus', text: '建立训练集快照', href: hrefOf(['trainset-new'], { from: d.latest.ref }) } : null,
   ].filter(Boolean));

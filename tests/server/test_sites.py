@@ -199,10 +199,10 @@ def test_a_line_has_one_benchmark_test_set_and_keeps_every_setting(api, make_api
     field = make_api('field')
     assert field.benchmark(site, 'TX') == {'site': site, 'line': 'TX', 'current': None, 'history': []}
     first, second, elsewhere, pool_name, loose, regression = (f'{p}-{uuid.uuid4().hex[:8]}' for p in 'ABCDEF')
-    api.create_dataset(first, site, 'TX', 'test', '')
+    api.create_dataset(pool_name, site, 'TX', 'pool', '', classes=helpers.CLASSES)
+    api.create_dataset(first, site, 'TX', 'test', '', classes_from=pool_name)   # its labels: those of the line's pool
     api.create_dataset(second, site.lower(), 'tx', 'test', '')
     api.create_dataset(elsewhere, site, 'TY', 'test', '')
-    api.create_dataset(pool_name, site, 'TX', 'pool', '', classes=helpers.CLASSES)
     api.create_dataset(loose, '', '', 'test', '')
     api.create_dataset(regression, '', '', 'regression', '')
     out = api.set_benchmark(f'{site.lower()}/tx', first, '每月更新')

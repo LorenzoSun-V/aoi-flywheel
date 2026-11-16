@@ -92,7 +92,13 @@ def test_other_datasets_have_no_class_table(api, tmp_path):
     with pytest.raises(ApiError, match='不是数据池；只有数据池有类别表'):
         api.add_classes(name, CLASSES)
     root = folder(tmp_path, {'a.png': image(), 'a.json': label('anything')})
-    assert ops.import_folder(api, name, root, echo=quiet)['number'] == 1  # a test set is labelled as it is
+    # a test set follows the table of a pool (test_a_test_set_follows_the_class_table_of_a_pool); without one
+    # it takes no upload
+    with pytest.raises(ApiError, match='尚未指定沿用哪个数据池的类别表'):
+        ops.import_folder(api, name, root, echo=quiet)
+    regression = f'C-{uuid.uuid4().hex[:8]}'
+    api.create_dataset(regression, '', '', 'regression', '')
+    assert ops.import_folder(api, regression, root, echo=quiet)['number'] == 1  # a regression set is labelled as it is
 
 
 def test_added_folders_are_checked_and_the_preview_says_why(api, tmp_path):
@@ -264,3 +270,88 @@ def test_what_a_file_says_about_classes():
     assert formats.label_classes('list', b'scratch\ndent\n\n', table) == (None, [])
     assert formats.label_classes('list', b'scratch\n\ndent\n', table)[0] == '第 2 行是 空行，数据池类别表的第 2 个是 dent'
     assert formats.label_classes('json', b'{"shapes": [1]}', table) == ('有形状没有类别名', [])
+
+
+# --- test sets follow the table of a pool (0020) -----------------------------------------------------------
+def test_a_test_set_follows_the_class_table_of_a_pool(api, make_api, sql, tmp_path):
+    """A test set names the pool of its line whose table it follows, when it is made: uploads are checked
+    against that table (it grows with the pool), txt included; the table is the pool's, not a copy. Only a data
+    pool of the same line (any pool for a test set of no line), with a table; only a test set; field cannot."""
+    pool = new_pool(api)
+    other_line = f'C-{uuid.uuid4().hex[:8]}'
+    from test_trainsets import register_place
+    register_place('SES', 'TY')
+    api.create_dataset(other_line, 'SES', 'TY', 'pool', '', classes=CLASSES)
+    empty = f'C-{uuid.uuid4().hex[:8]}'
+    sql.execute("INSERT INTO datasets (name, site, line, kind, note, created_by) "
+                "SELECT %s, 'SES', 'TX', 'pool', '', created_by FROM datasets WHERE name = %s", (empty, pool))
+    regression = f'C-{uuid.uuid4().hex[:8]}'
+    api.create_dataset(regression, 'SES', 'TX', 'regression', '')
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    for source, why in ((other_line, '请选择同一产线的数据池'), (regression, '不是数据池'), (empty, '尚无类别表'),
+                        ('nope-' + name, '不存在'), ('  ', '请选择沿用哪个数据池的类别表')):
+        with pytest.raises(ApiError, match=why):
+            api.create_dataset(name, 'SES', 'TX', 'test', '', classes_from=source)
+    with pytest.raises(ApiError, match='只有测试集沿用数据池的类别表'):
+        api.create_dataset(name, 'SES', 'TX', 'regression', '', classes_from=pool)
+    with pytest.raises(ApiError) as e:
+        make_api('field').create_dataset(name, 'SES', 'TX', 'test', '', classes_from=pool)
+    assert e.value.status == 403
+    with pytest.raises(ApiError):
+        api.dataset(name)                                                 # nothing was left behind
+    d = api.create_dataset(name, 'SES', 'TX', 'test', '', classes_from=pool)
+    assert d['classes_from'] == pool and d['classes'] == CLASSES
+    assert [x for x in api.datasets(kind='test') if x['name'] == name][0]['classes_from'] == pool
+    # uploads: a class the table lacks is refused, naming the pool; a txt label is read by the pool's numbering
+    bad = folder(tmp_path, {'a.png': image(), 'a.json': label('crack')})
+    with pytest.raises(ApiError, match=f'不符合数据池 {pool} 的类别表'):
+        ops.import_folder(api, name, bad, echo=quiet)
+    with pytest.raises(ApiError, match=f'不符合数据池 {pool} 的类别表'):
+        ops.import_folder(api, name, folder(tmp_path, {'b.png': image(), 'b.txt': b'5 0.5 0.5 0.1 0.1\n'}), echo=quiet)
+    good = folder(tmp_path, {'a.png': image(), 'a.json': label('dent'), 'b.png': image(), 'b.txt': b'0 0.5 0.5 0.1 0.1\n'})
+    assert ops.import_folder(api, name, good, echo=quiet)['number'] == 1
+    # the pool's table grows: the test set takes the new class too
+    api.add_classes(pool, ['crack'])
+    assert api.dataset(name)['classes'] == CLASSES + ['crack']
+    assert ops.import_folder(api, name, bad, force=True, echo=quiet)['number'] == 2
+    # it never changes; the database holds the same rules
+    with pytest.raises(ApiError, match=f'已沿用数据池 {pool} 的类别表，不能更改') as e:
+        api.follow_classes(name, pool)
+    assert e.value.status == 409
+    for statement, args in (('UPDATE datasets SET classes_from = (SELECT id FROM datasets WHERE name = %s) WHERE name = %s', (empty, name)),
+                            ('UPDATE datasets SET classes_from = NULL WHERE name = %s', (name,)),
+                            ('UPDATE datasets SET classes_from = (SELECT id FROM datasets WHERE name = %s) WHERE name = %s', (pool, regression))):
+        with pytest.raises(psycopg.errors.RaiseException):
+            sql.execute(statement, args)
+    # a test set of no line may follow the pool of any line
+    loose = f'T-{uuid.uuid4().hex[:8]}'
+    assert api.create_dataset(loose, '', '', 'test', '', classes_from=other_line)['classes_from'] == other_line
+    ev = [e for e in api.events(q=name, limit=20)['events'] if e['action'] == 'dataset.create']
+    assert ev[0]['detail']['classes_from'] == pool
+
+
+def test_a_test_set_made_before_names_its_pool_once_and_its_newest_version_is_checked(api, make_api, tmp_path):
+    """A test set from before (no table) takes no upload; an administrator or algorithm engineer names its pool
+    once, and is told what in its newest version does not fit, to be put right with the next upload."""
+    pool = new_pool(api)
+    name = f'T-{uuid.uuid4().hex[:8]}'
+    api.create_dataset(name, 'SES', 'TX', 'test', '')
+    files = {'a.png': image(), 'a.json': label('dent'), 'b.png': image(), 'b.json': label('crack')}
+    with pytest.raises(ApiError, match='尚未指定沿用哪个数据池的类别表'):
+        ops.import_folder(api, name, folder(tmp_path, files), echo=quiet)
+    with mock.patch.object(server_datasets, 'class_problems', return_value=None):   # a version from before 0020
+        ops.import_folder(api, name, folder(tmp_path, files), echo=quiet)
+    assert api.dataset(name)['classes'] == [] and api.dataset(name)['classes_from'] is None
+    with pytest.raises(ApiError) as e:
+        make_api('field').follow_classes(name, pool)
+    assert e.value.status == 403
+    with pytest.raises(ApiError, match='不是测试集'):
+        api.follow_classes(pool, pool)
+    out = api.follow_classes(name, pool)
+    assert out['dataset']['classes_from'] == pool and out['dataset']['classes'] == CLASSES
+    check = out['latest_check']
+    assert check['ref'] == f'{name}@1' and check['complete'] and 'crack' in check['problem'] and pool in check['problem']
+    # the next upload is checked in full, the files it keeps included
+    with pytest.raises(ApiError, match='crack'):
+        ops.import_folder(api, name, folder(tmp_path, {**files, 'c.png': image()}), echo=quiet)
+    assert [e for e in api.events(q=name, limit=20)['events'] if e['action'] == 'dataset.classes_from'][0]['detail'] == {'pool': pool}

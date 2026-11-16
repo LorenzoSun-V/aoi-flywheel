@@ -91,9 +91,10 @@ def _labelled(conn, versions: List[dict]) -> List[dict]:
 
 _DATASET = """
 SELECT d.id, d.name, d.site, d.line, d.kind, d.note, u.name AS created_by, d.created_at,
+       d.classes_from, cf.name AS classes_from_name,
        (SELECT count(*) FROM versions v WHERE v.dataset_id = d.id) AS version_count,
        (SELECT v.id FROM versions v WHERE v.dataset_id = d.id ORDER BY v.number DESC LIMIT 1) AS latest_id
-FROM datasets d JOIN users u ON u.id = d.created_by
+FROM datasets d JOIN users u ON u.id = d.created_by LEFT JOIN datasets cf ON cf.id = d.classes_from
 """
 
 
@@ -106,7 +107,9 @@ def _datasets(conn, rows: List[dict]) -> List[dict]:
             latest[v['id']] = v
     return [{'id': r['id'], 'name': r['name'], 'site': r['site'], 'line': r['line'], 'kind': r['kind'],
              'note': r['note'], 'created_by': r['created_by'], 'created_at': _stamp(r['created_at']),
-             'version_count': r['version_count'], 'latest': latest.get(r['latest_id'])} for r in rows]
+             'version_count': r['version_count'], 'latest': latest.get(r['latest_id']),
+             # a test set: the pool whose class table it follows (0020); None for the rest
+             'classes_from': r['classes_from_name']} for r in rows]
 
 
 # --- sites and lines -------------------------------------------------------------------------------------
@@ -273,19 +276,31 @@ def list_datasets(conn, site: str = '', line: str = '', q: str = '', kind: str =
 
 
 def get_dataset(conn, name: str) -> dict:
-    """With 'classes': the class table of a pool ([] for any other kind, and for a pool that has none)."""
+    """With 'classes': the class table of a pool, or of the pool a test set follows ([] for any other kind, and
+    for a pool or test set that has none yet)."""
     rows = conn.execute(_DATASET + ' WHERE lower(d.name) = lower(%s)', (name,)).fetchall()
     if not rows:
         raise DatasetError(404, f'数据集 {name} 不存在；请先用 fw dataset create 建立')
     out = _datasets(conn, rows)[0]
-    out['classes'] = classes_of(conn, out['id'])
+    owner = table_owner(rows[0])
+    out['classes'] = classes_of(conn, owner) if owner is not None else []
     return out
 
 
+def table_owner(d: dict) -> Optional[int]:
+    """The dataset whose class table d's labels are checked against: a pool's own, the pool a test set follows
+    (classes_from, 0020); None for the other kinds and for a test set that follows none yet."""
+    if d['kind'] == 'pool':
+        return d['id']
+    return d.get('classes_from') if d['kind'] == 'test' else None
+
+
 def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = '', kind: str = 'pool',
-                   note: str = '', internal: bool = False, classes: Optional[List[str]] = None) -> dict:
+                   note: str = '', internal: bool = False, classes: Optional[List[str]] = None,
+                   classes_from: Optional[str] = None) -> dict:
     """internal: also allow kind 'trainset' (only trainsets.py creates those). classes: the class table of a
-    new pool, written in the same transaction."""
+    new pool, written in the same transaction. classes_from: the pool whose class table a new test set
+    follows."""
     if not NAME.match(name or ''):
         raise DatasetError(400, '名称只能用字母、数字和 . _ -，以字母或数字开头，最多 64 个字符')
     if kind not in KINDS and not (internal and kind == 'trainset'):
@@ -294,16 +309,22 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
         if kind != 'pool':
             raise DatasetError(400, '只有数据池有类别表')
         classes = check_class_names(classes)
+    if classes_from and kind != 'test':
+        raise DatasetError(400, '只有测试集沿用数据池的类别表')
     if not internal:  # a data pool belongs to a line; a test set may belong to none
         site, line = place(conn, site, line, required=kind == 'pool')
     with conn.transaction():
+        source = _classes_source(conn, classes_from, name, site, line) if classes_from else None
         dataset_id = _insert_dataset(conn, user_id, name, site, line, kind, note)
         if dataset_id is None:
             raise DatasetError(409, f'{name} 已存在（数据集、训练集快照和标注批次共用名称，不区分大小写）')
         if classes:
             _insert_classes(conn, user_id, dataset_id, 0, classes)
+        if source:
+            conn.execute('UPDATE datasets SET classes_from = %s WHERE id = %s', (source['id'], dataset_id))
         events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line,
-                      **({'classes': classes} if classes else {}))
+                      **({'classes': classes} if classes else {}),
+                      **({'classes_from': source['name']} if source else {}))
     return get_dataset(conn, name)
 
 
@@ -330,6 +351,53 @@ LATEST_CHECK_SECONDS = 10.0
 def classes_of(conn, dataset_id: int) -> List[str]:
     return [r['name'] for r in conn.execute('SELECT name FROM dataset_classes WHERE dataset_id = %s '
                                             'ORDER BY position', (dataset_id,))]
+
+
+def _classes_source(conn, pool: Any, name: str, site: str, line: str) -> dict:
+    """The pool whose class table the test set name (of site/line, or of no line) follows: a data pool with a
+    class table, of the test set's line when it has one."""
+    if not isinstance(pool, str) or not pool.strip():
+        raise DatasetError(400, '请选择沿用哪个数据池的类别表')
+    row = conn.execute('SELECT id, name, kind, site, line FROM datasets WHERE lower(name) = lower(%s)',
+                       (pool.strip(),)).fetchone()
+    if row is None:
+        raise DatasetError(404, f'数据集 {pool} 不存在')
+    if row['kind'] != 'pool':
+        raise DatasetError(400, f'{row["name"]} 不是数据池；测试集只能沿用数据池的类别表')
+    if line and (row['site'].lower() != site.lower() or row['line'].lower() != line.lower()):
+        raise DatasetError(400, f'{row["name"]} 属于 {row["site"]}/{row["line"]}，不属于测试集 {name} 所在的 '
+                                f'{site}/{line}；请选择同一产线的数据池')
+    if not classes_of(conn, row['id']):
+        raise DatasetError(400, f'数据池 {row["name"]} 尚无类别表；请先在网页的数据池页面填写类别表')
+    return row
+
+
+def follow_classes(conn, store: Store, user_id: int, name: str, pool: Any) -> dict:
+    """Name, once, the pool whose class table a test set made without one follows (0020). Like the first
+    table of a pool (add_classes), the test set's newest version is checked against it: 'latest_check' says what
+    in it does not fit, to be put right with the next upload, which is checked in full."""
+    with conn.transaction():
+        d = conn.execute('SELECT id, name, kind, site, line, classes_from FROM datasets '
+                         'WHERE lower(name) = lower(%s) FOR UPDATE', (name,)).fetchone()
+        if d is None:
+            raise DatasetError(404, f'数据集 {name} 不存在')
+        if d['kind'] != 'test':
+            raise DatasetError(400, f'{d["name"]} 不是测试集；只有测试集沿用数据池的类别表')
+        if d['classes_from'] is not None:
+            was = conn.execute('SELECT name FROM datasets WHERE id = %s', (d['classes_from'],)).fetchone()['name']
+            raise DatasetError(409, f'{d["name"]} 已沿用数据池 {was} 的类别表，不能更改')
+        source = _classes_source(conn, pool, d['name'], d['site'], d['line'])
+        conn.execute('UPDATE datasets SET classes_from = %s WHERE id = %s', (source['id'], d['id']))
+        events.record(conn, user_id, 'dataset.classes_from', d['name'], pool=source['name'])
+    dataset = get_dataset(conn, d['name'])
+    out = {'dataset': dataset, 'latest_check': None}
+    if dataset['latest'] is not None:
+        latest = dataset['latest']
+        problem, looked, total = class_check(conn, store, dataset, version_files(conn, latest['id']),
+                                             max_files=LATEST_CHECK_FILES, seconds=LATEST_CHECK_SECONDS)
+        out['latest_check'] = {'ref': latest['ref'], 'problem': problem, 'checked': looked, 'total': total,
+                               'complete': looked == total}
+    return out
 
 
 def check_class_names(names: Any, existing: Collection[str] = ()) -> List[str]:
@@ -422,9 +490,21 @@ def class_check(conn, store: Store, pool: dict, entries: List[Tuple[str, str, in
     """class_problems, and how far it got: (the refusal or None, label files looked at, label files to look
     at). max_files, seconds: stop after looking at that many files, or after that long (what was not looked
     at is then neither refused nor passed: only a check that saw every file may let a version be made)."""
-    if pool['kind'] != 'pool':
+    if pool['kind'] not in ('pool', 'test'):
         return None, 0, 0
-    classes = classes_of(conn, pool['id'])
+    if pool['kind'] == 'test':
+        # a test set's labels were not checked when its versions were made before it followed a table: all are read
+        checked = ()
+        row = conn.execute('SELECT d.classes_from, cf.name FROM datasets d LEFT JOIN datasets cf ON cf.id = d.classes_from '
+                           'WHERE d.id = %s', (pool['id'],)).fetchone()
+        if row is None or row['classes_from'] is None:
+            return (f'测试集 {pool["name"]} 尚未指定沿用哪个数据池的类别表；请先在网页的测试集页面「类别表」中选择'
+                    f'该产线的数据池，再上传'), 0, 0
+        classes = classes_of(conn, row['classes_from'])
+        table = {'name': row['name']}   # a refusal names the pool whose table it is
+    else:
+        table = pool
+        classes = classes_of(conn, pool['id'])
     if not classes:
         return f'数据池 {pool["name"]} 尚无类别表；请先在网页的数据池页面填写类别表，再上传', 0, 0
     todo = []
@@ -453,7 +533,7 @@ def class_check(conn, store: Store, pool: dict, entries: List[Tuple[str, str, in
             unknown.setdefault(n, []).append(path)
     if not unknown and not unreadable:
         return None, looked, len(todo)
-    return _class_refusal(pool, classes, unknown, unreadable), looked, len(todo)
+    return _class_refusal(table, classes, unknown, unreadable), looked, len(todo)
 
 
 def _class_refusal(pool: dict, classes: List[str], unknown: Dict[str, List[str]], unreadable: List[str]) -> str:
@@ -612,7 +692,7 @@ def create_version(conn, store: Store, user_id: int, name: str, manifest_sha256:
     target = None if classes_checked else conn.execute(
         'SELECT d.id, d.name, d.kind, (SELECT v.id FROM versions v WHERE v.dataset_id = d.id ORDER BY v.number DESC '
         'LIMIT 1) AS latest_id FROM datasets d WHERE lower(d.name) = lower(%s)', (name,)).fetchone()
-    if target is not None and target['kind'] == 'pool':
+    if target is not None and target['kind'] in ('pool', 'test'):
         # a table only grows, so what fits it now still fits when the version is made below
         problem = class_problems(conn, store, target, entries, checked_contents(conn, target['id'], target['latest_id']))
         if problem:

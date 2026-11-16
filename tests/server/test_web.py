@@ -19,6 +19,15 @@ from test_jobs import fake_conda, make_worker  # noqa: F401
 from test_models import model, snapshot  # noqa: F401
 
 
+
+def new_test_set(api, name, site, line, pool_name=None):
+    """A test set of site / line, following the class table of pool_name, a pool of that line, or else of a new
+    one (0020)."""
+    if pool_name is None:
+        pool_name = f'{name}-classes'
+        api.create_dataset(pool_name, site, line, 'pool', '', classes=helpers.CLASSES)
+    return api.create_dataset(name, site, line, 'test', '', classes_from=pool_name)
+
 def real_png(w: int, h: int, seed: int) -> bytes:
     """A PNG a browser can show: w x h, one gray level per row, seed makes the content unique."""
     def chunk(kind, data):
@@ -289,7 +298,7 @@ def test_evaluations_start_on_the_benchmark_and_data_is_picked_not_typed(service
         register_place(site, line)
     seed = int.from_bytes(os.urandom(2), 'big')
     bench = f'{site}-test'
-    api.create_dataset(bench, site, 'L1', 'test', '')
+    new_test_set(api, bench, site, 'L1')
     add_version(api, tmp_path, bench, {f'D{d}/img{i}.{x}': (real_png(64, 32, seed + 10 * d + i) if x == 'png' else label('scratch'))
                                        for d in (1, 2) for i in range(d) for x in ('png', 'json')})
     api.set_benchmark(f'{site}/L1', bench)
@@ -570,7 +579,7 @@ def test_a_line_is_seen_at_a_glance(service, tokens, api, make_api, make_worker,
     register(api, model, snap, files_in(tmp_path))
     ops.register_eval(api, f'{model}@1', f'{snap["ref"]}:test', deteval=deteval_out(tmp_path), echo=quiet)  # not on the benchmark
     bench = f'B-{os.urandom(4).hex()}'
-    api.create_dataset(bench, site, 'TX', 'test', '')
+    new_test_set(api, bench, site, 'TX', a)
     ops.import_folder(api, bench, write_tree(tmp_path / 'bench', {'x.png': real_png(64, 32, 7)}), echo=quiet)
     api.set_benchmark(f'{site}/TX', bench)
     e = _on(api, tmp_path, f'{model}@1', f'{bench}@1', {'mAP50': 0.7, 'images': 1})
@@ -625,8 +634,8 @@ def test_models_of_a_line_are_compared_on_its_benchmark_test_set(service, tokens
     a = pool(api, tmp_path / 'a', sample_files('2026-09', 4), site=site, line='TX')
     ty = [pool(api, tmp_path / f'ty{i}', sample_files('2026-09', 1), site=site, line='TY') for i in range(2)]
     first, second, other, stray = (f'{p}-{os.urandom(4).hex()}' for p in 'ABCD')
-    for name, line in ((first, 'TX'), (second, 'TX'), (other, 'TY')):
-        api.create_dataset(name, site, line, 'test', '')
+    for name, line, of in ((first, 'TX', a), (second, 'TX', a), (other, 'TY', ty[0])):
+        new_test_set(api, name, site, line, of)
         ops.import_folder(api, name, write_tree(tmp_path / name, {'x.png': real_png(64, 32, len(name) + ord(name[0]))}), echo=quiet)
     api.create_dataset(stray, site, 'TX', 'regression', '')                      # not a test set: not offered
     snap = make(api, f'T-{os.urandom(4).hex()}', [f'{a}@1'])
@@ -898,7 +907,7 @@ def test_the_overview_of_a_line_reads_at_a_glance_and_its_rows_have_a_menu(servi
     data = pool(api, tmp_path / 'a', {**sample_files('2026-09', 6), **sample_files('2026-10', 3)}, name=f'SES-TX-{tag}')
     snap = make(api, f'SES-TX-det-{tag}', [f'{data}@1'], test_dirs=['2026-10'])
     test = f'SES-TX-test-{tag}'
-    api.create_dataset(test, 'SES', 'TX', 'test', '')
+    new_test_set(api, test, 'SES', 'TX', data)
     from test_trainsets import add_version
     add_version(api, tmp_path / 't', test, sample_files('2026-11', 2))
     detr, yolo, seg, plain = 'SES-TX-detr', 'SES-TX-yolo', 'SES-TX-seg', 'SES-TX-plain'
@@ -1065,6 +1074,8 @@ def test_what_only_the_command_line_did_is_done_in_the_browser(service, tokens, 
     assert seen['poolNoneOff'] and seen['poolAt'] == ['SES', 'TX'] and seen['noLine']
     made = api.dataset(f'T-{site}')
     assert made['kind'] == 'test' and made['site'] == '' and made['line'] == ''
+    assert seen['fromShown'] and seen['noFrom'] == '请选择测试集沿用哪个数据池的类别表。'
+    assert made['classes_from'] == seen['fromPicked'] == labelled and made['classes'] == helpers.CLASSES
     assert '已存在' in seen['taken']
     assert seen['badCode'].strip() and f'{site}/L1' not in json.dumps(api.sites())
     lines = {(s['code'], x['code']): x['name'] for s in api.sites()['sites'] for x in s['lines']}
@@ -1596,7 +1607,7 @@ def test_folders_are_added_from_the_newest_version_and_from_the_overview(service
     data = pool(api, tmp_path / 'a', sample_files('2026-09', 3), line=line, name=f'SES-{line}-pool')
     add_version(api, tmp_path / 'b', data, sample_files('2026-10', 2))
     test = f'SES-{line}-test'
-    api.create_dataset(test, 'SES', line, 'test', '')
+    new_test_set(api, test, 'SES', line, data)
     add_version(api, tmp_path / 't', test, sample_files('2026-11', 2))
     r = subprocess.run(['node', str(WEB_TESTS / 'addfrom.cjs'), service.url + '/', tokens['algo'], tokens['field'], data, test,
                         'SES', line], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
@@ -1611,3 +1622,40 @@ def test_folders_are_added_from_the_newest_version_and_from_the_overview(service
     assert seen['testMenu'] == [['上传新增目录', f'#/add/{test}']]
     assert seen['opened'] == f'#/add/{data}'
     assert seen['fieldNewest'] == [] and dict(seen['fieldRows']) == {data: 0, test: 0}
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_a_test_set_from_before_names_the_pool_whose_class_table_it_follows(service, tokens, api, make_api, tmp_path):
+    """A test set made before test sets followed a pool's class table takes no upload; its class tab offers the
+    pools of its line and names one, once; the newest version is checked against the table."""
+    from unittest import mock
+    from fw import ops
+    from fwserver import datasets as server_datasets
+    from helpers import quiet
+    tag = os.urandom(3).hex()
+    pool_name = f'P-{tag}'
+    api.create_dataset(pool_name, 'SES', 'TX', 'pool', '', classes=helpers.CLASSES)
+    elsewhere = f'Q-{tag}'
+    from test_trainsets import register_place
+    register_place('SES', 'TY')
+    api.create_dataset(elsewhere, 'SES', 'TY', 'pool', '', classes=helpers.CLASSES)
+    name = f'T-{tag}'
+    api.create_dataset(name, 'SES', 'TX', 'test', '')
+    with mock.patch.object(server_datasets, 'class_problems', return_value=None):   # a version from before
+        ops.import_folder(api, name, write_tree(tmp_path / 't', {'a.png': real_png(64, 32, 5), 'a.json': label('crack')}),
+                          echo=quiet)
+    r = subprocess.run(['node', str(WEB_TESTS / 'follow.cjs'), service.url + '/', tokens['algo'], tokens['field'], name, pool_name],
+                       capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['none'] == '该测试集尚未指定沿用哪个数据池的类别表，无法上传。请先在「类别表」中选择数据池。'
+    assert seen['upload'] == 0 and seen['tabOn'] == 'on'
+    assert pool_name in seen['choices'] and elsewhere not in seen['choices']
+    assert seen['unpicked'] == '请选择数据池。'
+    assert seen['head'].startswith(f'沿用数据池 {pool_name} 的类别表，共 {len(helpers.CLASSES)} 个类别')
+    assert seen['rows'] == helpers.CLASSES and seen['form'] == 0
+    assert f'{name}@1 中有不符合类别表的标注' in seen['check'] and 'crack' in seen['check']
+    assert seen['uploadAfter'] == 1
+    assert seen['field'] == {'rows': len(helpers.CLASSES), 'form': 0}
+    assert api.dataset(name)['classes_from'] == pool_name
