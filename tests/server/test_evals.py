@@ -185,6 +185,8 @@ def test_eval_on_folders_of_a_pool(api, gpu, model, snapshot, tmp_path):  # noqa
     assert e['job_id'] == job['id'] and e['runner'] == r['ref'] and e['tool'] == 'aoi-deteval'
     assert e['tool_version'] == '0.3.0' and e['metrics']['images'] == 6 and e['metrics']['boxes'] == 5
     assert e['metrics']['R'] is None and e['metrics']['thresholds'] == {'f1': 0.3}  # NaN kept as null
+    assert done['result'] == {'eval_id': e['id'], 'metrics': {  # the job's result: detection's key metrics
+        k: e['metrics'].get(k) for k in ('images', 'boxes', 'mAP50', 'mAP50-95', 'P', 'R')}}
     files = {f['path']: f['sha256'] for f in e['files']}
     name = p['deteval']['name']
     assert {'metrics.json', 'files/summary.json', 'files/run_info.json', 'files/eval_sets.yaml',

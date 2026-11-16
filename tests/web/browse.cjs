@@ -27,6 +27,9 @@ const { chromium } = require('playwright');
   });
   await page.waitForSelector('#pools');
   seen.all = await lists();
+  // a snapshot's task beside its name (a pool has none)
+  seen.tasks = { head: await page.$$eval('#snapshots + table tr:first-child th', (c) => c.map((x) => x.textContent)),
+    rows: await page.$$eval('#snapshots + table tr:not(.group-head)', (rows) => rows.slice(1).map((r) => [r.cells[0].textContent, r.cells[1].textContent])) };
   seen.tree = await page.$$eval('#places li', (items) => items.map((x) => x.textContent));
   await page.click(`#places li.site a:has-text("${site}")`);
   await page.waitForFunction(() => location.hash.includes('site=') && document.querySelector('#places li.site a.on'));

@@ -22,13 +22,12 @@ from __future__ import annotations
 import re
 from typing import Any, List, Optional
 
-from fw.contract import ContractError, eval_dirs, eval_selection, manifest_bytes
+from fw.contract import TASKS, ContractError, eval_dirs, eval_selection, manifest_bytes
 
 from . import datasets, formats, jobs, models, predictions, trainsets
 from .datasets import DatasetError
 from .store import Store, StoreError
 
-TOOL = 'aoi-deteval'
 DETEVAL_NAME = re.compile(r'[^A-Za-z0-9._+-]')
 
 
@@ -83,7 +82,7 @@ def _known_names(store: Store, files: List[tuple], mv: dict) -> None:
         if data is None:
             raise DatasetError(503, f'服务器上缺少 {path} 的内容，请先运行 fw-server verify')
         try:
-            parsed = formats.parse_json(data.decode('utf-8-sig'))
+            parsed = formats.of(mv['task']).parse_json(data.decode('utf-8-sig'))  # read as the model's task
         except UnicodeDecodeError:
             parsed = '不是 UTF-8'
         if isinstance(parsed, str):
@@ -193,8 +192,8 @@ def _retry(conn, store: Store, user: dict, job_id: int, runner: Optional[str]) -
                                                           'dirs': data.get('dirs') or [], 'conf': p['conf']})
 
 
-def _note(p: dict, job_id: int) -> str:
-    return '；'.join([f'评估任务 {job_id}（{TOOL}，在推理环境 {p["runner"]["conda_env"]} 中）'] + p['warnings'])
+def _note(p: dict, job_id: int, tool: str) -> str:
+    return '；'.join([f'评估任务 {job_id}（{tool}，在推理环境 {p["runner"]["conda_env"]} 中）'] + p['warnings'])
 
 
 def finish(conn, store: Store, job_id: int, token: str, outcome: str, result: Any = None, error: str = '') -> dict:
@@ -213,14 +212,15 @@ def finish(conn, store: Store, job_id: int, token: str, outcome: str, result: An
                 raise DatasetError(400, '评估结果中须包含文件清单')
             p = row['params']
             tool_version = result.get('tool_version') or ''
+            task = TASKS[models.get_model_version_by_id(conn, p['model']['id'])['task']]
             e = models.register_eval(
                 conn, store, row['submitted_by'], *_ref(p['model']['ref'], '模型版本'),
-                p['data']['id'], p['data']['split'], result['files'], tool=TOOL,
-                tool_version=tool_version if isinstance(tool_version, str) else '', note=_note(p, job_id),
+                p['data']['id'], p['data']['split'], result['files'], tool=task.eval_tool,
+                tool_version=tool_version if isinstance(tool_version, str) else '', note=_note(p, job_id, task.eval_tool),
                 dirs=p['data']['dirs'], job_id=job_id, runner_version_id=row['runner_version_id'],
                 images=p['data']['images'])
             result = {'eval_id': e['id'], 'metrics': {k: e['metrics'].get(k) for k in
-                                                      ('images', 'boxes', 'mAP50', 'mAP50-95', 'P', 'R')}}
+                                                      ('images', 'boxes', *task.key_metrics)}}
         elif row['kind'] == 'predict' and outcome == 'done':
             result = predictions.register(conn, store, row, result)
         return jobs.finish(conn, job_id, token, outcome, result, error)

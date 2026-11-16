@@ -944,11 +944,11 @@ async function datasetsPage(query) {
   renderNav();
   const [rows, tree] = await Promise.all([api.datasets(scopeQuery(at)), api.sites()]);
   // by site and line (a snapshot that took data from several lines has none: 跨产线)
-  const table = (list, kindColumn) => groupedTable(kindColumn ? 'pool-list' : 'snapshot-list', el('tr', {}, [['名称'], kindColumn ? ['类型'] : null, ['版本数', 'num'],
+  const table = (list, kindColumn) => groupedTable(kindColumn ? 'pool-list' : 'snapshot-list', el('tr', {}, [['名称'], kindColumn ? ['类型'] : ['任务'], ['版本数', 'num'],
     ['最新版本'], ['文件', 'num'], ['大小', 'num'], ['最新版本时间'], ['备注']]
     .filter(Boolean).map(([h, c]) => el('th', { class: c }, h))), list, (d) => el('tr', {},
     el('td', {}, el('a', { href: hrefOf(['d', d.name]) }, d.name)),
-    kindColumn ? el('td', {}, KIND_NAMES[d.kind] || d.kind) : null,
+    el('td', {}, kindColumn ? KIND_NAMES[d.kind] || d.kind : d.latest && d.latest.task ? taskTitle(d.latest.task) : '-'),
     numCell(d.version_count),
     el('td', {}, d.latest ? [el('a', { class: 'ref', href: hrefOf(['v', d.name, String(d.latest.number)]), title: d.latest.ref },
       `@${d.latest.number}`), labelChips(d.latest)] : '-'),  // the name is the row's first column
@@ -1106,7 +1106,7 @@ async function datasetPage(name, query = new URLSearchParams(), added = null) {
     t, el('span', { class: 'count' }, String(n))))) : null;
   show(crumbs('datasets', d, d.name),
     pageHead(d.name, ...actions),
-    el('dl', { class: 'kv' }, el('dt', {}, '类型'), el('dd', {}, KIND_NAMES[d.kind] || d.kind), el('dt', {}, '现场 / 产线'),
+    el('dl', { class: 'kv' }, el('dt', {}, '类型'), el('dd', { id: 'dataset-type' }, kindText(d)), el('dt', {}, '现场 / 产线'),
       el('dd', {}, [d.site, d.line].filter(Boolean).join(' / ') || '-'), el('dt', {}, '建立'),
       el('dd', {}, `${d.created_by}，${when(d.created_at)}`), el('dt', {}, '备注'), el('dd', {}, d.note || '-')),
     noClasses && write ? el('p', { class: 'warn', id: 'class-none' }, '该数据池尚未填写类别表，无法上传。请先填写类别表。') : null,
@@ -1813,6 +1813,7 @@ function snapshotSection(version) {
   return [
     el('h2', {}, '快照内容'),
     el('dl', { class: 'kv', id: 'snapshot-info' },
+      el('dt', {}, '任务'), el('dd', { id: 'snapshot-task' }, taskTitle(t.task)),
       el('dt', {}, `类别（${t.classes.length} 个）`), el('dd', {}, t.classes.map((c, i) => `${i} ${c}`).join('、')),
       el('dt', {}, '来源'), el('dd', {}, t.sources.map((ref, i) => {
         const s = splitRef(ref);
@@ -2099,7 +2100,19 @@ async function trainsetNewPage(query) {
 
 // --- models, evaluations, jobs, prediction sets -----------------------------------------------------------
 const KIND_NAMES = { pool: '数据池', test: '测试集', regression: '回归集', other: '其他', trainset: '训练集快照' };
-const TASK_NAMES = { det: '检测', seg: '分割', obb: '旋转框', pose: '关键点', cls: '分类' };
+// The tasks: the fields of fw/contract.py TASKS that the pages use (test_web.py keeps the two the same).
+export const TASKS = {
+  det: { title: '检测', enabled: true, key_metrics: ['mAP50', 'mAP50-95', 'P', 'R'], main_metric: 'mAP50-95' },
+  obb: { title: '旋转框', enabled: false, key_metrics: ['mAP50', 'mAP50-95', 'P', 'R'], main_metric: 'mAP50-95' },
+  seg: { title: '实例分割', enabled: false, key_metrics: ['mAP50(M)', 'mAP50-95(M)', 'P(M)', 'R(M)'], main_metric: 'mAP50-95(M)' },
+  semseg: { title: '语义分割', enabled: false, key_metrics: ['mIoU', 'mAcc'], main_metric: 'mIoU' },
+};
+export const taskTitle = (task) => (TASKS[task] ? TASKS[task].title : task);
+// What a dataset is, with a snapshot's task: 「训练集快照（检测）」.
+export function kindText(d) {
+  const task = d.kind === 'trainset' && d.latest ? d.latest.task : null;
+  return task ? `${KIND_NAMES.trainset}（${taskTitle(task)}）` : KIND_NAMES[d.kind] || d.kind;
+}
 
 // The numbers of a metrics JSON as [dotted key, value], in file order (= fw.ops.flatten_metrics).
 export function flattenMetrics(doc, prefix = '') {
@@ -2208,7 +2221,7 @@ async function modelsPage(query) {
         .map(([h, c]) => el('th', { class: c }, h))),
         rows, (m) => el('tr', {},
           el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
-          el('td', {}, TASK_NAMES[m.task] || m.task),
+          el('td', {}, taskTitle(m.task)),
           numCell(m.version_count), el('td', {}, m.latest ? mref(m.latest, true) : '-'),
           el('td', {}, m.created_by), timeCell(m.created_at), textCell(m.note)), { tree, at, placeOf: (m) => m, loose: '不属于任何产线' })
         : el('p', { class: 'muted' }, at.site || at.q ? '没有符合条件的模型。' : '暂无模型。')));
@@ -2230,7 +2243,7 @@ async function modelPage(name) {
   show(crumbs('models', m, m.name),
     pageHead(m.name, can('models.write') ? el('a', { id: 'model-register', class: 'button primary', href: hrefOf(['model-register'], { model: m.name }) }, '登记新版本') : null),
     el('dl', { class: 'kv' }, el('dt', {}, '现场 / 产线'), el('dd', {}, `${m.site} / ${m.line}`),
-      el('dt', {}, '任务'), el('dd', {}, TASK_NAMES[m.task] || m.task),
+      el('dt', {}, '任务'), el('dd', {}, taskTitle(m.task)),
       el('dt', {}, '建立'), el('dd', {}, `${m.created_by}，${when(m.created_at)}`), el('dt', {}, '备注'), el('dd', {}, m.note || '-')),
     el('h2', {}, '版本'),
     list.length ? el('table', { id: 'model-versions' }, el('tr', {}, [['版本'], ['版本号'], ['训练集快照'], ['ONNX', 'num'], ['代码提交'], ['标记'], ['登记人'], ['时间'], ['备注'], ['', 'menu-cell']]
@@ -4593,7 +4606,7 @@ export function eventText(action, detail) {
     case 'site.add': case 'line.add': return said('显示名', d.name);
     case 'site.rename': return d.name ? `显示名改为「${d.name}」` : '清除显示名';
     case 'line.benchmark': return join(`基准测试集 ${d.dataset}`, said('备注', d.note));
-    case 'model.create': return join(place, TASK_NAMES[d.task] || d.task);
+    case 'model.create': return join(place, taskTitle(d.task));
     case 'model_version.register': return said('ONNX 哈希', short(d.onnx_sha256, 12));
     case 'model_version.tag': return join(`${d.added ? '标记为' : '取消标记'}「${TAG_NAMES[d.tag] || d.tag}」`, said('备注', d.note));
     case 'eval.register': return join(`模型版本 ${d.model_version}`, said('快照划分', d.split), job);
@@ -4799,7 +4812,7 @@ async function placesPage() {
 // --- the overview of a line --------------------------------------------------------------------------------
 // One line at a glance: what runs there now (the release), its models with their last evaluation, its training
 // snapshots, its pools, and the batches still under way. Without a line: every line and how much it holds.
-const KEY_METRICS = ['mAP50', 'mAP50-95', 'P', 'R'];
+const KEY_METRICS = TASKS.det.key_metrics;  // every model is a detection model so far
 
 // The few numbers of an evaluation shown in a list: [[name, text], ...] for those the report has.
 export function keyMetrics(metrics) {
@@ -5109,7 +5122,7 @@ async function overviewPage(query) {
     sorted.map((d) => el('tr', { title: d.latest ? `${d.latest.file_count} 个文件，最新版本 ${when(d.latest.created_at)}` : '尚无版本' },
       el('td', {}, el('span', { class: 'with-icon' }, icon('folder'),
         d.latest ? el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref) : el('a', { href: hrefOf(['d', d.name]) }, d.name), labelChips(d.latest || {}))),
-      el('td', {}, d.kind === 'trainset' ? '训练集快照' : KIND_NAMES[d.kind] || d.kind),
+      el('td', {}, kindText(d)),
       el('td', { class: 'num' }, d.latest ? sizeText(d.latest.total_bytes) : '—'),
       el('td', { class: 'act' }, el('a', { class: 'tool go', href: hrefOf(['d', d.name]), title: `打开 ${d.name}`, 'aria-label': `打开 ${d.name}` }, icon('right'))))))
     : el('p', { class: 'muted' }, '该产线暂无数据池和训练集快照。',

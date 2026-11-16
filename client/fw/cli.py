@@ -423,9 +423,6 @@ def cmd_trainset_show(args, api: Api) -> None:
 
 
 # --- models, evaluations, releases -----------------------------------------------------------------
-TASK_NAMES = {'det': '检测'}
-
-
 def _tags(mv: dict) -> str:
     return '、'.join(ops.TAG_NAMES.get(t, t) for t in mv['tags'])
 
@@ -444,7 +441,7 @@ def _show_metrics(metrics: dict, indent: str = '  ', limit: int = 40) -> None:
 
 def cmd_model_create(args, api: Api) -> None:
     m = api.create_model(args.name, args.site, args.line, args.task, args.note)
-    print(f'已建模型 {m["name"]}（{m["site"]}/{m["line"]}，{TASK_NAMES.get(m["task"], m["task"])}）；'
+    print(f'已建模型 {m["name"]}（{m["site"]}/{m["line"]}，{contract.task_title(m["task"])}）；'
           f'登记版本：fw model register {m["name"]} --onnx best.onnx --trainset <快照>')
 
 
@@ -454,7 +451,7 @@ def cmd_model_list(args, api: Api) -> None:
         print('没有符合的模型' if args.site or args.line or args.search else '还没有模型；用 fw model create 建')
         return
     _table(['名称', '现场', '产线', '任务', '版本数', '最新', '备注'],
-           [[m['name'], m['site'], m['line'], TASK_NAMES.get(m['task'], m['task']), m['version_count'],
+           [[m['name'], m['site'], m['line'], contract.task_title(m['task']), m['version_count'],
              m['latest'] or '-', m['note']] for m in rows])
 
 
@@ -472,7 +469,7 @@ def cmd_model_versions(args, api: Api) -> None:
 
 def cmd_model_show(args, api: Api) -> None:
     mv = api.model_version(*ops.parse_model_ref(args.ref))
-    print(f'{mv["ref"]}{ops.label_text(mv)}：{mv["site"]}/{mv["line"]}，{TASK_NAMES.get(mv["task"], mv["task"])}，'
+    print(f'{mv["ref"]}{ops.label_text(mv)}：{mv["site"]}/{mv["line"]}，{contract.task_title(mv["task"])}，'
           f'{mv["created_by"]} 登记于 {_when(mv["created_at"])}')
     print(f'训练集快照：{mv["trainset"]["ref"]}；类别：{"、".join(mv["classes"])}')
     print('训练代码：' + ops.code_text(mv) + ('（训练时有没提交的改动）' if mv['code_dirty'] else ''))
@@ -750,7 +747,7 @@ def _print_job(j: dict) -> None:
         elif j['kind'] == 'eval':
             m = j['result']['metrics']
             print(f'结果：评估报告 #{j["result"]["eval_id"]}（fw eval show {j["result"]["eval_id"]}），'
-                  f'{m.get("images")} 张图，mAP50 {m.get("mAP50")}，mAP50-95 {m.get("mAP50-95")}')
+                  f'{m.get("images")} 张图，{contract.metrics_text(m)}')  # the result names the model's task's
         else:
             print(f'结果：{j["result"]}')
 
@@ -1062,7 +1059,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('name', help='名称：字母、数字、. _ -，例如 SES-TX-detr')
     s.add_argument('--site', required=True, help='现场，例如 SES')
     s.add_argument('--line', required=True, help='产线，例如 TX')
-    s.add_argument('--task', default='det', choices=list(TASK_NAMES), help='任务类型：det（检测，默认）')
+    s.add_argument('--task', default='det', choices=contract.enabled_tasks(), help='任务类型：det（检测，默认）')
     s.add_argument('--note', default='', help='备注')
     s.set_defaults(func=cmd_model_create)
     s = md.add_parser('list', help='列出模型')

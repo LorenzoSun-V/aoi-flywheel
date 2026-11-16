@@ -139,7 +139,8 @@ def _signature(store: Store, label: Entry) -> Optional[Tuple[str, int, Any]]:
     except UnicodeDecodeError:
         return kind, 0, ('bytes', label[1])
     if kind == 'json':
-        parsed = formats.parse_json(text)
+        # a pool has no task: its labels are compared as boxes (docs/tasks.md)
+        parsed = formats.DET.parse_json(text)
         if isinstance(parsed, str):
             return kind, 0, ('bytes', label[1])
         boxes = sorted((b.name, round(b.x1, 2), round(b.y1, 2), round(b.x2, 2), round(b.y2, 2)) for b in parsed.boxes)

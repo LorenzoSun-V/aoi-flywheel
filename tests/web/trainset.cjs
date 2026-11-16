@@ -65,6 +65,7 @@ const { chromium } = require('playwright');
   await page.waitForFunction((n) => location.hash === `#/v/${n}/1` && document.querySelector('#snapshot-info'), encodeURIComponent(snapshot));
   seen.made = {
     info: await page.textContent('#snapshot-info'), command: await page.inputValue('#fetch-command'),
+    task: await page.textContent('#snapshot-task'),
     counts: await page.$$eval('#snapshot-counts tr', (rows) => rows.map((r) => [...r.children].map((c) => c.textContent.trim()))),
     next: await page.getAttribute('#trainset-next', 'href'),
   };

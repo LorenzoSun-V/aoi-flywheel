@@ -14,6 +14,7 @@
 | `CLAUDE.md`（仓库根目录） | 给 Claude 的工作说明：检查命令、绝对不要做的事、每个改动要带上什么 | 检查命令或硬规则变了 |
 | `docs/worker-fault-tests.md` | 在真机上测 worker 被杀、断电、断网、取消时任务怎么收场的步骤和记录表 | 租约、重试、取消的规则变了，或者真机上测出了和预期不一样的地方 |
 | `docs/trainset-format.md` | 训练集快照的目录、`classes.txt`、`trainset.json`、划分规则 | 快照格式或划分规则变了 |
+| `docs/tasks.md` | 任务类型（检测、旋转框、实例分割、语义分割）：各任务的数据规则、快照里的文件、预测集格式、指标、加一个任务的步骤 | 加任务，或者任务的规则变了 |
 | `docs/development.md` | 本文 | 分层、规则、测试方式变了 |
 | `CHANGELOG.md` | 每个 PR 用户能看到的变化 | 每个 PR |
 
@@ -159,6 +160,7 @@ tests/web/           网页：helpers.test.mjs（node --test，不要浏览器�
 | 接着上一版时，原来的样本不换划分；同样的样本、比例和种子，划分总是一样；按比例分时有框和没有框的图分别分，val、test 都有相应比例的负样本 | `trainsets._assign`、`_cut` | `test_cut_is_fixed_by_keys_ratio_and_seed`、`test_continue_keeps_every_split`、`test_a_three_way_split_gives_every_split_its_share_of_negatives` |
 | `fw get` 默认的平铺目录：train 里没有框的图在 `neg_train/`（不带标注），val、test 有框没框放在一起（没有标注的补空 txt），没有 `neg_val`、`neg_test`，每个目录只有一层；平铺后重名就不摆、列出来；`data.yaml` 带 `negative_setting`，`neg_train` 的张数是实际的；网页按同样的目录显示 | `contract.trainset_flat`、`ops.get`、`ops._write_data_yaml`、`trainsets.layout`、`web/app.js` 的 `viewFiles` | `test_the_flat_layout_keeps_train_negatives_apart`、`test_names_that_collide_when_flat_are_listed`、`test_fw_get_lays_a_snapshot_out_flat_with_train_negatives_apart`、`test_no_negative_setting_without_train_negatives`、`test_names_that_collide_flat_are_told_in_the_preview_and_refused_by_fw_get`、`test_a_snapshot_is_shown_in_the_folders_fw_get_makes` |
 | 转好的 YOLO / COCO 标注随快照冻结，取回只改路径不改内容；转不了的形状、图外的框不悄悄丢掉，直接不建 | `formats.py`、`trainsets._tree`、`contract.trainset_layout` | `test_formats.py`、`test_first_snapshot_layout_and_formats`、`test_labels_that_cannot_be_detection_boxes` |
+| 检测快照的字节不因加任务而变：固定输入下快照的清单哈希和每个文件逐字节不变；任务的规则只在任务表一处（`fw.contract.TASKS`），标注读写只经 `formats.of(task)`，指标名取自任务表；网页的 `TASKS` 副本与任务表一致；没开放的任务建快照、新建模型都拒绝 | `fw.contract.TASKS`、`formats.of`、`trainsets.py`、`evals.finish`、`web/app.js` 的 `TASKS` | `test_tasks.py`：`test_a_detection_snapshot_is_the_same_byte_for_byte`、`test_detection_is_the_only_task_that_can_be_chosen_so_far`、`test_a_task_not_yet_enabled_is_refused`、`test_the_web_pages_name_the_tasks_as_the_registry_does` |
 | 模型、模型版本、评估报告、发布、标签记录登记后不能改、不能删；文件集冻结后不能改；每个文件集只属于一个模型版本或评估报告（新建文件集时和插入模型版本、评估报告时都查）；模型版本只能引用训练集快照，ONNX 哈希就是文件集里的 `model.onnx`；现场和产线只能用汉字、英文字母、数字、`_`、`.`，和 `models.SITE_LINE` 是同一条按码位的规则 | 数据库触发器和 CHECK（`0003_models.sql`） | `test_records_cannot_change`、`test_what_the_database_refuses`、`test_a_file_set_has_one_owner`、`test_two_lines_never_share_a_release_ref`、`test_the_database_takes_the_names_the_server_takes` |
 | 评估和发布登记在具体的模型版本上，重试不会换版本；`--deteval` 的集合就是声明的测试集（集合名、图片数） | `ops._pin`、`models._pinned`、`ops._deteval_metrics` | `test_a_retry_stays_on_the_version_it_meant`、`test_a_deteval_report_must_be_the_test_set` |
 | 附件目录读不全就不登记；令牌不打印；指标只收标准 JSON 里的有限数 | `ops._folder_files`（`os.walk` 的 `onerror`）、`ops.register_model`、`models._no_nul` | `test_an_unreadable_folder_is_never_left_out`、`test_a_token_in_the_repository_is_never_printed`、`test_numbers_out_of_range` |

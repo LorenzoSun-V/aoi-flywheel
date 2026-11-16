@@ -150,7 +150,7 @@ UTF-8 JSON，键的含义：
 |---|---|
 | `format` | 固定是 `fw-trainset 1`；以后格式不兼容地改动时才变 |
 | `name` | 快照名称 |
-| `task` | `det`（检测） |
+| `task` | 任务类型，现在只有 `det`（检测）；别的任务见 [任务类型](tasks.md) |
 | `formats` | 这个快照有的标注格式：`yolo`、`coco`、`json` |
 | `missing_formats` | 没生成的格式和原因，例如 `{"coco": "3 张图片无法读取尺寸……"}` |
 | `sources` | 来源数据池版本，每项 `ref`（例如 `SES-TX@4`）、`manifest_sha256`（那个版本的清单哈希）、`site`、`line` |

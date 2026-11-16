@@ -1,7 +1,9 @@
 """Label formats a training-set snapshot is frozen in: reading LiteAnno / X-AnyLabeling JSON and YOLO txt, and
-writing YOLO detection labels and COCO annotations. Pure functions, no database and no store.
+writing YOLO labels and COCO annotations. Pure functions, no database and no store.
 
-The rules are in docs/trainset-format.md. What a snapshot holds is computed here once, when it is made, and
+Each task (fw.contract.TASKS) has one set of these functions, a TaskFormat; the rest of the server reads and
+writes labels only through of(task). So far only detection ('det') has one: the functions below. The rules are
+in docs/trainset-format.md and docs/tasks.md. What a snapshot holds is computed here once, when it is made, and
 frozen; changing this code never changes a snapshot that exists.
 """
 from __future__ import annotations
@@ -13,10 +15,11 @@ import re
 import struct
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import BinaryIO, Dict, List, Optional, Tuple
+from typing import BinaryIO, Callable, Dict, List, Optional, Tuple, Union
 
-TASK = 'det'  # the only task so far: axis-aligned boxes
-BOX_SHAPES = frozenset({'rectangle', 'polygon', 'rotation'})  # their bounding box is the detection box
+from fw.contract import TASKS
+
+BOX_SHAPES = frozenset(s for s, how in TASKS['det'].shapes.items() if how == 'bbox')  # their bounding box is the box
 Size = Tuple[int, int]  # (width, height) in pixels
 
 
@@ -331,6 +334,32 @@ def coco_bytes(images: List[Tuple[str, Size, list]], classes: List[str]) -> byte
             doc['annotations'].append({'id': ann, 'image_id': image_id, 'category_id': c, 'bbox': box,
                                        'area': round(box[2] * box[3], 4), 'iscrowd': 0, 'segmentation': []})
     return (json.dumps(doc, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+
+
+# --- the functions of each task -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TaskFormat:
+    """How the labels of one task are read and written. The task's data (shapes, formats, metrics) is in
+    fw.contract.TASKS; a new task brings a TaskFormat of its own (docs/tasks.md), detection's never changes."""
+    task: str
+    refused: str  # what a label with a shape the task cannot use is told
+    parse_json: Callable[[str], Union[Label, str]]  # a label, or why it cannot be used
+    parse_txt: Callable[[str, List[str]], Union[Label, str]]
+    fit: Callable[[Label, Size], None]  # in place: the shapes against the image (clipped, outside)
+    yolo_bytes: Callable[[Label, List[str], Optional[Size]], bytes]
+    coco_objects: Callable[[Label, List[str], Size], list]  # what coco_bytes takes for one image
+    coco_bytes: Callable[[List[Tuple[str, Size, list]], List[str]], bytes]
+    liteanno_bytes: Callable[[Label, List[str], Size, str], bytes]  # a LiteAnno JSON for a txt label
+
+
+DET = TaskFormat('det', '不能作为检测框（仅接受 rectangle、polygon、rotation）', parse_json, parse_txt, clip, yolo_bytes,
+                 pixel_boxes, coco_bytes, liteanno_bytes)
+_FORMATS: Dict[str, TaskFormat] = {'det': DET}
+
+
+def of(task: str) -> TaskFormat:
+    """The label functions of an enabled task (a task is enabled only with its functions: a test checks)."""
+    return _FORMATS[task]
 
 
 # --- image sizes from the file header (no decoding, no extra libraries) ------------------------------------

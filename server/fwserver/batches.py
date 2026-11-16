@@ -625,7 +625,7 @@ def _boxes(store: Store, label: Optional[Tuple[str, str, int]]) -> Optional[List
     except UnicodeDecodeError:
         return None
     if label[0].lower().endswith('.json'):
-        parsed = formats.parse_json(text)
+        parsed = formats.DET.parse_json(text)  # a batch has no task: its shapes are compared as boxes (docs/tasks.md)
         if isinstance(parsed, str):
             return None
         return [(b.name, b.x1, b.y1, b.x2, b.y2) for b in parsed.boxes]
