@@ -86,10 +86,16 @@ def cmd_dataset_create(args, api: Api) -> None:
         raise ops.FwError('新建数据池要给出类别表：--classes classes.txt（每行一个类别名，行号从 0 起就是类别编号）；'
                           '上传到数据池的标注只能用表里的类别')
     if args.kind != 'pool' and args.classes:
-        raise ops.FwError('只有数据池有类别表；其他类型的数据集不用 --classes')
+        raise ops.FwError('只有数据池有类别表；测试集用 --classes-from <数据池> 沿用同一产线数据池的类别表，其他类型不用 --classes')
+    if args.kind == 'test' and not args.classes_from:
+        raise ops.FwError('新建测试集要写明沿用哪个数据池的类别表：--classes-from <数据池>（同一产线的数据池）；'
+                          '上传到测试集的标注只能用该表里的类别')
+    if args.kind != 'test' and args.classes_from:
+        raise ops.FwError('只有测试集沿用数据池的类别表；其他类型的数据集不用 --classes-from')
     classes = ops.read_classes(args.classes) if args.classes else None
-    d = api.create_dataset(args.name, args.site, args.line, args.kind, args.note, classes)
-    table = f'，类别表 {len(d.get("classes") or [])} 类' if classes else ''
+    d = api.create_dataset(args.name, args.site, args.line, args.kind, args.note, classes, args.classes_from)
+    table = (f'，类别表 {len(d.get("classes") or [])} 类' if classes
+             else f'，沿用数据池 {d.get("classes_from")} 的类别表' if args.classes_from else '')
     print(f'已建数据集 {d["name"]}（{KINDS[d["kind"]]}，现场 {d["site"] or "-"}，产线 {d["line"] or "-"}{table}）；'
           f'用 fw dataset import {d["name"]} <目录> 导入第一个版本')
 
@@ -850,6 +856,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--kind', default='pool', choices=list(KINDS), help='pool 数据池（默认）、test、regression、other')
     s.add_argument('--classes', metavar='CLASSES_TXT',
                    help='数据池的类别表（必填）：每行一个类别名，行号从 0 起就是类别编号；之后只能在网页上往末尾添加')
+    s.add_argument('--classes-from', metavar='数据池',
+                   help='测试集沿用哪个数据池的类别表（测试集必填）：同一产线的数据池；上传到测试集的标注按这张表核对')
     s.add_argument('--note', default='', help='备注')
     s.set_defaults(func=cmd_dataset_create)
     s = ds.add_parser('versions', help='列出一个数据集的版本')

@@ -240,11 +240,16 @@ class Api:
         return self.get(f'/datasets/{name}')
 
     def create_dataset(self, name: str, site: str, line: str, kind: str, note: str,
-                       classes: Optional[List[str]] = None):
+                       classes: Optional[List[str]] = None, classes_from: Optional[str] = None):
         body = {'name': name, 'site': site, 'line': line, 'kind': kind, 'note': note}
         if classes is not None:
             body['classes'] = classes  # the class table of a new pool (servers from level 10)
+        if classes_from is not None:
+            body['classes_from'] = classes_from  # the pool a new test set follows (servers from level 20)
         return self.post('/datasets', body)
+
+    def follow_classes(self, name: str, pool: str):
+        return self.post(f'/datasets/{name}/classes-from', {'pool': pool})
 
     def add_classes(self, name: str, classes: List[str]):
         return self.post(f'/datasets/{name}/classes', {'classes': classes})

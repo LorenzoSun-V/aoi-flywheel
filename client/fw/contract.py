@@ -331,8 +331,9 @@ def task_title(task: str) -> str:
 #  17  'task' of a dataset version: a training-set snapshot's task (fw.contract.TASKS), null for the rest
 #  18  POST /batches/<name>/reviewer: the owner of a batch in review asks another reviewer (step 'reassign')
 #  19  GET /workers: each GPU machine (worker account), when it last asked for work, online or not; a queued job's 'waits_on'
+#  20  a test set follows a pool's class table: 'classes_from' of a dataset, POST /datasets/<name>/classes-from
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 19
+API_LEVEL = 20
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 

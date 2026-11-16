@@ -157,6 +157,11 @@ class DatasetBody(BaseModel):
     kind: str = 'pool'
     note: str = ''
     classes: Optional[list] = None  # the class table of a new pool
+    classes_from: Optional[str] = None  # a new test set: the pool whose class table it follows
+
+
+class FollowBody(BaseModel):
+    pool: str  # the pool whose class table the test set follows
 
 
 class ClassesBody(BaseModel):
@@ -736,7 +741,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def create_dataset(body: DatasetBody, user: dict = Depends(data_user)):
         with conn() as c:
             d = datasets.create_dataset(c, user['user_id'], body.name, body.site, body.line, body.kind, body.note,
-                                        classes=body.classes)
+                                        classes=body.classes, classes_from=body.classes_from)
         log.info('dataset %s created by %s', d['name'], user['name'])
         return d
 
@@ -745,6 +750,14 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
         with conn() as c:
             out = datasets.add_classes(c, store, user['user_id'], name, body.classes)
         log.info('classes %s added to %s by %s', ', '.join(out['added']), out['dataset']['name'], user['name'])
+        return out
+
+    @app.post('/api/v1/datasets/{name}/classes-from')
+    def follow_classes(name: str, body: FollowBody, user: dict = Depends(data_user)):
+        """Name, once, the pool whose class table a test set follows."""
+        with conn() as c:
+            out = datasets.follow_classes(c, store, user['user_id'], name, body.pool)
+        log.info('test set %s follows the class table of %s (%s)', out['dataset']['name'], body.pool, user['name'])
         return out
 
     @app.get('/api/v1/datasets/{name}')

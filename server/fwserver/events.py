@@ -17,6 +17,7 @@ LIMIT = 500
 ACTIONS = {
     'dataset.create': '新建数据集',
     'dataset.classes': '添加数据集的类别',
+    'dataset.classes_from': '指定测试集的类别表',
     'version.create': '建立版本',
     'version.label': '设定版本号',
     'version.unlabel': '撤销版本号',
