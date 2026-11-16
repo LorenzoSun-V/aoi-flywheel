@@ -4953,6 +4953,19 @@ export function benchmarkByModel(evals, versionId) {
   return out;
 }
 
+// Of each model, its newest version's report on the whole test split of a training-set snapshot: {model name:
+// report}. Shown in grey on the overview when a model has no report on the benchmark: each version may have been
+// measured on another snapshot, so these numbers do not compare across models or versions.
+export function splitByModel(evals) {
+  const out = {};
+  for (const e of evals.filter((x) => x.split === 'test' && !(x.dirs || []).length)) {
+    const name = e.model_version.ref.split('@')[0];
+    const was = out[name];
+    if (!was || mvNumber(e) > mvNumber(was) || (mvNumber(e) === mvNumber(was) && e.id > was.id)) out[name] = e;
+  }
+  return out;
+}
+
 // Of one model, the report of each version on the benchmark version, newest version first.
 export function benchmarkByVersion(evals, versionId) {
   const out = new Map();
@@ -5134,9 +5147,10 @@ async function overviewPage(query) {
     api.benchmark(at.site, at.line).catch(none)]);
   // models are compared on the newest version of the line's benchmark test set, as a whole
   const benchVersion = bench && bench.current ? bench.current.latest : null;
-  const [evalLists, versionLists] = await Promise.all([benchVersion ? Promise.all(models.map((m) => api.evals(m.name))) : [],
+  const [evalLists, versionLists] = await Promise.all([Promise.all(models.map((m) => api.evals(m.name))),
     Promise.all(models.map((m) => api.modelVersions(m.name)))]);
   const evals = benchVersion ? benchmarkByModel(evalLists.flat(), benchVersion.id) : {};
+  const onSplits = splitByModel(evalLists.flat());  // shown in grey where a model has nothing on the benchmark
   const versions = versionLists.flat();
   const head = (id, text, parts, link, ...more) => el('div', { class: 'section-head' }, el('h2', { id }, ...[].concat(text)),
     el('div', { class: 'links' }, ...more,
@@ -5153,14 +5167,17 @@ async function overviewPage(query) {
     el('tr', {}, ['模型', '版本', ...KEY_METRICS].map((h, i) => el('th', { class: i > 1 ? 'num' : '' }, h)), el('th', { class: 'act' })),
     models.map((m) => {
       const e = evals[m.name];
-      const row = modelRow(m, e);
-      const shown = e ? Object.fromEntries(keyMetrics(e.metrics)) : {};
-      return el('tr', { title: e ? `评估 #${e.id}：${e.model_version.ref}，基准测试集 ${e.testset.ref}，${when(e.created_at)}`
-        : benchVersion ? `该模型未在 ${benchVersion.ref} 上评估` : '该产线尚未设定基准测试集' },
+      const f = e ? null : onSplits[m.name] || null;   // no report on the benchmark: the one on a snapshot's test split
+      const row = modelRow(m, e || f);
+      const shown = Object.fromEntries(keyMetrics((e || f || {}).metrics));
+      const away = benchVersion ? `该模型未在 ${benchVersion.ref} 上评估` : '该产线尚未设定基准测试集';
+      return el('tr', { class: f ? 'on-split' : null, title: e ? `评估 #${e.id}：${e.model_version.ref}，基准测试集 ${e.testset.ref}，${when(e.created_at)}`
+        : f ? `${away}。灰色数字为评估 #${f.id}：${f.model_version.ref} 在快照 ${f.testset.ref} 上的结果，各版本使用的快照可能不同，不可与基准测试集上的结果比较` : away },
         el('td', {}, el('a', { href: hrefOf(['m', m.name]) }, m.name)),
-        el('td', {}, e || (!benchVersion && row.ref) ? el('a', { href: mvHref(row.ref) }, `@${row.number}`)
+        el('td', {}, e || f || (!benchVersion && row.ref) ? [el('a', { href: mvHref(row.ref) }, `@${row.number}`),
+          f ? el('span', { class: 'muted small split-note' }, ' 快照 test 划分') : null]
           : el('span', { class: 'muted' }, benchVersion ? '未评估' : '-')),
-        ...KEY_METRICS.map((k) => el('td', { class: `num${shown[k] ? '' : ' muted'}` }, shown[k] || '—')),
+        ...KEY_METRICS.map((k) => el('td', { class: `num${shown[k] && !f ? '' : ' muted'}` }, shown[k] || '—')),
         el('td', { class: 'act' }, row.items.length ? moreMenu(row.ref, row.items) : null));
     })) : el('p', { class: 'muted' }, '该产线暂无模型。');
 
@@ -5194,7 +5211,8 @@ async function overviewPage(query) {
       line ? null : el('p', { class: 'error' }, `${at.site} / ${at.line} 不是已登记的产线，以下为名称匹配的内容。`),
       card,
       el('div', { class: `cols${batchList ? '' : ' one'}` },
-        el('div', { class: 'col' }, head('models', '模型与评估', ['models'], '全部模型', can('models.write') ? el('a', { id: 'model-new', class: 'small with-icon', href: '#/model-register' }, icon('plus'), '登记模型版本') : null),
+        el('div', { class: 'col' }, head('models', ['模型与评估', info(['各模型的数字来自该产线基准测试集最新版本的整份评估。',
+          '尚未在基准测试集上评估、但在训练集快照 test 划分上评估过的模型，以灰色显示其最新版本在快照 test 划分上的结果；各版本使用的快照可能不同，该结果仅供参考，不可与基准测试集上的结果比较。'], '模型与评估说明')], ['models'], '全部模型', can('models.write') ? el('a', { id: 'model-new', class: 'small with-icon', href: '#/model-register' }, icon('plus'), '登记模型版本') : null),
           modelTable, line ? benchmarkBar(at, bench, data, () => overviewPage(query)) : null,
           head('data', '数据池与快照', ['datasets'], '全部数据集', newData, newSnapshot), dataTable),
         batchList ? el('div', { class: 'col right' }, head('batches', ['在办的批次', info('在办批次指尚未入库且未关闭的批次。', '在办批次说明')], ['batches'], '全部批次'), batchList) : null))));
