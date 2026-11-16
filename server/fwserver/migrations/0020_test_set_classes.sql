@@ -5,15 +5,20 @@
 --
 -- The pool is named when the test set is made, or once later for a test set made before this: classes_from
 -- goes from nothing to a pool and never changes again. It is a data pool, of the test set's line when the test
--- set has one. A test set that names none takes no upload until it does.
+-- set has one. A test set that names none takes no upload until it does. classes_from_at: when it was named;
+-- the versions made after it were checked against the table, so what the next version takes from them unchanged
+-- is not read again (as for a pool after the first class of its table, 0014).
 
 ALTER TABLE datasets ADD COLUMN classes_from bigint REFERENCES datasets(id);
+ALTER TABLE datasets ADD COLUMN classes_from_at timestamptz;
+ALTER TABLE datasets ADD CONSTRAINT datasets_classes_from_at CHECK ((classes_from IS NULL) = (classes_from_at IS NULL));
 
 CREATE FUNCTION guard_dataset_classes_from() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   src datasets%ROWTYPE;
 BEGIN
-  IF TG_OP = 'UPDATE' AND OLD.classes_from IS NOT NULL AND NEW.classes_from IS DISTINCT FROM OLD.classes_from THEN
+  IF TG_OP = 'UPDATE' AND OLD.classes_from IS NOT NULL AND (NEW.classes_from IS DISTINCT FROM OLD.classes_from
+                                                            OR NEW.classes_from_at IS DISTINCT FROM OLD.classes_from_at) THEN
     RAISE EXCEPTION 'dataset %: the pool whose class table it follows cannot change', OLD.name;
   END IF;
   IF NEW.classes_from IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.classes_from IS NULL) THEN

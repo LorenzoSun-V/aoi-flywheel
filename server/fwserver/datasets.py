@@ -321,7 +321,8 @@ def create_dataset(conn, user_id: int, name: str, site: str = '', line: str = ''
         if classes:
             _insert_classes(conn, user_id, dataset_id, 0, classes)
         if source:
-            conn.execute('UPDATE datasets SET classes_from = %s WHERE id = %s', (source['id'], dataset_id))
+            conn.execute('UPDATE datasets SET classes_from = %s, classes_from_at = now() WHERE id = %s',
+                         (source['id'], dataset_id))
         events.record(conn, user_id, 'dataset.create', name, kind=kind, site=site, line=line,
                       **({'classes': classes} if classes else {}),
                       **({'classes_from': source['name']} if source else {}))
@@ -387,7 +388,8 @@ def follow_classes(conn, store: Store, user_id: int, name: str, pool: Any) -> di
             was = conn.execute('SELECT name FROM datasets WHERE id = %s', (d['classes_from'],)).fetchone()['name']
             raise DatasetError(409, f'{d["name"]} 已沿用数据池 {was} 的类别表，不能更改')
         source = _classes_source(conn, pool, d['name'], d['site'], d['line'])
-        conn.execute('UPDATE datasets SET classes_from = %s WHERE id = %s', (source['id'], d['id']))
+        conn.execute('UPDATE datasets SET classes_from = %s, classes_from_at = now() WHERE id = %s',
+                     (source['id'], d['id']))
         events.record(conn, user_id, 'dataset.classes_from', d['name'], pool=source['name'])
     dataset = get_dataset(conn, d['name'])
     out = {'dataset': dataset, 'latest_check': None}
@@ -456,15 +458,16 @@ def add_classes(conn, store: Store, user_id: int, name: str, names: Any) -> dict
 
 def checked_contents(conn, dataset_id: int, version_id: Optional[int]) -> Set[Tuple[str, str]]:
     """The labels and class lists, as (kind, sha256) (formats.class_kind), of a pool's version that was checked
-    against its class table when it was made, i.e. made after the table's first class: what the next version
-    takes from it unchanged need not be read again. The same bytes under another kind of name are read again
-    (a YOLO label's bytes are no JSON label). Empty for a version from before the table: the next one is
-    checked in full."""
+    against its class table when it was made, i.e. made after the table's first class (for a test set: after it
+    named the pool whose table it follows, 0020): what the next version takes from it unchanged need not be read
+    again. The same bytes under another kind of name are read again (a YOLO label's bytes are no JSON label).
+    Empty for a version from before the table: the next one is checked in full."""
     if version_id is None:
         return set()
     rows = conn.execute(
         "SELECT f.path, encode(f.sha256, 'hex') AS d FROM version_files f JOIN versions v ON v.id = f.version_id "
-        'WHERE f.version_id = %s AND v.created_at > (SELECT min(created_at) FROM dataset_classes WHERE dataset_id = %s) '
+        'WHERE f.version_id = %s AND v.created_at > (SELECT coalesce(d.classes_from_at, (SELECT min(c.created_at) '
+        'FROM dataset_classes c WHERE c.dataset_id = d.id)) FROM datasets d WHERE d.id = %s) '
         "AND (lower(f.path) LIKE '%%.json' OR lower(f.path) LIKE '%%.txt' OR lower(f.path) LIKE '%%.names')",
         (version_id, dataset_id)).fetchall()
     out = set()
@@ -493,8 +496,6 @@ def class_check(conn, store: Store, pool: dict, entries: List[Tuple[str, str, in
     if pool['kind'] not in ('pool', 'test'):
         return None, 0, 0
     if pool['kind'] == 'test':
-        # a test set's labels were not checked when its versions were made before it followed a table: all are read
-        checked = ()
         row = conn.execute('SELECT d.classes_from, cf.name FROM datasets d LEFT JOIN datasets cf ON cf.id = d.classes_from '
                            'WHERE d.id = %s', (pool['id'],)).fetchone()
         if row is None or row['classes_from'] is None:

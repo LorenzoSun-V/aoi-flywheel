@@ -1651,6 +1651,7 @@ def test_a_test_set_from_before_names_the_pool_whose_class_table_it_follows(serv
     assert seen['errors'] == []
     assert seen['none'] == '该测试集尚未指定沿用哪个数据池的类别表，无法上传。请先在「类别表」中选择数据池。'
     assert seen['upload'] == 0 and seen['tabOn'] == 'on'
+    assert seen['addPage'] == seen['uploadPage'] == (f'{name} 尚未指定沿用哪个数据池的类别表，无法上传。请先在测试集页面的「类别表」中选择该产线的数据池。')
     assert pool_name in seen['choices'] and elsewhere not in seen['choices']
     assert seen['unpicked'] == '请选择数据池。'
     assert seen['head'].startswith(f'沿用数据池 {pool_name} 的类别表，共 {len(helpers.CLASSES)} 个类别')

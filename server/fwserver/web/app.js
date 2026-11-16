@@ -1000,8 +1000,6 @@ export function sourceText(source) {
   return names.length ? `${m[1]} · ${names.join('、')}` : m[1];
 }
 
-// The class table of a pool by number and, for an account that may change datasets, adding to its end. added: what
-// the last addition answered, to show how the newest version fits a pool's first table.
 // The pools a test set of site / line may follow the class table of: those of its line, or any when it has
 // none. pools: GET /datasets?kind=pool.
 export function poolChoices(pools, site, line) {
@@ -1042,6 +1040,8 @@ async function followSection(d, added) {
       : el('p', { class: 'muted' }, d.line ? `${d.site} / ${d.line} 暂无数据池，请先新建该产线的数据池。` : '暂无数据池，请先新建数据池。'))];
 }
 
+// The class table of a pool by number and, for an account that may change datasets, adding to its end. added: what
+// the last addition answered, to show how the newest version fits a pool's first table.
 function classSection(d, added) {
   const head = el('p', { class: 'muted' }, `共 ${d.classes.length} 个类别`, info(['上传到该数据池的标注只能使用类别表中的类别；含表外类别或无法读取的标注将被拒收，请改正后重新上传。',
     'YOLO txt 标注中的类别编号即类别在表中的序号（从 0 开始）；目录中附带的 classes.txt 须与类别表一致。',
@@ -3527,6 +3527,7 @@ async function uploadPage(name) {
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传。训练集快照请使用 fw trainset create 创建。`);
   if (d.kind === 'pool' && !(d.classes || []).length) throw new Error(`${d.name} 尚未填写类别表，无法上传。请先在数据池页面填写类别表。`);
+  if (d.kind === 'test' && !(d.classes || []).length) throw new Error(`${d.name} 尚未指定沿用哪个数据池的类别表，无法上传。请先在测试集页面的「类别表」中选择该产线的数据池。`);
   const latest = d.latest;
   const picker = folderInput({ several: true });
   const allowOther = el('input', { type: 'checkbox' });
@@ -3704,6 +3705,7 @@ async function addPage(name) {
   const d = await api.dataset(name);
   if (d.kind === 'trainset') throw new Error(`${d.name} 是训练集快照，不能上传。训练集快照请使用 fw trainset create 创建。`);
   if (d.kind === 'pool' && !(d.classes || []).length) throw new Error(`${d.name} 尚未填写类别表，无法上传。请先在数据池页面填写类别表。`);
+  if (d.kind === 'test' && !(d.classes || []).length) throw new Error(`${d.name} 尚未指定沿用哪个数据池的类别表，无法上传。请先在测试集页面的「类别表」中选择该产线的数据池。`);
   const picker = folderInput({ several: true });
   const target = el('input', { type: 'text', placeholder: '选择目录后自动填写，可修改，例如 20261104 或 night/20261104' });
   const inside = el('input', { type: 'checkbox', id: 'add-inside' });

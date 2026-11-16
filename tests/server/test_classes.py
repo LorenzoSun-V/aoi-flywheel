@@ -330,7 +330,7 @@ def test_a_test_set_follows_the_class_table_of_a_pool(api, make_api, sql, tmp_pa
     assert ev[0]['detail']['classes_from'] == pool
 
 
-def test_a_test_set_made_before_names_its_pool_once_and_its_newest_version_is_checked(api, make_api, tmp_path):
+def test_a_test_set_made_before_names_its_pool_once_and_its_newest_version_is_checked(api, make_api, sql, tmp_path):
     """A test set from before (no table) takes no upload; an administrator or algorithm engineer names its pool
     once, and is told what in its newest version does not fit, to be put right with the next upload."""
     pool = new_pool(api)
@@ -355,3 +355,12 @@ def test_a_test_set_made_before_names_its_pool_once_and_its_newest_version_is_ch
     with pytest.raises(ApiError, match='crack'):
         ops.import_folder(api, name, folder(tmp_path, {**files, 'c.png': image()}), echo=quiet)
     assert [e for e in api.events(q=name, limit=20)['events'] if e['action'] == 'dataset.classes_from'][0]['detail'] == {'pool': pool}
+    # once put right, what a later version keeps of a version made after the pool was named is not read again
+    ops.import_folder(api, name, folder(tmp_path, {**files, 'b.json': label('dent')}), echo=quiet)
+    ids = {r['number']: r['id'] for r in sql.execute('SELECT v.id, v.number FROM versions v JOIN datasets d ON d.id = v.dataset_id '
+                                                       'WHERE d.name = %s', (name,)).fetchall()}
+    test_id = sql.execute('SELECT id FROM datasets WHERE name = %s', (name,)).fetchone()['id']
+    assert server_datasets.checked_contents(sql, test_id, ids[1]) == set()           # from before: read in full
+    assert len(server_datasets.checked_contents(sql, test_id, ids[2])) == 1           # a.json and b.json: one content
+    with pytest.raises(psycopg.errors.RaiseException):                                # when it was named stays
+        sql.execute('UPDATE datasets SET classes_from_at = now() WHERE id = %s', (test_id,))
