@@ -21,6 +21,7 @@ from . import events, formats, labels, sites
 from .store import HEX64, Store, StoreError, hash_path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
+CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')   # in a text typed by a person: never meant (line breaks and tabs are fine)
 KINDS = ('pool', 'test', 'regression', 'other')  # what people create
 MADE = {'trainset': ('训练集快照', 'fw trainset create'),  # made only by trainsets.py
         'batch': ('标注批次', 'fw batch update')}           # made only by batches.py: a batch's revisions

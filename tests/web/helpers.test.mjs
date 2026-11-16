@@ -8,7 +8,7 @@ import {
   parseClasses, dirsOf, splitRef, nextRef, ruleText, onnxName,
   trailOf, visited, readPlaces, toggled, shownPlaces, placeKey, placeGroups,
   scopeOf, scopeQuery, countsBy, datasetCounts, keyMetrics, batchesUnderWay, onBenchmark, benchmarkByModel, benchmarkByVersion, metricDelta,
-  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
+  newerCandidates, currentReleases, releaseDone, localTime, zonedTime, todoItems, todoText, failedAfter, compareCells, eventText, eventHref, dataChoices, prelabelChoices,
   batchFlow, rejectionChecks, fitView, zoomAt, readReview, reviewText, reviewKey, changedImages, reviewMatch, stepTo, stripWindow, rejectBody,
   diffManifests, flattenMetrics, hrefOf, manifestText, relPaths, labelIndex, listDir, numberText, outline, parseManifest, predictedShapes, route, shownByBrowsers, sizeText, withLayout,
 } from '../../server/fwserver/web/app.js';
@@ -367,6 +367,12 @@ test('what waits for an account: its groups in order, newest first, each batch b
     '评估：读不了 conda 环境']);
   assert.deepEqual(todoItems({}, 'zhang', now), []);
   assert.equal(todoText({ kind: 'failed', job: j(11, 'failed', 'zhang', '2026-11-15T08:00:00Z', { error: null }) }), '评估');
+  // a failed job whose work was submitted again, or that was marked handled, waits no more
+  const again = j(12, 'failed', 'zhang', '2026-11-15T09:00:00Z', { retried_by: { id: 13, status: 'done', status_text: '完成' } });
+  const handled = j(14, 'failed', 'zhang', '2026-11-15T09:00:00Z', { handled: { by: 'zhang', at: '2026-11-15T10:00:00Z', note: '' } });
+  const open = j(15, 'failed', 'zhang', '2026-11-15T09:00:00Z', { retried_by: null, handled: null });
+  assert.deepEqual(todoItems({ failed: [again, handled, open] }, 'zhang', now).map((r) => r.job.id), [15]);
+  assert.deepEqual([again, handled, open, j(16, 'done', 'zhang', '')].map(failedAfter), ['（已重新提交为任务 13）', '（已处理）', '', '']);
 });
 
 test('a column sorts numbers by value, text by its words and the numbers in it, and blank cells last both ways', () => {

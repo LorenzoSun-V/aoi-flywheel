@@ -18,8 +18,8 @@ import re
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import events
-from .datasets import NAME, DatasetError, check_digest, where_place
+from . import auth, events
+from .datasets import CONTROL, NAME, DatasetError, check_digest, where_place
 from .store import Store, StoreError
 
 KINDS = {'check': '检查推理环境', 'eval': '评估', 'predict': '推理（预标注）'}
@@ -170,8 +170,11 @@ def register_runner(conn, store: Store, worker: dict, name: str, conda_env: str,
 
 
 # --- jobs ---------------------------------------------------------------------------------------------
-_JOB = ('SELECT j.*, s.name AS submitted_by_name, w.name AS worker_name FROM jobs j '
-        'JOIN users s ON s.id = j.submitted_by LEFT JOIN users w ON w.id = j.worker_id ')
+_JOB = ('SELECT j.*, s.name AS submitted_by_name, w.name AS worker_name, '
+        'h.handled_at, h.note AS handled_note, hu.name AS handled_by_name FROM jobs j '
+        'JOIN users s ON s.id = j.submitted_by LEFT JOIN users w ON w.id = j.worker_id '
+        'LEFT JOIN job_handled h ON h.job_id = j.id LEFT JOIN users hu ON hu.id = h.handled_by ')
+MAX_NOTE = 2000  # characters of the note of a handled job (0017 holds the same limit)
 
 
 def _job(conn, r: dict) -> dict:
@@ -188,7 +191,68 @@ def _job(conn, r: dict) -> dict:
             'attempts': r['attempts'], 'max_attempts': r['max_attempts'], 'worker': r['worker_name'],
             'lease_expires': _stamp(r['lease_expires']), 'cancel_requested': r['cancel_requested'],
             'started_at': _stamp(r['started_at']), 'finished_at': _stamp(r['finished_at']),
-            'result': r['result'], 'error': r['error']}
+            'result': r['result'], 'error': r['error'],
+            'retried_by': retried_by(conn, r) if r['status'] == 'failed' else None,
+            'handled': ({'by': r['handled_by_name'], 'at': _stamp(r['handled_at']), 'note': r['handled_note']}
+                        if r['handled_at'] else None)}
+
+
+# --- what became of a failed job ----------------------------------------------------------------------------
+# A failed job waits for the account that submitted it (the home page's 「待我处理」) until its work is submitted
+# again or someone marks it handled (job_handled, 0017).
+
+def retried_by(conn, r: dict) -> Optional[dict]:
+    """The newest later job doing the same work as this one, not cancelled; None when there is none. The same
+    work: an evaluation or pre-label of the same model version on the same data (version, split, folders; another
+    runner or conf is the same work, for those are what one changes to make it run), a check of the same runner."""
+    if r['kind'] == 'check':
+        row = conn.execute("SELECT n.id, n.status FROM jobs n JOIN runner_versions a ON a.id = n.runner_version_id "
+                           "JOIN runner_versions b ON b.id = %s WHERE n.id > %s AND n.kind = 'check' "
+                           "AND n.status <> 'cancelled' AND a.runner_id = b.runner_id ORDER BY n.id DESC LIMIT 1",
+                           (r['runner_version_id'], r['id'])).fetchone()
+    else:
+        p = r['params'] or {}
+        data = p.get('data') or {}
+        row = conn.execute("SELECT id, status FROM jobs WHERE id > %s AND kind = %s AND status <> 'cancelled' "
+                           "AND params->'model'->>'id' = %s AND params->'data'->>'id' = %s "
+                           "AND coalesce(params->'data'->>'split', '') = %s "
+                           "AND coalesce(params->'data'->'dirs', '[]'::jsonb) = %s::jsonb ORDER BY id DESC LIMIT 1",
+                           (r['id'], r['kind'], str((p.get('model') or {}).get('id')), str(data.get('id')),
+                            data.get('split') or '', json.dumps(data.get('dirs') or []))).fetchone()
+    return {'id': row['id'], 'status': row['status'], 'status_text': STATUSES[row['status']]} if row else None
+
+
+def hold(conn, job_id: int) -> None:
+    """Inside a transaction: the job's row locked until it ends (one resubmission of a failed job at a time)."""
+    if conn.execute('SELECT id FROM jobs WHERE id = %s FOR UPDATE', (job_id,)).fetchone() is None:
+        raise DatasetError(404, f'任务 {job_id} 不存在')
+
+
+def handle(conn, user: dict, job_id: int, note: Optional[str] = '') -> dict:
+    """Mark a failed job handled with no new run, by the account that submitted it or an administrator: it no
+    longer waits on the home page. A job whose work was submitted again needs no mark. Kept for ever."""
+    note = (note or '').strip()
+    if len(note) > MAX_NOTE:
+        raise DatasetError(400, f'说明最多 {MAX_NOTE} 个字')
+    if CONTROL.search(note):
+        raise DatasetError(400, '说明中含有无法保存的控制字符，请删除后重试')
+    with conn.transaction():
+        row = conn.execute(_JOB + 'WHERE j.id = %s FOR UPDATE OF j', (job_id,)).fetchone()
+        if row is None:
+            raise DatasetError(404, f'任务 {job_id} 不存在')
+        if row['status'] != 'failed':
+            raise DatasetError(409, f'任务 {job_id} 的状态为「{STATUSES[row["status"]]}」；只有失败的任务可以标为已处理')
+        if row['handled_at']:
+            raise DatasetError(409, f'任务 {job_id} 已由 {row["handled_by_name"]} 标为已处理')
+        if row['submitted_by'] != user['user_id'] and not auth.allowed(user['role'], 'users.manage'):
+            raise DatasetError(403, f'任务 {job_id} 由 {row["submitted_by_name"]} 提交；只有提交人或管理员可以将其标为已处理')
+        again = retried_by(conn, row)
+        if again:
+            raise DatasetError(409, f'任务 {job_id} 已重新提交为任务 {again["id"]}，无需标为已处理')
+        conn.execute('INSERT INTO job_handled (job_id, handled_by, note) VALUES (%s, %s, %s)',
+                     (job_id, user['user_id'], note))
+        events.record(conn, user['user_id'], 'job.handle', f'任务 {job_id}', note=note)
+    return get_job(conn, job_id)
 
 
 def expire_leases(conn) -> int:

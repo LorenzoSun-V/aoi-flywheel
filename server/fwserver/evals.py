@@ -158,6 +158,41 @@ def submit(conn, store: Store, user: dict, runner: Optional[str], params: Option
     return jobs.enqueue(conn, user, 'eval', rv, job_params)
 
 
+def retry(conn, store: Store, user: dict, job_id: int, runner: Optional[str] = None) -> dict:
+    """Submit the work of a failed job again: the same model version and data (and the same lowest score of a
+    pre-label), on the runner named or else the newest version of the job's runner (one re-registers a runner
+    after fixing its machine). A pre-label of a labelling batch is asked through the batch, as on its page, and
+    only for the revision the job had. Refused when the job did not fail or its work was submitted again. The
+    failed job is held meanwhile, so that two clicks at once submit it once."""
+    with conn.transaction():
+        jobs.hold(conn, job_id)
+        return _retry(conn, store, user, job_id, runner)
+
+
+def _retry(conn, store: Store, user: dict, job_id: int, runner: Optional[str]) -> dict:
+    old = jobs.get_job(conn, job_id)
+    if old['status'] != 'failed':
+        raise DatasetError(409, f'任务 {job_id} 的状态为「{old["status_text"]}」；只有失败的任务可以重新提交')
+    again = old['retried_by']
+    if again:
+        raise DatasetError(409, f'任务 {job_id} 已重新提交为任务 {again["id"]}（{again["status_text"]}）；'
+                                f'如需再次运行，请在任务 {again["id"]} 的页面上操作')
+    runner = runner or (old['runner'] or '').partition('@')[0] or None
+    p = old['params']
+    if old['kind'] == 'check':
+        return jobs.submit(conn, user, 'check', runner)
+    data = p['data']
+    if old['kind'] == 'eval':
+        where = data['ref'] + (f':{data["split"]}' if data.get('split') else '')
+        return submit(conn, store, user, runner, {'model': p['model']['ref'], 'data': where, 'dirs': data.get('dirs') or []})
+    name, _, number = data['ref'].partition('@')
+    if datasets.get_version(conn, name, number)['kind'] == 'batch':
+        return predictions.submit_for_batch(conn, store, user, name, model=p['model']['ref'], runner=runner,
+                                            conf=p['conf'], revision=int(number))
+    return predictions.submit(conn, store, user, runner, {'model': p['model']['ref'], 'data': data['ref'],
+                                                          'dirs': data.get('dirs') or [], 'conf': p['conf']})
+
+
 def _note(p: dict, job_id: int) -> str:
     return '；'.join([f'评估任务 {job_id}（{TOOL}，在推理环境 {p["runner"]["conda_env"]} 中）'] + p['warnings'])
 

@@ -963,3 +963,115 @@ def test_a_job_folder_is_gone_with_its_lock_when_the_job_ends(tmp_path):
         f.mkdir()
         assert worker.sweep_folders(tmp_path) == 0 and f.is_dir()  # held by this very process
     assert list(tmp_path.iterdir()) == []
+
+
+def failed(api, w, r, error='conda 坏了'):
+    """A check of runner r, failed on its machine."""
+    job = api.submit_job('check', runner=r['runner'])
+    c = w.claim()
+    assert c['id'] == job['id']
+    return w.finish(job['id'], c['token'], 'failed', error=error)
+
+
+def test_a_failed_job_is_submitted_again_on_the_newest_version_of_its_runner(api, make_api, make_worker, fake_conda):
+    """「重新提交」: the same work on the runner named or the newest version of the job's runner; the failed job
+    then says which job took over its work (not a cancelled one), and is refused a second resubmission."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    first = failed(api, w, r)
+    assert (first['retried_by'], first['handled']) == (None, None)
+    again = api.post(f'/jobs/{first["id"]}/retry', {})
+    assert (again['kind'], again['runner'], again['status']) == ('check', r['ref'], 'queued')
+    assert api.job(first['id'])['retried_by'] == {'id': again['id'], 'status': 'queued', 'status_text': '排队'}
+    with pytest.raises(ApiError, match=f'已重新提交为任务 {again["id"]}（排队）') as e:
+        api.post(f'/jobs/{first["id"]}/retry', {})
+    assert e.value.status == 409
+    with pytest.raises(ApiError, match='只有失败的任务可以重新提交') as e:
+        api.post(f'/jobs/{again["id"]}/retry', {})
+    assert e.value.status == 409
+    api.cancel_job(again['id'])                                     # cancelled: the work is not done by it
+    assert api.job(first['id'])['retried_by'] is None
+    # the machine fixed and its runner registered again: the newest version is taken
+    newer = runner(w, fake_conda, name=r['runner'], listing='@EXPLICIT\nhttps://x/python-3.11.tar.bz2\n')
+    assert newer['ref'] == f'{r["runner"]}@2'
+    third = api.post(f'/jobs/{first["id"]}/retry', {})
+    assert third['runner'] == newer['ref']
+    c = w.claim()
+    w.finish(third['id'], c['token'], 'failed', error='还是不行')
+    assert api.job(first['id'])['retried_by']['id'] == third['id']   # the newest failure stands for both
+    assert api.job(third['id'])['retried_by'] is None
+    named = api.post(f'/jobs/{third["id"]}/retry', {'runner': r['ref']})  # a version named
+    assert named['runner'] == r['ref']
+    assert status_of(lambda: make_api('field').post(f'/jobs/{third["id"]}/retry', {})) == 403
+    assert status_of(lambda: api.post('/jobs/999999999/retry', {})) == 404
+
+
+def test_two_resubmissions_of_a_failed_job_at_once_make_one_job(api, make_worker, fake_conda, database):
+    """Two clicks of 「重新提交」 at once: the second waits for the failed job's row and is refused, one new job."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    first = failed(api, w, r)
+    answers = []
+    with db.connect(database) as other:
+        with other.transaction():
+            other.execute('SELECT id FROM jobs WHERE id = %s FOR UPDATE', (first['id'],))
+            ts = [threading.Thread(target=lambda: answers.append(
+                status_of(lambda: api.post(f'/jobs/{first["id"]}/retry', {})))) for _ in range(2)]
+            for t in ts:
+                t.start()
+            time.sleep(1)  # both are waiting for the row
+        for t in ts:
+            t.join(30)
+    assert sorted(answers) == [200, 409]
+    later = [j for j in api.get('/jobs', limit=1000)['jobs'] if j['id'] > first['id'] and j['runner'] == r['ref']]
+    assert len(later) == 1 and api.job(first['id'])['retried_by']['id'] == later[0]['id']
+
+
+def test_a_failed_job_is_marked_handled_once_by_its_submitter_or_an_administrator(api, make_api, make_worker, fake_conda,
+                                                                                  service, database, sql):
+    """「标为已处理」: a failed job that needs no new run, with a note; only by its submitter or an administrator,
+    once, and not when its work was submitted again; the mark is never changed or removed."""
+    w = make_worker()
+    r = runner(w, fake_conda)
+    job = failed(api, w, r)
+    name = f'algo-{uuid.uuid4().hex[:6]}'
+    with db.connect(database) as c:
+        auth.add_user(c, name, 'algo')
+        other = Api(service.url, auth.create_token(c, name, 'test')[0])
+    try:
+        with pytest.raises(ApiError, match='只有提交人或管理员可以将其标为已处理') as e:
+            other.post(f'/jobs/{job["id"]}/handled', {'note': '不是我的'})
+        assert e.value.status == 403
+    finally:
+        other.close()
+    assert status_of(lambda: make_api('field').post(f'/jobs/{job["id"]}/handled', {})) == 403
+    for note, said in (('x' * 2001, '最多 2000 个字'), ('选错\x00了', '控制字符')):
+        with pytest.raises(ApiError, match=said) as e:
+            api.post(f'/jobs/{job["id"]}/handled', {'note': note})
+        assert e.value.status == 400
+    done = api.post(f'/jobs/{job["id"]}/handled', {'note': '  测试集选错了，无需重跑\n '})
+    assert done['handled']['by'] == api.get('/me')['name'] and done['handled']['note'] == '测试集选错了，无需重跑'
+    assert done['handled']['at'] and done['retried_by'] is None
+    [row] = [j for j in api.get('/jobs', status='failed', mine=True, limit=1000)['jobs'] if j['id'] == job['id']]
+    assert row['handled'] == done['handled']                        # the list says so too
+    with pytest.raises(ApiError, match='已由 .* 标为已处理') as e:
+        api.post(f'/jobs/{job["id"]}/handled', {})
+    assert e.value.status == 409
+    # an administrator marks another account's failed job; a job submitted again needs no mark
+    second = failed(api, w, r)
+    assert make_api('admin').post(f'/jobs/{second["id"]}/handled', {})['handled']['note'] == ''
+    third = failed(api, w, r)
+    api.post(f'/jobs/{third["id"]}/retry', {})
+    with pytest.raises(ApiError, match='已重新提交为任务') as e:
+        api.post(f'/jobs/{third["id"]}/handled', {})
+    assert e.value.status == 409
+    queued = api.submit_job('check', runner=r['runner'])
+    with pytest.raises(ApiError, match='只有失败的任务可以标为已处理') as e:
+        api.post(f'/jobs/{queued["id"]}/handled', {})
+    assert e.value.status == 409
+    assert status_of(lambda: api.post('/jobs/999999999/handled', {})) == 404
+    for statement in (f"UPDATE job_handled SET note = 'x' WHERE job_id = {job['id']}",
+                      f"DELETE FROM job_handled WHERE job_id = {job['id']}", 'TRUNCATE job_handled',
+                      f"INSERT INTO job_handled (job_id, handled_by) SELECT {queued['id']}, submitted_by FROM jobs WHERE id = {queued['id']}"):
+        with pytest.raises(psycopg.errors.RaiseException):
+            sql.execute(statement)

@@ -62,6 +62,14 @@ class JobBody(BaseModel):
     params: Optional[dict] = None
 
 
+class RetryBody(BaseModel):
+    runner: Optional[str] = None
+
+
+class HandleBody(BaseModel):
+    note: Optional[str] = ''
+
+
 class LeaseBody(BaseModel):
     token: str = Field(max_length=200)
 
@@ -1090,6 +1098,20 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def cancel_job(job_id: int, user: dict = Depends(job_writer)):
         with conn() as c:
             return jobs.cancel(c, job_id, user['user_id'])
+
+    @app.post('/api/v1/jobs/{job_id}/retry', status_code=201)
+    def retry_job(job_id: int, body: RetryBody, user: dict = Depends(job_writer)):
+        """The work of a failed job submitted again (evals.retry); the new job."""
+        with conn() as c:
+            job = evals.retry(c, store, user, job_id, body.runner)
+        log.info('job %s (%s) submitted again as job %s by %s', job_id, job['kind'], job['id'], user['name'])
+        return job
+
+    @app.post('/api/v1/jobs/{job_id}/handled')
+    def handle_job(job_id: int, body: HandleBody, user: dict = Depends(job_writer)):
+        """A failed job marked handled, with no new run (jobs.handle)."""
+        with conn() as c:
+            return jobs.handle(c, user, job_id, body.note)
 
     @app.get('/api/v1/jobs/{job_id}/log')
     def get_job_log(job_id: int, attempt: int = 0, after: int = -1, user: dict = Depends(job_reader)):
