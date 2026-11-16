@@ -1557,6 +1557,9 @@ def test_the_reviewer_of_a_batch_is_changed_in_the_browser(service, tokens, api,
     assert len(seen['trail']) == 1 and tokens['admin_name'] in seen['trail'][0] and '原复核人出差' in seen['trail'][0]
     assert seen['oldReview'] == 0
     assert api.batch(name)['reviewer'] == tokens['admin_name']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_folders_are_added_from_the_newest_version_and_from_the_overview(service, tokens, api, make_api, tmp_path):
     """上传新增目录 sits beside the title of the newest version of a pool or test set (not an older one) and in
     the ⋯ of their rows on the line's overview; a snapshot's row has no ⋯; a field account sees none of them."""

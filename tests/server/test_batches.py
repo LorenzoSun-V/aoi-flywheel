@@ -525,7 +525,7 @@ def test_the_reviewer_of_a_batch_in_review_can_be_changed_by_its_owner(api, fiel
     assert name not in [x['name'] for x in api.batches(todo=True)['batches']]
     assert name in [x['name'] for x in admin.batches(todo=True)['batches']]
     ev = [e for e in api.events(q=name, limit=50)['events'] if e['action'] == 'batch.reassign']
-    assert ev and ev[0]['detail']['reviewer'] == tokens['admin_name'] and ev[0]['detail']['before'] == tokens['algo_name']
+    assert ev and ev[0]['detail']['reviewer'] == tokens['admin_name'] and ev[0]['detail']['before'] == tokens['algo_name'] and ev[0]['detail']['comment'] == '原复核人出差'
     # an administrator may change it too; then the reviewer answers as usual
     admin.batch_step(name, 'reviewer', {'reviewer': tokens['algo_name']})
     assert api.batch_step(name, 'approve', {})['status'] == 'approved'

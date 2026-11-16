@@ -388,7 +388,7 @@ def reassign(conn, user: dict, name: str, reviewer: str, comment: str = '', revi
         _step(conn, b['id'], user['user_id'], 'reassign', latest['id'], comment=comment, reviewer_id=asked['id'],
               self_review=mine)
         events.record(conn, user['user_id'], 'batch.reassign', f'{b["name"]}@{latest["number"]}',
-                      reviewer=asked['name'], before=before, self_review=mine)
+                      reviewer=asked['name'], before=before, self_review=mine, comment=comment[:200])
     return get(conn, name, user)
 
 
