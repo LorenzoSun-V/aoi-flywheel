@@ -3206,7 +3206,7 @@ async function runnersPage() {
       el('td', {}, runnerLink(r.runner)), el('td', {}, r.ref), el('td', {}, machineState(machine.get(r.worker), r.worker)),
       el('td', {}, r.conda_env), el('td', {}, r.framework || '仅检查'), el('td', {}, runnerSource(r)), timeCell(r.created_at),
       el('td', { class: 'check-state' }, c ? el('a', { href: hrefOf(['job', String(c.job_id)]) }, checkText(c)) : checkText(c)),
-      el('td', { class: 'menu' }, write ? moreMenu(r.runner, [
+      el('td', { class: 'menu-cell' }, write ? moreMenu(r.runner, [
         { text: '检查', icon: 'check', id: `check-${r.runner}`, run: () => checkRunner(r, box) },
         { text: '重新登记', icon: 'upload', id: `again-${r.runner}`, run: () => registerAgain(r, box) },
         { text: '在其他 GPU 机上登记…', icon: 'plus', href: hrefOf(['runner-new'], { from: r.runner }) }]) : null));
