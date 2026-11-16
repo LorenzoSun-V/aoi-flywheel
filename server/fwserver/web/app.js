@@ -3207,9 +3207,9 @@ async function runnersPage() {
       el('td', {}, r.conda_env), el('td', {}, r.framework || '仅检查'), el('td', {}, runnerSource(r)), timeCell(r.created_at),
       el('td', { class: 'check-state' }, c ? el('a', { href: hrefOf(['job', String(c.job_id)]) }, checkText(c)) : checkText(c)),
       el('td', { class: 'menu' }, write ? moreMenu(r.runner, [
-        ['检查', () => checkRunner(r, box)],
-        ['重新登记', () => registerAgain(r, box)],
-        ['在其他 GPU 机上登记…', () => { location.hash = hrefOf(['runner-new'], { from: r.runner }); }]]) : null));
+        { text: '检查', icon: 'check', id: `check-${r.runner}`, run: () => checkRunner(r, box) },
+        { text: '重新登记', icon: 'upload', id: `again-${r.runner}`, run: () => registerAgain(r, box) },
+        { text: '在其他 GPU 机上登记…', icon: 'plus', href: hrefOf(['runner-new'], { from: r.runner }) }]) : null));
   };
   show(crumbs('runners', null), pageHead(['推理环境', info(RUNNER_INFO, '推理环境说明')],
     write ? el('a', { class: 'button primary', id: 'runner-new', href: hrefOf(['runner-new']) }, '登记推理环境') : null),

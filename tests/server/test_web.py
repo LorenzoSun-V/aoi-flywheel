@@ -1682,6 +1682,9 @@ def test_a_runner_is_registered_from_the_web(service, tokens, api, make_worker, 
     assert '推理环境' in seen['nav']
     assert seen['row'][:6] == [r['runner'], r['ref'], f'{a.name} 在线', r['conda_env'], '仅检查', '-']
     assert seen['row'][7] == f'与 {r["ref"]} 登记时一致'
+    assert seen['menu'] == ['检查', '重新登记', '在其他 GPU 机上登记…']
+    checked = api.job(int(seen['checkHash'].split('/')[-1]))
+    assert checked['kind'] == 'check' and checked['runner'] == r['ref'] and checked['id'] != check['id']
     assert seen['empty'] == '请填写名称、GPU 机、conda 环境和 onnx2engine 程序。'
     assert seen['toolShown'] and seen['toolHidden']
     job = int(seen['madeHash'].split('/')[-1])
@@ -1691,7 +1694,7 @@ def test_a_runner_is_registered_from_the_web(service, tokens, api, make_worker, 
                                'conda_env': made, 'src_dir': '', 'framework': '', 'onnx2engine': ''}
     assert seen['madeWhat'] == f'{made}（GPU 机 {a.name}，conda 环境 {made}）'
     assert seen['madeWaits'] == ''                              # the machine asked for work a moment ago
-    assert seen['check'].startswith(f'与 {r["ref"]} 登记时一致（任务 {check["id"]}）')
+    assert seen['check'].startswith(f'检查排队（任务 {checked["id"]}）')     # the newest check: the one just asked for
     assert seen['versions'] == 1
     again = api.job(int(seen['againHash'].split('/')[-1]))
     assert again['kind'] == 'register' and again['params']['name'] == r['runner'] and again['params']['conda_env'] == r['conda_env']

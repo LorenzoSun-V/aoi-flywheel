@@ -23,6 +23,13 @@ const { chromium } = require('playwright');
   await page.waitForSelector('#runners');
   seen.nav = await page.$$eval('#nav a', (a) => a.map((x) => x.textContent.trim()));
   seen.row = await page.$eval(`#runners tr[data-runner="${runner}"]`, (tr) => [...tr.cells].slice(0, 8).map((c) => c.textContent.trim()));
+  await page.click(`#runners tr[data-runner="${runner}"] .menu button`);  // the row's ⋯: 检查 opens the new check job
+  seen.menu = await page.$$eval('[role=menu] [role=menuitem]', (m) => m.map((x) => x.textContent.trim()));
+  await page.click(`[id="check-${runner}"]`);
+  await page.waitForFunction(() => location.hash.startsWith('#/job/') && document.querySelector('main h1')?.textContent.includes('检查推理环境'));
+  seen.checkHash = await page.evaluate(() => location.hash);
+  await page.goto(`${url}#/runners`);
+  await page.waitForSelector('#runners');
   await page.click('#runner-new');
   await page.waitForSelector('#runner-form');
   await page.click('#runner-go');
