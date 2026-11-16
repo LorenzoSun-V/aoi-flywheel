@@ -391,31 +391,40 @@ def cancel(conn, job_id: int, user_id: Optional[int] = None) -> dict:
 
 # --- is a GPU machine there ----------------------------------------------------------------------------------
 # A worker asks for a job every few seconds while idle (fw worker --poll, 5 by default) and renews its lease
-# every third of it while running one, so a machine heard from within the last minute is running fw worker.
+# every third of it while running one: a machine heard from within a minute, or within two thirds of the lease
+# when that is longer (FW_JOB_LEASE_SECONDS raised for a slow network), is running fw worker.
 ONLINE_SECONDS = 60
 
 
-def note_seen(conn, worker_id: int) -> None:
+def online_seconds(lease_seconds: int) -> int:
+    return max(ONLINE_SECONDS, lease_seconds * 2 // 3)
+
+
+def note_seen(conn, worker_id: int, lease_seconds: int) -> None:
     """A worker account asked for work or renewed a lease just now (worker_seen, 0019)."""
-    conn.execute('INSERT INTO worker_seen (worker_id, seen_at) VALUES (%s, clock_timestamp()) '
-                 'ON CONFLICT (worker_id) DO UPDATE SET seen_at = EXCLUDED.seen_at', (worker_id,))
+    conn.execute('INSERT INTO worker_seen (worker_id, seen_at, online_until) VALUES '
+                 '(%s, clock_timestamp(), clock_timestamp() + make_interval(secs => %s)) ON CONFLICT (worker_id) '
+                 'DO UPDATE SET seen_at = EXCLUDED.seen_at, online_until = EXCLUDED.online_until',
+                 (worker_id, online_seconds(lease_seconds)))
 
 
 def machines(conn, worker_id: Optional[int] = None) -> List[dict]:
-    """The enabled worker accounts (one per GPU machine), or the one given, with when each was last heard from
-    and whether that was recent enough to count as online."""
+    """The enabled worker accounts (one per GPU machine) with when each was last heard from and whether that was
+    recent enough to count as online; or the one given, disabled or not (the machine a runner is on)."""
     rows = conn.execute(
-        "SELECT u.name, s.seen_at, coalesce(s.seen_at > clock_timestamp() - make_interval(secs => %s), false) "
-        "AS online FROM users u LEFT JOIN worker_seen s ON s.worker_id = u.id "
-        "WHERE u.role = 'worker' AND u.disabled_at IS NULL AND (%s::bigint IS NULL OR u.id = %s) ORDER BY lower(u.name)",
-        (ONLINE_SECONDS, worker_id, worker_id)).fetchall()
-    return [{'name': r['name'], 'seen_at': _stamp(r['seen_at']), 'online': r['online']} for r in rows]
+        "SELECT u.name, u.disabled_at IS NOT NULL AS disabled, s.seen_at, "
+        "coalesce(s.online_until > clock_timestamp(), false) AND u.disabled_at IS NULL AS online "
+        "FROM users u LEFT JOIN worker_seen s ON s.worker_id = u.id WHERE u.role = 'worker' "
+        "AND (%s::bigint IS NULL AND u.disabled_at IS NULL OR u.id = %s) ORDER BY lower(u.name)",
+        (worker_id, worker_id)).fetchall()
+    return [dict({'name': r['name'], 'seen_at': _stamp(r['seen_at']), 'online': r['online']},
+                 **({'disabled': True} if r['disabled'] else {})) for r in rows]
 
 
 def claim(conn, worker: dict, lease_seconds: int) -> Optional[dict]:
     """The oldest queued job this worker can run, now running under a new lease; None when there is none.
     Jobs bound to a runner go only to the worker the runner version is on."""
-    note_seen(conn, worker['user_id'])
+    note_seen(conn, worker['user_id'], lease_seconds)
     expire_leases(conn)
     token = secrets.token_urlsafe(32)
     with conn.transaction():
@@ -453,7 +462,7 @@ def _held(conn, job_id: int, token: str) -> dict:
 
 def renew(conn, job_id: int, token: str, lease_seconds: int, worker_id: Optional[int] = None) -> dict:
     if worker_id is not None:
-        note_seen(conn, worker_id)
+        note_seen(conn, worker_id, lease_seconds)
     with conn.transaction():
         row = _held(conn, job_id, token)
         conn.execute('UPDATE jobs SET lease_expires = clock_timestamp() + make_interval(secs => %s) WHERE id = %s',

@@ -2961,7 +2961,6 @@ function jobWhat(j) {
 
 const JOB_PAGE = 100;
 
-// What became of a failed job, after its state in the list: submitted again, or marked handled.
 // A GPU machine as the jobs pages show it: 在线, or 离线 with when it last asked for work (or never did).
 export function machineText(m, now = new Date()) {
   return m.online ? `${m.name} 在线` : `${m.name} 离线（${m.seen_at ? `最后联系于 ${listWhen(m.seen_at, now)}` : '尚未连接过平台'}）`;
@@ -2971,10 +2970,12 @@ export function machineText(m, now = new Date()) {
 export function waitNotice(j, now = new Date()) {
   if (j.status !== 'queued' || !j.waits_on || j.waits_on.some((m) => m.online)) return null;
   if (!j.waits_on.length) return '平台尚无 GPU worker 账号，任务无法运行；请管理员新建 worker 账号，并在 GPU 机上启动 fw worker。';
+  if (j.runner && j.waits_on[0].disabled) return `推理环境 ${j.runner} 所在 GPU 机的 worker 账号 ${j.waits_on[0].name} 已停用，任务无法运行；请管理员启用该账号，或在其他 GPU 机上重新登记该推理环境后再提交。`;
   if (j.runner) return `推理环境 ${j.runner} 所在的 GPU 机 ${machineText(j.waits_on[0], now)}，任务将在该机器启动 fw worker 后运行。`;
   return `暂无在线的 GPU 机：${j.waits_on.map((m) => machineText(m, now)).join('；')}。请在 GPU 机上启动 fw worker，任务将随后运行。`;
 }
 
+// What became of a failed job, after its state in the list: submitted again, or marked handled.
 export function failedAfter(j) {
   if (j.status !== 'failed') return '';
   if (j.retried_by) return `（已重新提交为任务 ${j.retried_by.id}）`;

@@ -584,4 +584,6 @@ test('a GPU machine is online or says when it was last heard from; a queued job 
   assert.equal(waitNotice(job({ runner: 'trt10@2' }), now),
     '推理环境 trt10@2 所在的 GPU 机 gpu-01 离线（最后联系于 今天 17:25），任务将在该机器启动 fw worker 后运行。');
   assert.match(waitNotice(job({ waits_on: [] }), now), /^平台尚无 GPU worker 账号/);
+  assert.match(waitNotice(job({ runner: 'trt10@2', waits_on: [{ ...off, disabled: true }] }), now),
+    /^推理环境 trt10@2 所在 GPU 机的 worker 账号 gpu-01 已停用/);
 });

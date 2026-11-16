@@ -1134,7 +1134,7 @@ def create_app(settings: Optional[Settings] = None, hooks: Optional[dict] = None
     def list_workers(user: dict = Depends(job_reader)):
         """The GPU machines (worker accounts) and whether each is running fw worker now."""
         with conn() as c:
-            return {'workers': jobs.machines(c), 'online_seconds': jobs.ONLINE_SECONDS}
+            return {'workers': jobs.machines(c), 'online_seconds': jobs.online_seconds(settings.job_lease_seconds)}
 
     @app.post('/api/v1/worker/claim')
     def claim_job(user: dict = Depends(worker)):

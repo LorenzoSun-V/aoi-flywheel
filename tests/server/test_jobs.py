@@ -1085,7 +1085,8 @@ def test_a_gpu_machine_is_seen_online_while_it_asks_for_work(api, make_api, make
     a, b = make_worker(), make_worker()
     seen = lambda: {m['name']: m for m in api.workers()['workers']}   # noqa: E731
     assert seen()[a.name] == {'name': a.name, 'seen_at': None, 'online': False}
-    assert api.workers()['online_seconds'] == server_jobs.ONLINE_SECONDS
+    assert api.workers()['online_seconds'] == server_jobs.ONLINE_SECONDS == server_jobs.online_seconds(60)
+    assert server_jobs.online_seconds(300) == 200                     # a longer lease: renewals come less often
     r = runner(a, fake_conda)
     job = api.submit_job('check', runner=r['runner'])
     assert [m['name'] for m in api.job(job['id'])['waits_on']] == [a.name]
@@ -1095,15 +1096,20 @@ def test_a_gpu_machine_is_seen_online_while_it_asks_for_work(api, make_api, make
     got = a.claim()
     assert got['id'] == job['id'] and api.job(job['id'])['waits_on'] is None and seen()[a.name]['online']
     # heard from two minutes ago: offline, with that time; a renewal while running brings it back
-    sql.execute("UPDATE worker_seen SET seen_at = now() - interval '2 minutes' WHERE worker_id = "
+    sql.execute("UPDATE worker_seen SET seen_at = now() - interval '2 minutes', online_until = now() - interval '1 minute' WHERE worker_id = "
                 '(SELECT id FROM users WHERE name = %s)', (a.name,))
     assert not seen()[a.name]['online'] and seen()[a.name]['seen_at']
     a.renew(got['id'], got['token'])
     assert seen()[a.name]['online']
     # a job bound to no runner waits on every machine; a disabled account is none of them
+    on_b = runner(b, fake_conda)
     with db.connect(database) as c:
         auth.set_disabled(c, b.name, True)
     assert b.name not in seen()
+    # the machine of a runner whose worker account is disabled: named so, never online
+    waiting = api.submit_job('check', runner=on_b['runner'])
+    [m] = api.job(waiting['id'])['waits_on']
+    assert m['name'] == b.name and m['disabled'] and not m['online'] and m['seen_at']
     free = server_jobs.machines(sql)
     assert a.name in [m['name'] for m in free] and b.name not in [m['name'] for m in free]
     with pytest.raises(ApiError) as e:
