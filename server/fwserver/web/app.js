@@ -1181,11 +1181,15 @@ async function versionPage(name, number, query) {
   const labeled = images.filter((f) => labelOf(f)).length;
   const detail = snapshot && !dir ? await api.trainset(version.dataset, String(version.number)) : null;
   const writer = !dir && can('datasets.write');
+  // folders are added to the newest version only: the page of an older one does not offer it
+  const owner = writer && version.kind !== 'trainset' && version.kind !== 'batch' ? await api.dataset(version.dataset) : null;
+  const addable = owner && owner.latest && owner.latest.number === version.number && !(owner.kind === 'pool' && !owner.classes.length);
   show(crumbsFor(version, dir, place),
     el('div', { class: 'page-head' }, el('h1', {}, version.ref + (dir ? ` · ${dir}` : ''), labelChips(version),
       snapshot && flat && !dir ? info(['此处的目录结构与 fw get 默认取回的结构一致：train 中有标注框的图片位于 train/images，没有标注框的图片位于 neg_train；',
         'val 和 test 的图片不区分有无标注框，均位于各自的 images 目录中。'], '快照目录说明') : null),
     el('div', { class: 'actions' },
+      addable ? el('a', { id: 'add-folders', class: `button${version.kind === 'pool' ? '' : ' primary'}`, href: hrefOf(['add', version.dataset]) }, icon('plus'), '上传新增目录') : null,
       writer && version.kind === 'pool' ? el('a', { id: 'trainset-from', class: 'button primary', href: hrefOf(['trainset-new'], { from: version.ref }) }, '建立训练集快照') : null,
       !dir && snapshot && can('models.write') ? el('a', { id: 'model-from', class: 'button primary', href: hrefOf(['model-register'], { trainset: version.ref }) }, '登记模型版本') : null,
       writer && snapshot ? el('a', { id: 'trainset-next', class: 'button', href: hrefOf(['trainset-new'], { name: version.dataset }) }, '建立下一版') : null)),
@@ -5116,6 +5120,11 @@ async function overviewPage(query) {
         el('td', { class: 'act' }, row.items.length ? moreMenu(row.ref, row.items) : null));
     })) : el('p', { class: 'muted' }, '该产线暂无模型。');
 
+  // what is done most to a pool or test set of the line, without opening it first
+  const dataMenu = (d) => !can('datasets.write') || d.kind === 'trainset' ? null : moreMenu(d.name, [
+    { icon: 'plus', text: '上传新增目录', href: hrefOf(['add', d.name]), id: `add-${d.name}` },
+    d.kind === 'pool' && d.latest ? { icon: 'plus', text: '建立训练集快照', href: hrefOf(['trainset-new'], { from: d.latest.ref }) } : null,
+  ].filter(Boolean));
   const sorted = data.slice().sort((a, b) => DATA_ORDER.indexOf(a.kind) - DATA_ORDER.indexOf(b.kind));
   const dataTable = sorted.length ? el('table', { class: 'data' },
     el('tr', {}, el('th', {}, '名称'), el('th', {}, '类型'), el('th', { class: 'num' }, '大小'), el('th', { class: 'act' })),
@@ -5124,7 +5133,8 @@ async function overviewPage(query) {
         d.latest ? el('a', { href: hrefOf(['v', d.name, String(d.latest.number)]) }, d.latest.ref) : el('a', { href: hrefOf(['d', d.name]) }, d.name), labelChips(d.latest || {}))),
       el('td', {}, kindText(d)),
       el('td', { class: 'num' }, d.latest ? sizeText(d.latest.total_bytes) : '—'),
-      el('td', { class: 'act' }, el('a', { class: 'tool go', href: hrefOf(['d', d.name]), title: `打开 ${d.name}`, 'aria-label': `打开 ${d.name}` }, icon('right'))))))
+      el('td', { class: 'act' }, dataMenu(d),
+        el('a', { class: 'tool go', href: hrefOf(['d', d.name]), title: `打开 ${d.name}`, 'aria-label': `打开 ${d.name}` }, icon('right'))))))
     : el('p', { class: 'muted' }, '该产线暂无数据池和训练集快照。',
       can('datasets.write') ? [' ', el('a', { href: hrefOf(['dataset-new'], where) }, '新建数据池')] : null);
 

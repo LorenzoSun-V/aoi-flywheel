@@ -1530,3 +1530,30 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert [s['step'] for s in b['steps']] == ['upload', 'submit', 'reject', 'upload', 'submit', 'approve', 'import']
     assert (b['steps'][2]['images'], b['steps'][2]['notes']) == (['b.png'], {'b.png': '缺少划痕框'})
     assert api.version(pool, 2)['source'] == f'batch:{name}@2'
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_folders_are_added_from_the_newest_version_and_from_the_overview(service, tokens, api, make_api, tmp_path):
+    """上传新增目录 sits beside the title of the newest version of a pool or test set (not an older one) and in
+    the ⋯ of their rows on the line's overview; a snapshot's row has no ⋯; a field account sees none of them."""
+    from test_trainsets import add_version, pool, sample_files
+    tag = os.urandom(2).hex().upper()
+    line = f'AF{tag}'
+    data = pool(api, tmp_path / 'a', sample_files('2026-09', 3), line=line, name=f'SES-{line}-pool')
+    add_version(api, tmp_path / 'b', data, sample_files('2026-10', 2))
+    test = f'SES-{line}-test'
+    api.create_dataset(test, 'SES', line, 'test', '')
+    add_version(api, tmp_path / 't', test, sample_files('2026-11', 2))
+    r = subprocess.run(['node', str(WEB_TESTS / 'addfrom.cjs'), service.url + '/', tokens['algo'], tokens['field'], data, test,
+                        'SES', line], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert seen['newest'] == [['add-folders', '上传新增目录'], ['trainset-from', '建立训练集快照']]
+    assert seen['older'] == [['trainset-from', '建立训练集快照']]
+    assert seen['testNewest'] == [['add-folders', '上传新增目录']]
+    assert dict(seen['rows']) == {data: 1, test: 1}
+    assert seen['poolMenu'] == [['上传新增目录', f'#/add/{data}'], ['建立训练集快照', f'#/trainset-new?from={data}%402']]
+    assert seen['testMenu'] == [['上传新增目录', f'#/add/{test}']]
+    assert seen['opened'] == f'#/add/{data}'
+    assert seen['fieldNewest'] == [] and dict(seen['fieldRows']) == {data: 0, test: 0}
