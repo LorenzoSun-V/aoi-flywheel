@@ -180,6 +180,8 @@ def _retry(conn, store: Store, user: dict, job_id: int, runner: Optional[str]) -
     p = old['params']
     if old['kind'] == 'check':
         return jobs.submit(conn, user, 'check', runner)
+    if old['kind'] == 'register':  # the same registration, on the same machine
+        return jobs.submit(conn, user, 'register', None, dict(p, machine=p['machine']['name']))
     data = p['data']
     if old['kind'] == 'eval':
         where = data['ref'] + (f':{data["split"]}' if data.get('split') else '')

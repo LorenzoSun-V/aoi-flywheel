@@ -311,6 +311,7 @@ export const api = {
   releases: (site, line) => call(`/releases?${new URLSearchParams({ site, line })}`),  // oldest deployed first
   registerRelease: (body) => call('/releases', { method: 'POST', body }),
   runners: async () => (await call('/runners')).runners,
+  runner: async (name) => (await call(`/runners/${encodeURIComponent(name)}`)).versions,
   workers: () => call('/workers'),
   jobs: async (status = '', limit = 100) => (await call(`/jobs?status=${encodeURIComponent(status)}&limit=${limit}`)).jobs,
   jobPage: (query) => call(`/jobs?${new URLSearchParams(query)}`),  // {jobs, more}
@@ -675,7 +676,7 @@ function tagChips(tags) {
 
 // --- where a page is: the path from the home page, and the way back ---------------------------------------
 const SECTIONS = { datasets: '数据集', batches: '标注批次', models: '模型', releases: '发布记录', jobs: '任务',
-  predictions: '预测集', events: '操作记录', users: '账号', me: '我的凭据', places: '现场和产线' };
+  predictions: '预测集', events: '操作记录', users: '账号', me: '我的凭据', places: '现场和产线', runners: '推理环境' };
 const PLACED = new Set(['datasets', 'batches', 'models', 'releases', 'jobs', 'predictions']);  // the lists that are browsed by site and line
 
 // The path to a page as [[text, link or null], ...]: the home page (the overview), the site and line the thing
@@ -2546,7 +2547,8 @@ async function submitForms(mv) {
   const runners = (await api.runners()).filter((r) => r.framework);
   if (!runners.length) {
     return [el('h2', {}, '提交任务'), el('p', { class: 'muted' }, '暂无可用的推理环境。',
-      info('请在 GPU 机上使用 worker 账号运行 fw runner register --framework rfdetr --onnx2engine <程序> 登记推理环境。', '推理环境说明'))];
+      can('jobs.write') ? [' ', el('a', { href: hrefOf(['runner-new']) }, '登记推理环境')] : null,
+      info('评估和预标注需要选择了框架（rfdetr）和 onnx2engine 程序的推理环境。可在「推理环境」页面登记，或在 GPU 机上使用 worker 账号运行 fw runner register --framework rfdetr --onnx2engine <程序>。', '推理环境说明'))];
   }
   const runnerSelect = () => el('select', {}, runners.map((r) => el('option', { value: r.ref }, `${r.ref}（${r.worker}，${r.conda_env}）`)));
   const form = (title, kind, fields, params, hint) => {
@@ -2999,6 +3001,7 @@ function refreshLater(fn, ms) {
 function jobWhat(j) {
   const p = j.params || {};
   if (j.kind === 'check') return '';
+  if (j.kind === 'register') return [runnerLink(p.name), `（GPU 机 ${p.machine.name}，conda 环境 ${p.conda_env}）`];
   return [p.model && mref(p.model.ref), ' 在 ', p.data && vref(p.data.ref + (p.data.split ? `:${p.data.split}` : '')),
     p.data && p.data.dirs && p.data.dirs.length ? `（${p.data.dirs.join('、')}）` : '', p.data ? `，${p.data.images} 张` : ''];
 }
@@ -3014,6 +3017,11 @@ export function machineText(m, now = new Date()) {
 export function waitNotice(j, now = new Date()) {
   if (j.status !== 'queued' || !j.waits_on || j.waits_on.some((m) => m.online)) return null;
   if (!j.waits_on.length) return '平台尚无 GPU worker 账号，任务无法运行；请管理员新建 worker 账号，并在 GPU 机上启动 fw worker。';
+  if (j.machine) {
+    const m = j.waits_on[0];
+    return m.disabled ? `GPU 机 ${m.name} 的 worker 账号已停用，无法登记；请管理员启用该账号，或取消本任务后选择其他 GPU 机。`
+      : `登记推理环境的 GPU 机 ${machineText(m, now)}，任务将在该机器启动 fw worker 后运行。`;
+  }
   if (j.runner && j.waits_on[0].disabled) return `推理环境 ${j.runner} 所在 GPU 机的 worker 账号 ${j.waits_on[0].name} 已停用，任务无法运行；请管理员启用该账号，或在其他 GPU 机上重新登记该推理环境后再提交。`;
   if (j.runner) return `推理环境 ${j.runner} 所在的 GPU 机 ${machineText(j.waits_on[0], now)}，任务将在该机器启动 fw worker 后运行。`;
   return `暂无在线的 GPU 机：${j.waits_on.map((m) => machineText(m, now)).join('；')}。请在 GPU 机上启动 fw worker，任务将随后运行。`;
@@ -3083,6 +3091,7 @@ function jobResult(j) {
   if (j.kind === 'eval' && r.eval_id) return el('a', { href: hrefOf(['eval', String(r.eval_id)]) }, `评估报告 #${r.eval_id}`);
   if (j.kind === 'predict' && r.prediction_set) return el('a', { href: hrefOf(['p', String(r.prediction_set)]) }, `预测集 #${r.prediction_set}`);
   if (j.kind === 'check') return `环境${r.same_env ? '一致' : '不一致'}，源码${r.same_src ? '一致' : '不一致'}`;
+  if (j.kind === 'register' && r.ref) return [r.created ? '已登记 ' : '与 ', runnerLink(r.ref.split('@')[0], r.ref), r.created ? '' : ' 相同，没有新版本'];
   return Object.keys(r).length ? el('span', { class: 'mono' }, JSON.stringify(r)) : '-';
 }
 
@@ -3117,7 +3126,7 @@ async function jobPage(id, query) {
     el('div', { class: 'row' }, el('h1', { style: 'flex:1' }, `任务 ${j.id}：${j.kind_text}`), cancel),
     el('dl', { class: 'kv' },
       el('dt', {}, '内容'), el('dd', {}, jobWhat(j) || '-'),
-      el('dt', {}, '推理环境'), el('dd', {}, j.runner || '-'),
+      el('dt', {}, '推理环境'), el('dd', {}, j.runner ? runnerLink(j.runner.split('@')[0], j.runner) : '-'),
       el('dt', {}, '状态'), el('dd', {}, status),
       j.status === 'failed' ? null : [el('dt', {}, '结果'), result],  // a failure's reason is in its card below
       el('dt', {}, '提交'), el('dd', {}, `${j.submitted_by}，${when(j.created_at)}`),
@@ -3146,13 +3155,152 @@ async function jobPage(id, query) {
   await poll();
 }
 
+// --- runners (inference environments) ----------------------------------------------------------------
+function runnerLink(name, text = name) {
+  return el('a', { href: hrefOf(['runner', name]) }, text);
+}
+
+// The newest check of a runner in words (GET /runners last_check): not yet, under way, failed, or whether the
+// environment and the source were as registered.
+export function checkText(c) {
+  if (!c) return '尚未检查';
+  if (c.status === 'queued' || c.status === 'running') return `检查${c.status_text}`;
+  if (c.status === 'failed') return '检查失败';
+  if (c.same_env && c.same_src) return `与 ${c.ref} 登记时一致`;
+  return [c.same_env ? '' : '环境已变化', c.same_src ? '' : '源码已变化'].filter(Boolean).join('，') + `（与 ${c.ref} 相比）`;
+}
+
+const runnerSource = (r) => (r.src_dir ? [el('span', { class: 'mono' }, (r.src_commit || '').slice(0, 8)), r.src_dirty ? '（有未提交的改动）' : ''] : '-');
+
+// What a registration asks the worker of the runner's machine to read again: as the newest version was registered.
+const registerParams = (r) => ({ name: r.runner, machine: r.worker, conda_env: r.conda_env, src_dir: r.src_dir,
+  framework: r.framework, onnx2engine: r.onnx2engine });
+
+async function submitThen(ask, done, where) {
+  try {
+    const job = await ask();
+    location.hash = hrefOf(['job', String(job.id)]);
+    toastDone(done(job));
+  } catch (e) { where.after(errorBox(e)); }
+}
+const registerAgain = (r, where) => submitThen(() => api.submitJob('register', null, registerParams(r)),
+  (job) => `已提交任务 ${job.id}：在 ${r.worker} 上重新登记 ${r.runner}`, where);
+const checkRunner = (r, where) => submitThen(() => api.submitJob('check', r.runner, null),
+  (job) => `已提交任务 ${job.id}：检查 ${r.runner}`, where);
+
+const RUNNER_INFO = ['推理环境是 GPU 机上的 conda 环境，评估和预标注在其中用 TensorRT 运行。登记时记下环境的包清单、源码提交号和 onnx2engine 程序的哈希，任一项变化即登记为新版本。',
+  '登记由该 GPU 机上的 fw worker 完成（只有那台机器能读取它的环境）：在网页上提交后，任务排队等待该机器领取。对应命令行 fw runner register、fw runner check。'];
+
+const machineState = (m, name) => (m ? statusText(m.online ? 'green' : 'gray', machineText(m)) : name);
+
+async function runnersPage() {
+  const show = live();
+  const [runners, workers] = await Promise.all([api.runners(), api.workers()]);
+  const machine = new Map(workers.workers.map((m) => [m.name, m]));
+  const write = can('jobs.write');
+  const head = el('tr', {}, ['名称', '最新版本', 'GPU 机', 'conda 环境', '框架', '源码', '登记时间', '最近检查', ''].map((h) => el('th', {}, h)));
+  const box = el('div');
+  const rowOf = (r) => {
+    const c = r.last_check;
+    return el('tr', { 'data-runner': r.runner },
+      el('td', {}, runnerLink(r.runner)), el('td', {}, r.ref), el('td', {}, machineState(machine.get(r.worker), r.worker)),
+      el('td', {}, r.conda_env), el('td', {}, r.framework || '仅检查'), el('td', {}, runnerSource(r)), timeCell(r.created_at),
+      el('td', { class: 'check-state' }, c ? el('a', { href: hrefOf(['job', String(c.job_id)]) }, checkText(c)) : checkText(c)),
+      el('td', { class: 'menu' }, write ? moreMenu(r.runner, [
+        ['检查', () => checkRunner(r, box)],
+        ['重新登记', () => registerAgain(r, box)],
+        ['在其他 GPU 机上登记…', () => { location.hash = hrefOf(['runner-new'], { from: r.runner }); }]]) : null));
+  };
+  show(crumbs('runners', null), pageHead(['推理环境', info(RUNNER_INFO, '推理环境说明')],
+    write ? el('a', { class: 'button primary', id: 'runner-new', href: hrefOf(['runner-new']) }, '登记推理环境') : null),
+  box, runners.length ? sortable(el('table', { id: 'runners' }, head, runners.map(rowOf))) : el('p', { class: 'muted' }, '暂无推理环境。'));
+}
+
+async function runnerPage(name) {
+  const show = live();
+  const [versions, workers, all] = await Promise.all([api.runner(name), api.workers(), api.runners()]);
+  const latest = versions[versions.length - 1];
+  const now = all.find((x) => x.runner === latest.runner);
+  const check = now && now.last_check;
+  const write = can('jobs.write');
+  const box = el('div');
+  const head = el('tr', {}, ['版本', 'GPU 机', 'conda 环境', '框架', 'onnx2engine', '源码', '包清单', '登记人', '登记时间'].map((h) => el('th', {}, h)));
+  show(crumbs('runners', null, latest.runner),
+    pageHead(latest.runner, ...(write ? [
+      el('button', { type: 'button', id: 'runner-check', onclick: () => checkRunner(latest, box) }, '检查'),
+      el('button', { type: 'button', class: 'primary', id: 'runner-again', onclick: () => registerAgain(latest, box) }, '重新登记'),
+      el('a', { class: 'button', id: 'runner-elsewhere', href: hrefOf(['runner-new'], { from: latest.runner }) }, '在其他 GPU 机上登记…')] : [])),
+    box,
+    el('dl', { class: 'kv' },
+      el('dt', {}, '最新版本'), el('dd', {}, latest.ref),
+      el('dt', {}, 'GPU 机'), el('dd', {}, machineState(workers.workers.find((m) => m.name === latest.worker), latest.worker)),
+      el('dt', {}, '最近检查'), el('dd', { id: 'runner-last-check' },
+        check ? el('a', { href: hrefOf(['job', String(check.job_id)]) }, `${checkText(check)}（任务 ${check.job_id}）`) : checkText(null),
+        info(['检查由该 GPU 机上的 fw worker 重新读取包清单、源码和 onnx2engine 程序，与登记时比较。',
+          '有变化且以现状为准时，请「重新登记」，平台将记为新版本；评估和预标注默认使用最新版本。'], '检查说明'))),
+    el('h2', {}, '版本'),
+    sortable(el('table', { id: 'runner-versions' }, head, versions.slice().reverse().map((v) => el('tr', {},
+      el('td', {}, v.ref), el('td', {}, v.worker), el('td', {}, v.conda_env), el('td', {}, v.framework || '仅检查'),
+      textCell(v.onnx2engine || '-'), el('td', {}, runnerSource(v)), el('td', {}, hashText(v.env_sha256, '包清单哈希值')),
+      el('td', {}, v.registered_by), timeCell(v.created_at))))));
+}
+
+// The form of a registration: on which GPU machine, which conda environment, source and onnx2engine program.
+// ?from=<runner> fills it in from that runner's newest version (to register it on another machine).
+async function runnerNewPage(query) {
+  const show = live();
+  const from = query.get('from');
+  const [workers, base] = await Promise.all([api.workers(), from ? api.runner(from).then((v) => v[v.length - 1]) : null]);
+  const b = base || {};
+  const name = el('input', { id: 'runner-name', value: b.runner || '', placeholder: '例如 detr-pro', autocomplete: 'off' });
+  const machine = el('select', { id: 'runner-machine' }, el('option', { value: '' }, workers.workers.length ? '选择 GPU 机' : '暂无 GPU worker 账号'),
+    workers.workers.map((m) => el('option', { value: m.name }, machineText(m))));
+  const env = el('input', { id: 'runner-env', value: b.conda_env || '', placeholder: '例如 detr-pro', autocomplete: 'off' });
+  const src = el('input', { id: 'runner-src', value: b.src_dir || '', placeholder: '选填，例如 /opt/deploy/rf-detr', autocomplete: 'off' });
+  const framework = el('select', { id: 'runner-framework' }, el('option', { value: 'rfdetr' }, 'rfdetr（py_rfdetr）'),
+    el('option', { value: '' }, '无（仅用于检查）'));
+  framework.value = base ? b.framework || '' : 'rfdetr';
+  const tool = el('input', { id: 'runner-onnx2engine', value: b.onnx2engine || '', placeholder: '例如 /opt/deploy/build/onnx2engine_st', autocomplete: 'off' });
+  const toolRow = field('onnx2engine 程序', tool, ['部署代码的 onnx2engine 程序在该 GPU 机上的路径：只带一个参数（ONNX 路径）运行，在 ONNX 旁写出同名的 .bin 或 .engine。RF-DETR 部署代码请登记静态的 onnx2engine_st。',
+    '对应命令行选项 fw runner register --onnx2engine。']);
+  const sync = () => { toolRow.hidden = !framework.value; };
+  framework.addEventListener('change', sync);
+  sync();
+  const msg = el('div');
+  const go = el('button', { type: 'submit', class: 'primary', id: 'runner-go' }, '提交登记');
+  const form = el('form', { class: 'panel form', id: 'runner-form', onsubmit: async (ev) => {
+    ev.preventDefault();
+    const params = { name: name.value.trim(), machine: machine.value, conda_env: env.value.trim(), src_dir: src.value.trim(),
+      framework: framework.value, onnx2engine: framework.value ? tool.value.trim() : '' };
+    if (!params.name || !params.machine || !params.conda_env || (params.framework && !params.onnx2engine)) {
+      msg.replaceChildren(errorBox(`请填写名称、GPU 机、conda 环境${params.framework ? '和 onnx2engine 程序' : ''}。`));
+      return;
+    }
+    go.disabled = true;
+    try {
+      const job = await api.submitJob('register', null, params);
+      location.hash = hrefOf(['job', String(job.id)]);
+      toastDone(`已提交任务 ${job.id}：在 ${params.machine} 上登记 ${params.name}`);
+    } catch (e) { msg.replaceChildren(errorBox(e)); go.disabled = false; }
+  } },
+  msg,
+  field('名称', name, ['字母、数字和 . _ -，全平台唯一。填写已有推理环境的名称时，登记为它的新版本（例如迁到另一台 GPU 机）。']),
+  field('GPU 机', machine, ['由该机器上的 fw worker 读取环境并登记；机器离线时任务排队，待其上线后运行。']),
+  field('conda 环境', env, ['该 GPU 机上的 conda 环境名。对应命令行选项 fw runner register --env。']),
+  field('源码目录', src, ['选填。框架源码所在的 git 仓库，记下提交号和未提交的改动。对应命令行选项 fw runner register --src。']),
+  field('框架', framework, ['用哪个部署代码的推理模块运行 TensorRT 引擎；用于评估和预标注的推理环境必须选择。对应命令行选项 fw runner register --framework。']),
+  toolRow,
+  el('div', { class: 'row' }, go));
+  show(crumbs('runners', null, '登记推理环境'), pageHead(['登记推理环境', info(RUNNER_INFO, '推理环境说明')]), form);
+}
+
 // The prediction sets of a model version, or (by: grouping as groupedTable takes it) the list of all of them.
 // A failed job: why, and what now. Its work submitted again (on the runner chosen, by default the newest version
 // of its own) or, when no new run is needed, marked handled; after either it no longer waits on the home page.
 async function failedCard(j) {
   const card = el('div', { class: 'panel card bad-card', id: 'job-failed' });
   const head = el('div', { class: 'row' }, el('h3', { style: 'flex:1;margin:0' }, '任务失败', info([
-    '请先查看下方日志，找出失败原因并排除，例如在 GPU 机上修复推理环境后用 fw runner register 重新登记。',
+    '请先查看下方日志，找出失败原因并排除，例如在 GPU 机上修复推理环境后，在「推理环境」页面重新登记。',
     '「重新提交」使用同一模型版本和同一份数据（预标注还使用同一最低分数）再运行一次，默认使用同名推理环境的最新版本。',
     '无需再运行时，请点击「标为已处理」，可写明原因（仅提交人或管理员可操作）。重新提交或标为已处理后，该任务不再列在「待我处理」中。'], '处理失败任务的说明')));
   const said = [head, el('p', { class: 'bad', id: 'job-error' }, j.error || '未说明原因')];
@@ -3173,7 +3321,7 @@ async function failedCard(j) {
     ` 的预标注，仅上传该批次的账号（${j.batch.uploaded_by}）或管理员可以重新提交，上传人可在批次页重新运行预标注。`));
   const name = (j.runner || '').split('@')[0];
   let pick = null;
-  if (j.kind !== 'check' && !elsewhere) {  // a check checks its own runner: its newest version
+  if (j.kind !== 'check' && j.kind !== 'register' && !elsewhere) {  // a check checks its own runner (newest version); a registration is asked again as it was
     const runners = (await api.runners()).filter((r) => r.framework);
     pick = el('select', { id: 'retry-runner', 'aria-label': '推理环境' }, runners.map((r) => el('option', { value: r.runner, selected: r.runner === name },
       r.runner === name ? `${r.ref}（同名推理环境的最新版本）` : r.ref)));
@@ -4669,7 +4817,7 @@ export function detailText(detail) {
 }
 
 const ROLE_NAMES = { admin: '管理员', algo: '算法工程师', field: '现场实施', worker: 'GPU worker' };  // as auth.ROLES
-const JOB_KINDS = { check: '检查推理环境', eval: '评估', predict: '推理（预标注）' };  // as jobs.KINDS
+const JOB_KINDS = { check: '检查推理环境', eval: '评估', predict: '推理（预标注）', register: '登记推理环境' };  // as jobs.KINDS
 export const EVENT_GROUPS = { dataset: '数据集', version: '版本', batch: '标注批次', site: '现场', line: '产线', model: '模型',
   model_version: '模型版本', eval: '评估', prediction_set: '预测集', release: '发布', runner: '推理环境', job: '任务',
   user: '账号', token: '凭据' };
@@ -4708,7 +4856,7 @@ export function eventText(action, detail) {
     case 'prediction_set.register': return join(`${d.model} 在 ${d.data} 上`, `${d.images} 张图片，${d.boxes} 个框`, job);
     case 'release.register': return join(`${place} 部署 ${d.model_version}`, said('部署提交号', short(d.deploy_commit, 8)));
     case 'runner.register': return join(said('conda 环境', d.conda_env), said('框架', d.framework), said('源码提交号', short(d.src_commit, 8)));
-    case 'job.submit': return join(JOB_KINDS[d.kind] || d.kind, d.model && d.data ? `${d.model} 在 ${d.data} 上` : '', said('推理环境', d.runner));
+    case 'job.submit': return join(JOB_KINDS[d.kind] || d.kind, d.model && d.data ? `${d.model} 在 ${d.data} 上` : '', said('推理环境', d.runner), said('GPU 机', d.machine));
     case 'job.cancel': return d.was === 'running' ? '运行中，已请求停止' : '排队中，已取消';
     case 'job.handle': return d.note ? `说明：${d.note}` : '';
     case 'user.create': return `角色为${ROLE_NAMES[d.role] || d.role}`;
@@ -4738,7 +4886,8 @@ export function eventHref(action, object, mayManageUsers = false) {
   if (group === 'job' && number(o)) return hrefOf(['job', number(o)]);
   if (group === 'release') return hrefOf(['releases'], { ref: o });
   if (group === 'user' || group === 'token') return mayManageUsers ? hrefOf(['users']) : null;
-  return null;  // a runner: no page of its own
+  if (group === 'runner') return hrefOf(['runner', ref(o)[0]]);
+  return null;
 }
 
 async function eventsPage(query) {
@@ -5369,6 +5518,7 @@ const NAV = [
   ['#/models', '模型', 'models.read', /^#\/(models|m\/|mv\/|eval)/, 'models'],
   ['#/releases', '发布记录', 'models.read', /^#\/(releases|release-new)/, 'chip'],
   ['#/jobs', '任务', 'jobs.read', /^#\/(jobs|job\/)/, 'jobs'],
+  ['#/runners', '推理环境', 'jobs.read', /^#\/(runners|runner\/|runner-new)/, 'chip'],
   ['#/predictions', '预测集', 'datasets.read', /^#\/(predictions|p\/)/, 'predictions'],
   ['#/events', '操作记录', 'events.read', /^#\/events/, 'events'],
   ['#/users', '账号', 'users.manage', /^#\/users/, 'users'],
@@ -5446,6 +5596,9 @@ async function render() {
     else if (parts[0] === 'release-new') await releaseNewPage(query);
     else if (parts[0] === 'jobs') await jobsPage(query);
     else if (parts[0] === 'job' && parts[1]) await jobPage(parts[1], query);
+    else if (parts[0] === 'runners') await runnersPage();
+    else if (parts[0] === 'runner' && parts[1]) await runnerPage(parts[1]);
+    else if (parts[0] === 'runner-new') await runnerNewPage(query);
     else if (parts[0] === 'predictions') await predictionsPage(query);
     else if (parts[0] === 'p' && parts[1]) await predictionPage(parts[1], query);
     else if (parts[0] === 'upload' && parts[1]) await uploadPage(parts[1]);
@@ -5473,6 +5626,7 @@ async function render() {
 const SECTION_OF = { d: 'datasets', v: 'datasets', img: 'datasets', diff: 'datasets', upload: 'datasets', add: 'datasets',
   remove: 'datasets', 'dataset-new': 'datasets', 'trainset-new': 'datasets', m: 'models', mv: 'models', eval: 'models',
   evals: 'models', 'model-register': 'models', releases: 'releases', 'release-new': 'releases', b: 'batches', 'batch-new': 'batches', 'batch-up': 'batches', job: 'jobs',
+  runner: 'runners', 'runner-new': 'runners', runners: 'runners',
   p: 'predictions', places: 'places', datasets: 'datasets', models: 'models', batches: 'batches', jobs: 'jobs',
   predictions: 'predictions', events: 'events', users: 'users', me: 'me' };
 export function errorTrail(parts) {
