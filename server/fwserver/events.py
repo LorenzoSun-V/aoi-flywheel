@@ -27,6 +27,7 @@ ACTIONS = {
     'batch.approve': '批次复核通过',
     'batch.import': '批次入库',
     'batch.close': '关闭批次',
+    'batch.reassign': '更换复核人',
     'site.add': '登记现场',
     'line.add': '登记产线',
     'site.rename': '修改现场或产线的显示名',

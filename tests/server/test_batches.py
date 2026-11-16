@@ -125,7 +125,7 @@ def test_review_round_trip(api, field, make_api, pool, day, tokens, cache, tmp_p
     with pytest.raises(ApiError, match='请指定复核人'):
         field.batch_step(name, 'submit', {})
     b = field.batch_step(name, 'submit', {'reviewer': tokens['algo_name']})
-    assert b['status'] == 'review' and b['reviewer'] == tokens['algo_name'] and b['actions'] == ['close']
+    assert b['status'] == 'review' and b['reviewer'] == tokens['algo_name'] and b['actions'] == ['reassign', 'close']
     assert [x['name'] for x in api.batches(todo=True)['batches']] == [name]
     assert api.batch(name)['actions'] == ['approve', 'reject', 'close']
     # while it is in review the owner cannot change it
@@ -488,3 +488,51 @@ def test_cli_from_upload_to_import(api, pool, day, tokens, tmp_path, monkeypatch
     assert '问题图片 d.bmp' in out and '加框 1' in out and '赵工（复核人修改）' in out
     assert f'已冻结 {pool}@2' in out and f'成为 {pool}@2' in out
     assert api.batch(name)['status'] == 'imported'
+
+
+def test_the_reviewer_of_a_batch_in_review_can_be_changed_by_its_owner(api, field, make_api, pool, day, tokens, sql):
+    """Sent to the wrong reviewer: the owner (or an administrator) asks another one; the first one can no longer
+    answer, the new one can; the change is a row of the trail and an event. Nobody else may, nor once the batch
+    is out of review, nor to an account that cannot review."""
+    import psycopg
+    admin, other_field = make_api('admin'), make_api('deploy')
+    b = upload(field, pool, day, reviewer=tokens['algo_name'])
+    name = b['name']
+    assert 'reassign' in b['actions'] and 'reassign' not in api.batch(name)['actions']
+    assert 'reassign' in admin.batch(name)['actions']
+    # not the owner: neither another field account nor the reviewer asked
+    for who in (other_field, api):
+        with pytest.raises(ApiError, match='只有上传该批次的账号或管理员可以更换复核人') as e:
+            who.batch_step(name, 'reviewer', {'reviewer': tokens['admin_name']})
+        assert e.value.status == 403
+    # what the new reviewer must be
+    for to, why in ((tokens['field_name'], '不能担任复核人'), (tokens['algo_name'], '已是'), ('', '请选择新的复核人')):
+        with pytest.raises(ApiError, match=why) as e:
+            field.batch_step(name, 'reviewer', {'reviewer': to})
+        assert e.value.status == 400
+    with pytest.raises(ApiError, match='最新版次为第 1 版') as e:
+        field.batch_step(name, 'reviewer', {'reviewer': tokens['admin_name'], 'revision': 2})
+    assert e.value.status == 409
+    b = field.batch_step(name, 'reviewer', {'reviewer': tokens['admin_name'], 'comment': '原复核人出差', 'revision': 1})
+    assert b['status'] == 'review' and b['reviewer'] == tokens['admin_name']
+    step = b['steps'][-1]
+    assert (step['step'], step['step_text'], step['reviewer'], step['comment'], step['actor']) == \
+        ('reassign', '更换复核人', tokens['admin_name'], '原复核人出差', tokens['field_name'])
+    # the first reviewer can no longer answer; it leaves their list of batches to review, the new one's gets it
+    with pytest.raises(ApiError, match='复核人不是您') as e:
+        api.batch_step(name, 'approve', {})
+    assert e.value.status == 403
+    assert name not in [x['name'] for x in api.batches(todo=True)['batches']]
+    assert name in [x['name'] for x in admin.batches(todo=True)['batches']]
+    ev = [e for e in api.events(q=name, limit=50)['events'] if e['action'] == 'batch.reassign']
+    assert ev and ev[0]['detail']['reviewer'] == tokens['admin_name'] and ev[0]['detail']['before'] == tokens['algo_name'] and ev[0]['detail']['comment'] == '原复核人出差'
+    # an administrator may change it too; then the reviewer answers as usual
+    admin.batch_step(name, 'reviewer', {'reviewer': tokens['algo_name']})
+    assert api.batch_step(name, 'approve', {})['status'] == 'approved'
+    with pytest.raises(ApiError, match='只有待复核的批次可以更换复核人') as e:
+        field.batch_step(name, 'reviewer', {'reviewer': tokens['admin_name']})
+    assert e.value.status == 409
+    # the database takes a reassign row only with the reviewer it names
+    with pytest.raises(psycopg.errors.CheckViolation):
+        sql.execute("INSERT INTO batch_steps (batch_id, actor_id, step) SELECT id, owner_id, 'reassign' FROM batches "
+                    "WHERE id = %s", (b['id'],))

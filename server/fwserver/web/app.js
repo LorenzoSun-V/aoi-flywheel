@@ -349,6 +349,7 @@ export const api = {
   reviewers: async () => (await call('/reviewers')).reviewers,
   createBatch: (body) => call('/batches', { method: 'POST', body }),
   reviseBatch: (name, body) => call(`/batches/${encodeURIComponent(name)}/revisions`, { method: 'POST', body }),
+  batchReviewer: (name, body) => call(`/batches/${encodeURIComponent(name)}/reviewer`, { method: 'POST', body }),
   batchStep: (name, step, body) => call(`/batches/${encodeURIComponent(name)}/${step}`, { method: 'POST', body }),
   batchPrelabels: (name) => call(`/batches/${encodeURIComponent(name)}/prelabel`),
   prelabelBatch: (name, body) => call(`/batches/${encodeURIComponent(name)}/prelabel`, { method: 'POST', body }),
@@ -4207,6 +4208,7 @@ async function batchPage(name, query) {
   const show = live();
   let modelVersions = null;  // every model version, read once per visit: the page redraws while a pre-label runs
   let prelabelOpen = query.get('prelabel') === '1';  // the pre-label form, opened from 更多
+  let reassignOpen = false;                           // the form to ask another reviewer, opened from 更多
   const msg = el('div');
   const say = (e) => msg.replaceChildren(errorBox(e));
   const draw = async () => {
@@ -4216,7 +4218,7 @@ async function batchPage(name, query) {
     const newer = Number(query.get('new')) || b.revision;
     const older = Number(query.get('old')) || newer - 1;
     const compare = older >= 1 && older !== newer ? await api.compareBatch(b.name, older, newer) : null;
-    const act = (fn, said) => async () => { try { msg.replaceChildren(); await fn(); await draw(); toastDone(said); } catch (e) { say(e); } };
+    const act = (fn, said) => async () => { try { msg.replaceChildren(); await fn(); await draw(); toastDone(typeof said === 'function' ? said() : said); } catch (e) { say(e); } };  // said: the words, or what makes them once done
     const files = await filesOf(await api.version(b.name, b.revision));
     const images = files.filter((f) => IMAGE_EXTS.has(ext(f.path)));
     const imageHref = (rev, p, q) => hrefOf(['img', b.name, String(rev), p], q);
@@ -4237,6 +4239,7 @@ async function batchPage(name, query) {
     const more = [
       has('revise') && b.status !== 'rejected' ? { text: '上传新版次', icon: 'upload', href: hrefOf(['batch-up', b.name]), id: 'revise' } : null,
       has('prelabel') ? { text: '运行预标注…', icon: 'chip', id: 'prelabel-open', run: () => { prelabelOpen = true; draw(); } } : null,
+      has('reassign') ? { text: '更换复核人…', icon: 'user', id: 'reassign-open', run: () => { reassignOpen = true; draw(); } } : null,
       { text: '复制取回命令', icon: 'copy', copy: `fw batch get ${b.name}`, id: 'copy-get' },
       has('close') ? { text: '关闭批次…', icon: 'remove', id: 'close-batch', run: () => askFirst(head, {
         text: `关闭 ${b.name} 后不再复核或入库，各版内容保留。`, reason: '关闭原因（选填）', go: '确认关闭',
@@ -4273,7 +4276,23 @@ async function batchPage(name, query) {
         el('div', { class: 'row' }, who, el('button', { class: 'primary', id: 'submit-review', onclick: act(async () => {
           if (!who.value) throw new Error('请选择复核人。');
           await api.batchStep(b.name, 'submit', { reviewer: who.value, revision: b.revision });
-        }, `已提交复核，复核人 ${who.value}`) }, `提交第 ${b.revision} 版复核`))));
+        }, () => `已提交复核，复核人 ${who.value}`) }, `提交第 ${b.revision} 版复核`))));
+    }
+    if (has('reassign') && reassignOpen) {
+      const names = (await api.reviewers()).filter((n) => n !== b.reviewer);
+      const who = reviewerSelect(names, '选择新的复核人');
+      const why = el('input', { type: 'text', id: 'reassign-note', placeholder: '说明（选填）' });
+      cards.push(el('div', { class: 'panel form', id: 'reassign-form' },
+        el('h3', {}, `更换第 ${b.revision} 版的复核人`, info([`当前复核人为 ${b.reviewer}。更换后由新的复核人复核，原复核人不能再通过或退回该批次；更换记录写入流转记录。`,
+          '原复核人在本机浏览器中已标记的问题图片不会转给新的复核人。'], '更换复核人说明')),
+        names.length ? el('div', { class: 'row' }, who, why,
+          el('button', { class: 'primary', id: 'reassign-go', onclick: act(async () => {
+            if (!who.value) throw new Error('请选择新的复核人。');
+            await api.batchReviewer(b.name, { reviewer: who.value, comment: why.value.trim(), revision: b.revision });
+            reassignOpen = false;
+          }, () => `已更换复核人为 ${who.value}`) }, '确认更换'),
+          el('button', { type: 'button', onclick: () => { reassignOpen = false; draw(); } }, '取消'))
+          : el('p', { class: 'muted' }, '暂无其他可担任复核人的账号。')));
     }
     const pre = await api.batchPrelabels(b.name);
     if (has('prelabel') && prelabelOpen) {
@@ -4439,7 +4458,7 @@ async function batchPage(name, query) {
       el('td', {}, r.number > 1 ? el('a', { href: hrefOf(['b', b.name], { old: String(r.number - 1), new: String(r.number) }) }, '与上一版比较') : '')));
     const steps = b.steps.slice().reverse().map((s) => el('tr', {},
       timeCell(s.at), el('td', {}, s.actor),
-      el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.job_id ? `（任务 ${s.job_id}）` : '') + (s.step === 'submit' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
+      el('td', {}, s.step_text + (s.revision ? `第 ${s.revision} 版` : '') + (s.job_id ? `（任务 ${s.job_id}）` : '') + (s.step === 'submit' || s.step === 'reassign' ? `，复核人 ${s.reviewer}${s.self_review ? '（自审）' : ''}` : ''),
         s.pool_version ? ['，成为 ', vref(s.pool_version)] : null),
       el('td', { class: 'wrap' }, s.comment, s.images.length ? el('ul', { class: 'problems' }, s.images.map((i) => el('li', {},
         el('a', { class: 'mono', href: imageHref(s.revision, i) }, i),
@@ -4606,6 +4625,7 @@ export function eventText(action, detail) {
     case 'batch.approve': return d.changed_by_reviewer ? '复核人修改后通过' : '';
     case 'batch.import': return join(`入库为 ${d.pool_version} 的 ${d.dir}/`, d.replace ? '替换原有目录' : '');
     case 'batch.close': return said('原因', d.comment);
+    case 'batch.reassign': return join(`复核人由 ${d.before} 改为 ${d.reviewer}${d.self_review ? '（本人复核）' : ''}`, said('说明', d.comment));
     case 'batch.prelabel': return join(d.what, job);
     case 'site.add': case 'line.add': return said('显示名', d.name);
     case 'site.rename': return d.name ? `显示名改为「${d.name}」` : '清除显示名';

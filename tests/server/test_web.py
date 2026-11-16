@@ -1533,6 +1533,33 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
 
 
 @pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
+def test_the_reviewer_of_a_batch_is_changed_in_the_browser(service, tokens, api, make_api, tmp_path):
+    """The owner of a batch sent to the wrong reviewer asks another one from 更多; the trail says so and the
+    first reviewer is no longer offered the review."""
+    from fw import ops
+    from helpers import quiet
+    from test_trainsets import pool, sample_files
+    data = pool(api, tmp_path / 'p', sample_files('2026-09', 2))
+    field = make_api('field')
+    name = ops.upload_batch(field, write_tree(tmp_path / 'b' / '20261116', {'x.png': real_png(64, 32, 3)}), data, '张三',
+                            echo=quiet)['name']
+    field.batch_step(name, 'submit', {'reviewer': tokens['algo_name']})
+    r = subprocess.run(['node', str(WEB_TESTS / 'reassign.cjs'), service.url + '/', tokens['field'], tokens['algo'], name,
+                        tokens['admin_name']], capture_output=True, text=True, timeout=180, cwd=WEB_TESTS)
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = json.loads(r.stdout.strip().splitlines()[-1])
+    assert seen['errors'] == []
+    assert '更换复核人…' in seen['more'] and seen['title'] == '更换第 1 版的复核人'
+    assert tokens['algo_name'] not in seen['choices'] and tokens['admin_name'] in seen['choices']
+    assert seen['unpicked'] == '请选择新的复核人。'
+    assert seen['toast'] == f'已更换复核人为 {tokens["admin_name"]}'
+    assert f'复核人 {tokens["admin_name"]}' in seen['facts']
+    assert len(seen['trail']) == 1 and tokens['admin_name'] in seen['trail'][0] and '原复核人出差' in seen['trail'][0]
+    assert seen['oldReview'] == 0
+    assert api.batch(name)['reviewer'] == tokens['admin_name']
+
+
+@pytest.mark.skipif(not node_with_playwright(), reason='Playwright for node is not installed')
 def test_folders_are_added_from_the_newest_version_and_from_the_overview(service, tokens, api, make_api, tmp_path):
     """上传新增目录 sits beside the title of the newest version of a pool or test set (not an older one) and in
     the ⋯ of their rows on the line's overview; a snapshot's row has no ⋯; a field account sees none of them."""
