@@ -670,8 +670,10 @@ def register_release(conn, user_id: int, name: str, number: str, site: str, line
                      note: str = '') -> dict:
     mv = get_model_version(conn, name, _pinned(name, number))
     site, line = datasets.place(conn, _name(site or mv['site'], '现场'), _name(line or mv['line'], '产线'))
-    repo = _repo(deploy_repo, '部署仓库地址', required=True)
-    commit = _commit(deploy_commit, '部署仓库的提交号')
+    repo = _repo(deploy_repo, '部署仓库地址', required=False)
+    commit = _commit(deploy_commit, '部署仓库的提交号') if _text(deploy_commit, '部署仓库的提交号') else ''
+    if repo and not commit:
+        raise DatasetError(400, '填写部署仓库地址时须同时填写部署仓库的提交号')
     when = _deployed_at(deployed_at)
     gpu = _text(gpu, 'GPU 型号', 100, line=True)
     trt = _text(trt_version, 'TensorRT 版本', 100, line=True)

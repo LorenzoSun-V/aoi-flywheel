@@ -784,7 +784,7 @@ def test_a_release_is_registered_and_read_on_the_web(service, tokens, api, make_
     # the form: the version of the page it came from, the line, the address of the line's last release
     assert seen['form']['model'].startswith(f'{model}@3') and '候选' in seen['form']['model']
     assert seen['form']['repo'] == 'https://git.example.com/deploy/trt.git' and (seen['form']['site'], seen['form']['line']) == (site, 'TX')
-    assert seen['missing'] == '请填写部署仓库的提交号。' and 'git 提交号' in seen['refused']
+    assert seen['missing'] == '填写部署仓库地址时，请同时填写部署仓库的提交号。' and 'git 提交号' in seen['refused']
     first = seen['first']
     assert first['asked'].startswith(f'将登记 {model}@3 在 {site}/TX 的发布') and '引擎 model_fp16.engine' in first['asked']
     assert '不能修改或删除' in first['asked'] and first['toast'] == f'已登记发布 {r2}'

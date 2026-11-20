@@ -2646,7 +2646,8 @@ async function releasesPage(query) {
         current.has(r.ref) ? [' ', el('span', { class: 'tag' }, '当前发布')] : null),
       el('td', {}, mref(r.model_version.ref)),
       timeCell(r.deployed_at),
-      el('td', { title: `部署仓库：${r.deploy_repo}` }, hashText(r.deploy_commit, '提交号', 8)),
+      r.deploy_commit ? el('td', { title: r.deploy_repo ? `部署仓库：${r.deploy_repo}` : null }, hashText(r.deploy_commit, '提交号', 8))
+        : el('td', { class: 'muted' }, '—'),
       env(r) ? textCell(env(r)) : el('td', { class: 'muted' }, '—'),
       el('td', { title: r.engine_size ? `引擎大小 ${sizeText(r.engine_size)}` : null }, r.engine_sha256 ? hashText(r.engine_sha256, '引擎哈希', 8) : el('span', { class: 'muted' }, '—')),
       textCell(r.note)))))
@@ -2699,7 +2700,7 @@ async function releaseNewPage(query) {
     labelChips(mv), tagChips(mv.tags), mv.tags.includes('deprecated') ? el('span', { class: 'bad' }, '该版本已标记为弃用，请确认部署的是该版本。') : null) : pick;
 
   const deployed = el('input', { id: 'release-at', type: 'datetime-local', value: localTime(new Date()) });
-  const repo = el('input', { id: 'release-repo', type: 'text', placeholder: '例如 https://git.example.com/deploy/trt.git' });
+  const repo = el('input', { id: 'release-repo', type: 'text', placeholder: '选填，例如 https://git.example.com/deploy/trt.git' });
   let typed = false;  // the address typed by hand stays when the line changes
   repo.addEventListener('input', () => { typed = true; });
   const fillRepo = async () => {  // the address of the line's previous release, the usual one
@@ -2708,7 +2709,7 @@ async function releaseNewPage(query) {
     if (typed || `${site.value}/${line.value}` !== chosen) return;
     repo.value = list.length ? list[list.length - 1].deploy_repo : '';
   };
-  const commit = el('input', { id: 'release-commit', type: 'text', class: 'mono', placeholder: '部署仓库的提交号，例如 git rev-parse HEAD 的输出' });
+  const commit = el('input', { id: 'release-commit', type: 'text', class: 'mono', placeholder: '选填，例如 git rev-parse HEAD 的输出' });
   const gpu = el('input', { id: 'release-gpu', type: 'text', class: 'short', placeholder: '选填，例如 RTX3070' });
   const trt = el('input', { id: 'release-trt', type: 'text', class: 'short', placeholder: '选填，例如 10.3' });
   const precision = el('select', { id: 'release-precision', class: 'short' }, el('option', { value: '' }, '未填写'),
@@ -2723,7 +2724,7 @@ async function releaseNewPage(query) {
     const ref = mv ? mv.ref : pick.value;
     const file = engine.files[0] || null;
     const problem = !line.value ? '请选择产线。' : !ref ? '请选择部署的模型版本。' : !deployed.value ? '请填写部署时间。'
-      : !repo.value.trim() ? '请填写部署仓库地址。' : !commit.value.trim() ? '请填写部署仓库的提交号。'
+      : repo.value.trim() && !commit.value.trim() ? '填写部署仓库地址时，请同时填写部署仓库的提交号。'
         : file && !file.size ? `引擎文件 ${file.name} 是空文件。` : '';
     if (problem) { result.replaceChildren(errorBox(problem)); return; }
     const place = `${site.value}/${line.value}`;
@@ -2759,8 +2760,8 @@ async function releaseNewPage(query) {
     mv ? el('div', { class: 'label' }, el('span', { class: 'name' }, '模型版本'), model)
       : field('模型版本', model, '该产线各模型的版本，最新登记的在前。标记为候选的版本可考虑部署。'),
     field('部署时间', deployed, '部署成功的时间，按本机的时区；不能晚于服务器的当前时间。'),
-    field('部署仓库地址', repo, '部署所用代码仓库的地址，默认填入该产线上一次发布的地址。地址中不能包含账号或令牌。'),
-    field('部署提交号', commit, '部署仓库的 git 提交号（7 到 64 位十六进制）。'),
+    field('部署仓库地址', repo, '选填。部署所用代码仓库的地址，默认填入该产线上一次发布的地址；填写时须同时填写部署提交号。地址中不能包含账号或令牌。'),
+    field('部署提交号', commit, '选填。部署仓库的 git 提交号（7 到 64 位十六进制）。'),
     field('GPU 型号', gpu, '选填。现场建立引擎所用的 GPU。'),
     field('TensorRT', trt, '选填。现场建立引擎所用的 TensorRT 版本。'),
     field('精度', precision, '选填。现场建立引擎所用的精度。'),

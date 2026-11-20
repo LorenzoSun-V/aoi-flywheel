@@ -1512,15 +1512,19 @@ def parse_time(value: Optional[str]) -> datetime.datetime:
     return t if t.tzinfo is not None else t.astimezone()
 
 
-def register_release(api: Api, model_ref: str, deploy_repo: str, deploy_commit: str,
+def register_release(api: Api, model_ref: str, deploy_repo: str = '', deploy_commit: str = '',
                      deployed_at: Optional[str] = None, site: str = '', line: str = '', gpu: str = '',
                      trt_version: str = '', precision: str = '', engine_file=None, note: str = '',
                      echo: Echo = print) -> dict:
     """Register that a model version was deployed to a production line. The engine the site built from the
-    ONNX stays there; with engine_file only its hash and size are recorded."""
+    ONNX stays there; with engine_file only its hash and size are recorded. The deploy repository and commit
+    are optional, but a repository needs its commit."""
+    deploy_repo, deploy_commit = strip_credentials(deploy_repo), (deploy_commit or '').strip()
+    if deploy_repo and not deploy_commit:
+        raise FwError('写了 --deploy-repo 就要同时写 --deploy-commit（部署仓库的 git 提交号）')
     mv = _pin(api, model_ref)
     when = parse_time(deployed_at)
-    body = {'model': mv['model'], 'number': str(mv['number']), 'site': site, 'line': line, 'deploy_repo': strip_credentials(deploy_repo),
+    body = {'model': mv['model'], 'number': str(mv['number']), 'site': site, 'line': line, 'deploy_repo': deploy_repo,
             'deploy_commit': deploy_commit, 'deployed_at': when.isoformat(timespec='seconds'), 'gpu': gpu,
             'trt_version': trt_version, 'precision': precision, 'note': note}
     if engine_file is not None:
@@ -1689,7 +1693,10 @@ def show_chain(echo: Echo, c: dict) -> None:
     if r:
         echo(f'发布 {r["ref"]}：{r["site"]}/{r["line"]}，部署于 {t_(r["deployed_at"])}，'
              f'{r["created_by"]} 登记于 {t_(r["created_at"])}')
-        echo(f'  部署仓库 {r["deploy_repo"]} @ {r["deploy_commit"]}')
+        if r['deploy_repo'] or r['deploy_commit']:
+            echo(f'  部署仓库 {r["deploy_repo"] or "（没有登记仓库地址）"} @ {r["deploy_commit"]}')
+        else:
+            echo('  部署仓库：没有登记')
         built = [x for x in (r['gpu'], f'TensorRT {r["trt_version"]}' if r['trt_version'] else '',
                              r['precision'].upper()) if x]
         engine = f'；引擎 sha256 {r["engine_sha256"][:12]}（{size_text(r["engine_size"])}，文件在现场）' \

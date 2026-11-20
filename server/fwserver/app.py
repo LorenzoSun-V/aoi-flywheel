@@ -351,8 +351,8 @@ class ReleaseBody(BaseModel):
     number: str           # its version number
     site: str = ''        # default: the model's
     line: str = ''
-    deploy_repo: str
-    deploy_commit: str
+    deploy_repo: str = ''    # optional (0022); a repository needs its commit
+    deploy_commit: str = ''
     deployed_at: str      # ISO 8601 with a time zone
     gpu: str = ''
     trt_version: str = ''
