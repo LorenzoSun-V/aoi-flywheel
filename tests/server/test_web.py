@@ -1525,6 +1525,7 @@ def test_a_batch_from_upload_to_the_pool_in_the_browser(service, tokens, api, tm
     assert '每次只能拖放一个目录' in seen['droppedTwo']
     assert seen['cancelled'] == {'text': seen['droppedTwo'], 'reading': 0}   # choosing, then cancelling, mid-read
     assert seen['dir'] == '20261104' and '标注人姓名' in seen['noLabeler']
+    assert seen['buttonKept'] == 1   # the name filled in after the refusal is enough: no second folder pick
     assert seen['uploaded'] == '待复核' and name in seen['todo']
     assert '退回意见' in seen['noComment']
     assert seen['reviewStart'] == '开始复核' and seen['wrongPath'] == '第 1 版中不存在图片 zz.png。'

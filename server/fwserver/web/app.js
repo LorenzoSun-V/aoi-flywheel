@@ -4172,9 +4172,13 @@ function folderSender({ controls, allowOther, force, onPick, label, ready, done 
       putResult(result, ...present([report, el('div', { class: 'error' }, problem)]));
       return;
     }
+    // a refusal (a field left empty, or the server's answer) shows under the report and keeps the button, so
+    // the form can be put right and sent again without picking the folder a second time
+    const row = el('div', { class: 'row' });
     const go = el('button', { class: 'primary', id: 'send-folder', onclick: () => send(mine, keep, report)
-      .catch((e) => { if (mine === round) putResult(result, ...present([report, errorBox(e)])); }) }, label);
-    putResult(result, ...present([report, el('div', { class: 'row' }, go)]));
+      .catch((e) => { if (mine === round) putResult(result, ...present([report, errorBox(e), row])); }) }, label);
+    row.append(go);
+    putResult(result, ...present([report, row]));
   };
 
   const send = async (mine, keep, report) => {
