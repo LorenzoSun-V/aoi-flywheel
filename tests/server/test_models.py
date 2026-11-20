@@ -679,6 +679,37 @@ def test_releases_and_the_current_model(api, make_api, model, snapshot, tmp_path
     assert status_of(lambda: deploy.current_release(site, 'other')) == 404
 
 
+def test_a_release_may_name_no_deploy_repository_but_a_repository_needs_its_commit(api, make_api, model, snapshot,
+                                                                                    tmp_path):
+    register(api, model, snapshot, files_in(tmp_path))
+    deploy = make_api('deploy')
+    site = f'S{uuid.uuid4().hex[:6]}'
+    register_place(site, 'TX')
+    # what goes to the site is the ONNX: a release records no deploy repository or commit when none is given
+    r = ops.register_release(deploy, f'{model}@1', deployed_at='2026-10-20T10:30+08:00', site=site, line='TX',
+                             gpu='RTX3070', echo=quiet)
+    assert (r['deploy_repo'], r['deploy_commit']) == ('', '') and deploy.release(r['ref'])['deploy_commit'] == ''
+    assert ops.register_release(deploy, f'{model}@1', '', '', '2026-10-20T10:30+08:00', site=site, line='TX',
+                                gpu='RTX3070', echo=quiet)['existing']  # a retry is the same release
+    lines = []
+    ops.show_chain(lines.append, deploy.chain(r['ref']))
+    assert '  部署仓库：没有登记' in lines
+    # a commit alone is recorded; a repository without its commit is refused, by fw and by the server
+    assert ops.register_release(deploy, f'{model}@1', '', 'ABCDEF1', '2026-10-21T10:30+08:00', site=site, line='TX',
+                                echo=quiet)['deploy_commit'] == 'abcdef1'
+    with pytest.raises(ops.FwError, match='--deploy-commit'):
+        ops.register_release(deploy, f'{model}@1', 'https://git.example.com/d.git', ' ', None, site=site, line='TX',
+                             echo=quiet)
+    with pytest.raises(ApiError, match='须同时填写部署仓库的提交号') as e:
+        deploy.register_release({'model': model, 'number': '1', 'site': site, 'line': 'TX',
+                                 'deploy_repo': 'https://git.example.com/d.git', 'deployed_at': '2026-10-22T10:30+08:00'})
+    assert e.value.status == 400
+    # an account that may not register releases still may not
+    assert status_of(lambda: make_api('algo').register_release(
+        {'model': model, 'number': '1', 'site': site, 'line': 'TX', 'deployed_at': '2026-10-22T10:30+08:00'})) == 403
+    assert [x['ref'] for x in deploy.releases(site, 'TX')] == [r['ref'], f'{site}-TX-r2']
+
+
 def test_roles(api, make_api, model, snapshot, tmp_path, cache):
     mv = register(api, model, snapshot, files_in(tmp_path))
     deploy, field, algo = make_api('deploy'), make_api('field'), make_api('algo')
@@ -919,6 +950,16 @@ def test_what_the_database_refuses(sql, registered, snapshot):
             sql.execute("INSERT INTO eval_reports (model_version_id, testset_id, split, fileset_id, metrics, created_by) "
                         "VALUES (%s, %s, '', %s, '{}', %s)",
                         (mv['id'], snapshot['id'], fileset(['metrics.json']), mv['created_by']))
+    with pytest.raises(psycopg.Error, match='releases_deploy_repo_needs_commit'):  # a repository needs its commit (0022)
+        with sql.transaction():
+            sql.execute("INSERT INTO releases (site, line, number, model_version_id, deploy_repo, deploy_commit, "
+                        "deployed_at, created_by) VALUES ('S', 'L', 1, %s, 'git@x:d.git', '', now(), %s)",
+                        (mv['id'], mv['created_by']))
+    with pytest.raises(psycopg.Error, match='releases_deploy_commit_check'):
+        with sql.transaction():
+            sql.execute("INSERT INTO releases (site, line, number, model_version_id, deploy_repo, deploy_commit, "
+                        "deployed_at, created_by) VALUES ('S', 'L', 1, %s, '', 'v1.2', now(), %s)",
+                        (mv['id'], mv['created_by']))
     with pytest.raises(psycopg.Error, match='releases_deploy_repo_check'):
         with sql.transaction():
             sql.execute("INSERT INTO releases (site, line, number, model_version_id, deploy_repo, deploy_commit, "

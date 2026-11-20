@@ -808,7 +808,7 @@ def cmd_release_register(args, api: Api) -> None:
 
 
 def _release_rows(rows):
-    return [[r['ref'], r['model_version']['ref'], _when(r['deployed_at']), r['deploy_commit'][:10],
+    return [[r['ref'], r['model_version']['ref'], _when(r['deployed_at']), r['deploy_commit'][:10] or '-',
              '，'.join(x for x in (r['gpu'], r['trt_version'] and f'TRT {r["trt_version"]}', r['precision'].upper()) if x)
              or '-', r['created_by'], r['note']] for r in rows]
 
@@ -1183,8 +1183,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument('--model', required=True, help='部署的模型版本，例如 SES-TX-detr@3')
     s.add_argument('--site', default='', help='现场；不写就是模型的现场')
     s.add_argument('--line', default='', help='产线；不写就是模型的产线')
-    s.add_argument('--deploy-repo', required=True, help='部署仓库地址（不要带账号和令牌）')
-    s.add_argument('--deploy-commit', required=True, help='部署仓库的 git 提交号')
+    s.add_argument('--deploy-repo', default='', help='可选：部署仓库地址（不要带账号和令牌），和 --deploy-commit 一起写')
+    s.add_argument('--deploy-commit', default='', help='可选：部署仓库的 git 提交号')
     s.add_argument('--deployed-at', help='部署成功的时间，例如 2026-11-20T10:30+08:00；不写就是现在')
     s.add_argument('--gpu', default='', help='现场构建引擎用的 GPU，例如 RTX3070')
     s.add_argument('--trt', default='', help='现场的 TensorRT 版本，例如 10.3')

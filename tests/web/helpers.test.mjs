@@ -408,6 +408,7 @@ test('the record of operations says each one in words and leads to what it was d
     ['eval.register', { model_version: 'M@2', testset_id: 9, split: 'test', job_id: 12 }, '模型版本 M@2；快照划分：test；任务 12'],
     ['prediction_set.register', { model: 'M@2', data: 'SES-TX@5', job_id: 13, images: 120, boxes: 340 }, 'M@2 在 SES-TX@5 上；120 张图片，340 个框；任务 13'],
     ['release.register', { model_version: 'M@2', site: 'SES', line: 'TX', deploy_commit: '0123456789abcdef' }, 'SES / TX 部署 M@2；部署提交号：01234567'],
+    ['release.register', { model_version: 'M@2', site: 'SES', line: 'TX', deploy_commit: '' }, 'SES / TX 部署 M@2'],
     ['job.submit', { kind: 'check', model: null, data: null, runner: 'rfdetr@2' }, '检查推理环境；推理环境：rfdetr@2'],
     ['job.submit', { kind: 'register', model: null, data: null, runner: 'rfdetr', machine: 'gpu-01' }, '登记推理环境；推理环境：rfdetr；GPU 机：gpu-01'],
     ['job.cancel', { was: 'running' }, '运行中，已请求停止'],

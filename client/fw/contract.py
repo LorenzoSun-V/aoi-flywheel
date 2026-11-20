@@ -334,8 +334,9 @@ def task_title(task: str) -> str:
 #  20  a test set follows a pool's class table: 'classes_from' of a dataset, POST /datasets/<name>/classes-from
 #  21  jobs of kind 'register' (POST /jobs, params name, machine, conda_env, src_dir, framework, onnx2engine): the
 #      worker on that machine registers the runner; a job's 'machine'; 'last_check' of GET /runners
+#  22  POST /releases: deploy_repo and deploy_commit are optional ('' when left out); a repository needs its commit
 API_HEADER = 'X-Fw-Api'
-API_LEVEL = 21
+API_LEVEL = 22
 MIN_CLIENT_LEVEL = 1
 MIN_SERVER_LEVEL = 6
 
