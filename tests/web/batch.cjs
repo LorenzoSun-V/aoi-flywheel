@@ -43,8 +43,8 @@ const { dropOn } = require('./drop.cjs');
   await field.click('#send-folder');                       // no labeler yet: refused before anything is made
   await field.waitForSelector('main .error');
   seen.noLabeler = await field.textContent('main .error');
-  await field.setInputFiles('input[type=file]', folder);
-  await field.waitForSelector('#send-folder');
+  // the upload button stays under the message: filling the name in is enough, the folder need not be picked again
+  seen.buttonKept = await field.locator('#send-folder').count();
   await field.fill('#labeler', '张三');
   await field.selectOption('#reviewer', algoName);
   await field.click('#send-folder');
